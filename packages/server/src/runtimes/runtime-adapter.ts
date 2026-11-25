@@ -15,7 +15,8 @@ export interface RuntimeAdapter {
     template: GameTemplate,
     instanceDir: string,
     onLog: (line: string) => void,
-    onExit: (code: number | null) => void
+    onExit: (code: number | null) => void,
+    onStatus?: (status: 'installing' | 'starting') => void
   ): Promise<RuntimeStartResult>;
   stop(instance: ServerInstance, template: GameTemplate, onLog: (line: string) => void): Promise<void>;
   sendCommand(instance: ServerInstance, template: GameTemplate, command: string): Promise<string | null>;

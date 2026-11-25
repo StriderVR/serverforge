@@ -382,7 +382,17 @@ export class ServerOrchestrator extends EventEmitter {
           const cur = this.db.getInstanceById(instance.id);
           if (!cur || cur.status === 'stopping' || cur.status === 'stopped') return;
           const nextStatus = exitCode === 0 ? 'stopped' : 'error';
-          const nextErr = exitCode && exitCode !== 0 ? `Server exited unexpectedly with code ${exitCode}` : null;
+          let nextErr: string | null = null;
+          if (exitCode && exitCode !== 0) {
+            const recentLines = this.logs.getLines(instance.id).slice(-8);
+            const detailLine = [...recentLines]
+              .reverse()
+              .map((entry) => entry.line.trim())
+              .find((line) => line && !line.startsWith('[Native] Process exited'));
+            nextErr = detailLine
+              ? `Server exited unexpectedly with code ${exitCode}: ${detailLine.slice(0, 220)}`
+              : `Server exited unexpectedly with code ${exitCode}`;
+          }
           this.db.deactivateLeasesForInstance(instance.id);
           this.statsCache.delete(instance.id);
           const crashed = this.db.updateInstance(instance.id, {
@@ -391,6 +401,14 @@ export class ServerOrchestrator extends EventEmitter {
           });
           if (crashed) {
             this.emit('instance:update', this.enrichInstance(crashed));
+          }
+        },
+        (nextStatus) => {
+          const cur = this.db.getInstanceById(instance.id);
+          if (!cur || cur.status === nextStatus) return;
+          const updated = this.db.updateInstance(instance.id, { status: nextStatus });
+          if (updated) {
+            this.emit('instance:update', this.enrichInstance(updated));
           }
         }
       );

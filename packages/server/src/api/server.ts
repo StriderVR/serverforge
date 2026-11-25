@@ -78,16 +78,23 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     return normalizeCurseForgeApiKey(settings.curseforgeApiKey || config.curseforgeApiKey || '');
   };
 
-  const runtimeManager = new RuntimeManager(config.runtimeMode, config.toolsDir, queryService, () => ({
-    CF_API_KEY: getEffectiveCurseForgeKey(),
-  }));
+  const curseforge = new CurseForgeService(fetchImpl);
+  const runtimeManager = new RuntimeManager(
+    config.runtimeMode,
+    config.toolsDir,
+    queryService,
+    () => ({
+      CF_API_KEY: getEffectiveCurseForgeKey(),
+    }),
+    curseforge,
+    fetchImpl
+  );
 
   let discordStatusFn = () => ({ connected: false, botTag: null as string | null });
   const telemetry = new TelemetryService(db, runtimeManager, () => discordStatusFn(), config.publicHost);
   const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry);
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
   const discord = new DiscordBotService(config, db, catalog, orchestrator);
-  const curseforge = new CurseForgeService(fetchImpl);
   const smartImport = new SmartImportService();
   const updater = new UpdaterService(config, db, orchestrator, fetchImpl);
   const maintenance = new MaintenanceService(config, db, orchestrator, updater, osRebootExecutor);

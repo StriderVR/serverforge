@@ -1,6 +1,7 @@
 import type { RuntimeKind } from '@serverforge/shared';
 import type { RuntimeMode } from '../config.js';
 import type { QueryService } from '../query/query-service.js';
+import type { CurseForgeService } from '../services/curseforge-service.js';
 import { DockerRuntimeAdapter } from './docker-runtime.js';
 import { MockRuntimeAdapter } from './mock-runtime.js';
 import { NativeProcessRuntimeAdapter } from './native-runtime.js';
@@ -15,10 +16,12 @@ export class RuntimeManager {
     public readonly mode: RuntimeMode,
     toolsDir: string,
     queryService: QueryService,
-    getGlobalVars: () => Record<string, string> = () => ({})
+    getGlobalVars: () => Record<string, string> = () => ({}),
+    curseforge?: CurseForgeService,
+    fetchImpl: typeof fetch = fetch
   ) {
     this.docker = new DockerRuntimeAdapter(queryService, getGlobalVars);
-    this.native = new NativeProcessRuntimeAdapter(toolsDir, queryService);
+    this.native = new NativeProcessRuntimeAdapter(toolsDir, queryService, curseforge, getGlobalVars, fetchImpl);
     this.mock = new MockRuntimeAdapter();
   }
 

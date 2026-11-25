@@ -14,12 +14,15 @@ import {
   Trash2,
 } from 'lucide-react';
 import type { GameTemplate } from '@serverforge/shared';
-import { api, formatRemaining, type InstanceDetail } from '../api';
+import { api, formatRemaining, type InstanceDetail, type InstanceWithJoin } from '../api';
 
 interface InstanceDetailPageProps {
   instanceId: string;
+  instanceSummary?: InstanceWithJoin | null;
   catalog: GameTemplate[];
   liveLogs: Array<{ timestamp: string; line: string }>;
+  autoBoot?: boolean;
+  onAutoBootConsumed?: () => void;
   onBack: () => void;
   onDeleted: () => void;
   onGlobalRefresh: () => void;
@@ -27,8 +30,11 @@ interface InstanceDetailPageProps {
 
 export function InstanceDetailPage({
   instanceId,
+  instanceSummary,
   catalog,
   liveLogs,
+  autoBoot = false,
+  onAutoBootConsumed,
   onBack,
   onDeleted,
   onGlobalRefresh,
@@ -46,6 +52,7 @@ export function InstanceDetailPage({
   const [copied, setCopied] = useState(false);
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
+  const autoBootTriggeredRef = useRef(false);
 
   const loadDetail = async () => {
     try {
@@ -62,8 +69,32 @@ export function InstanceDetailPage({
   };
 
   useEffect(() => {
+    autoBootTriggeredRef.current = false;
     void loadDetail();
   }, [instanceId]);
+
+  // Keep status, lastError, activeLease, and stats live as WebSocket broadcasts instance updates
+  useEffect(() => {
+    if (!instanceSummary) return;
+    setDetail((prev) =>
+      prev && prev.id === instanceSummary.id
+        ? {
+            ...prev,
+            status: instanceSummary.status,
+            lastError: instanceSummary.lastError,
+            activeLease: instanceSummary.activeLease,
+            stats: instanceSummary.stats,
+            joinAddress: instanceSummary.joinAddress,
+          }
+        : prev
+    );
+  }, [
+    instanceSummary?.id,
+    instanceSummary?.status,
+    instanceSummary?.lastError,
+    instanceSummary?.activeLease?.expiresAt,
+    instanceSummary?.joinAddress,
+  ]);
 
   const combinedLogs = detail ? [...detail.logs, ...liveLogs] : liveLogs;
 
@@ -72,6 +103,31 @@ export function InstanceDetailPage({
       logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [combinedLogs.length, tab]);
+
+  const runAction = async (fn: () => Promise<unknown>, successMsg?: string) => {
+    setMessage(null);
+    setBusy(true);
+    try {
+      await fn();
+      if (successMsg) setMessage({ kind: 'success', text: successMsg });
+      await loadDetail();
+      onGlobalRefresh();
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Operation failed' });
+      await loadDetail();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!autoBoot || autoBootTriggeredRef.current || !detail) return;
+    if (detail.status === 'stopped') {
+      autoBootTriggeredRef.current = true;
+      onAutoBootConsumed?.();
+      void runAction(() => api.startInstance(detail.id, { temporary: false }), 'Server started.');
+    }
+  }, [autoBoot, detail?.id, detail?.status]);
 
   if (!detail) {
     return (
@@ -87,21 +143,6 @@ export function InstanceDetailPage({
   const template = catalog.find((t) => t.id === detail.gameId);
   const isRunning = detail.status === 'running';
   const isStopped = detail.status === 'stopped' || detail.status === 'error';
-
-  const runAction = async (fn: () => Promise<unknown>, successMsg?: string) => {
-    setMessage(null);
-    setBusy(true);
-    try {
-      await fn();
-      if (successMsg) setMessage({ kind: 'success', text: successMsg });
-      await loadDetail();
-      onGlobalRefresh();
-    } catch (err) {
-      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Operation failed' });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const handleSendCommand = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -263,6 +304,12 @@ export function InstanceDetailPage({
 
       {message && (
         <div className={`alert ${message.kind === 'error' ? 'alert-error' : 'alert-success'}`}>{message.text}</div>
+      )}
+
+      {detail.lastError && (!message || message.text !== detail.lastError) && (
+        <div className="alert alert-error">
+          <strong>Last Error:</strong> {detail.lastError}
+        </div>
       )}
 
       <div className="tabs">

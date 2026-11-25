@@ -6,7 +6,7 @@ import { CurseForgeBrowser, type SelectedCurseForgePack } from './CurseForgeBrow
 
 interface DeployPageProps {
   catalog: GameTemplate[];
-  onDeployed: (instanceId: string) => void;
+  onDeployed: (instanceId: string, autoBoot?: boolean) => void;
   onGoToSettings: () => void;
 }
 
@@ -53,7 +53,7 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
       CF_PAGE_URL: pack.pageUrl,
       JAVA_IMAGE_TAG: pack.javaTag,
       MOTD: `${pack.packName} — ServerForge`,
-      ...(pack.serverPackZipUrl ? { SERVER_PACK_ZIP: pack.serverPackZipUrl } : {}),
+      ...(pack.serverPackZipUrl !== undefined ? { SERVER_PACK_ZIP: pack.serverPackZipUrl } : {}),
     }));
   };
 
@@ -62,6 +62,9 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
     setError(null);
     setSubmitting(true);
     try {
+      // For Native deployments (which may download large CurseForge packs, SteamCMD apps, or portable Java),
+      // navigate straight to the Live Console and start immediately so progress streams in real time.
+      const deferStartToConsole = startImmediately && runtime === 'native';
       const created = await api.createInstance({
         name: name.trim(),
         gameId: selected.id,
@@ -70,9 +73,9 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
         config,
         autoStart,
         discordEnabled,
-        startImmediately,
+        startImmediately: deferStartToConsole ? false : startImmediately,
       });
-      onDeployed(created.id);
+      onDeployed(created.id, deferStartToConsole);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Deployment failed');
     } finally {
@@ -131,6 +134,14 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
                 onSelectPack={handleSelectCurseForgePack}
                 onGoToSettings={onGoToSettings}
               />
+            )}
+
+            {selected.id === 'minecraft-curseforge' && runtime === 'native' && (
+              <div className="alert alert-info" style={{ marginBottom: 16 }}>
+                <strong>Native Modpack Auto-Setup:</strong> ServerForge will automatically download &amp; extract the
+                CurseForge Server Pack ZIP, install the matching portable Java runtime (Java 8 / 17 / 21) if needed, and
+                stream setup progress to the Live Console. First boot may take 1–3 minutes depending on pack size.
+              </div>
             )}
 
             <div className="form-grid">

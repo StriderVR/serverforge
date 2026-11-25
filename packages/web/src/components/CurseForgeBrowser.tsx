@@ -10,6 +10,7 @@ export interface SelectedCurseForgePack {
   pageUrl: string;
   javaTag: 'java21' | 'java17' | 'java8' | 'latest';
   serverPackZipUrl?: string;
+  hasNativeServerPack?: boolean;
 }
 
 interface CurseForgeBrowserProps {
@@ -34,6 +35,7 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
   const [files, setFiles] = useState<CurseForgeModpackFile[]>([]);
   const [selectedFileId, setSelectedFileId] = useState<string>('');
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [nativePackStatus, setNativePackStatus] = useState<'checking' | 'ready' | 'missing' | null>(null);
   const [urlInput, setUrlInput] = useState('');
   const [urlNotice, setUrlNotice] = useState<string | null>(null);
 
@@ -90,10 +92,28 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
     })();
   }, []);
 
+  const resolvePackUrlForFile = async (
+    mod: CurseForgeModpackSummary,
+    file: CurseForgeModpackFile | undefined
+  ): Promise<{ url?: string; hasPack: boolean }> => {
+    const packFileId = file?.isServerPack ? file.id : file?.serverPackFileId;
+    if (!packFileId) {
+      return { hasPack: false };
+    }
+    try {
+      const res = await api.getCurseForgeServerPackUrl(mod.id, packFileId);
+      if (res.url) return { url: res.url, hasPack: true };
+    } catch {
+      // Fall back to server-side resolution on boot
+    }
+    return { url: file?.downloadUrl ?? undefined, hasPack: true };
+  };
+
   const pickModpack = async (mod: CurseForgeModpackSummary) => {
     setSelectedMod(mod);
     setSelectedFileId('');
     setFiles([]);
+    setNativePackStatus('checking');
 
     // Immediately populate with latest release defaults
     onSelectPack({
@@ -102,14 +122,27 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
       fileId: '',
       pageUrl: mod.websiteUrl || '',
       javaTag: mod.recommendedJavaTag,
+      serverPackZipUrl: '',
     });
 
     setLoadingFiles(true);
     try {
       const modFiles = await api.getCurseForgeFiles(mod.id);
       setFiles(modFiles);
+      const latestWithPack = modFiles.find((f) => Boolean(f.serverPackFileId) || f.isServerPack);
+      const resolved = await resolvePackUrlForFile(mod, latestWithPack);
+      setNativePackStatus(resolved.hasPack ? 'ready' : 'missing');
+      onSelectPack({
+        packName: mod.name,
+        slug: mod.slug,
+        fileId: '',
+        pageUrl: mod.websiteUrl || '',
+        javaTag: latestWithPack?.recommendedJavaTag ?? mod.recommendedJavaTag,
+        serverPackZipUrl: resolved.url ?? '',
+        hasNativeServerPack: resolved.hasPack,
+      });
     } catch {
-      // Non-fatal; user can still deploy latest by slug
+      setNativePackStatus(null);
     } finally {
       setLoadingFiles(false);
     }
@@ -119,27 +152,13 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
     setSelectedFileId(fileIdStr);
     if (!selectedMod) return;
 
-    if (!fileIdStr) {
-      onSelectPack({
-        packName: selectedMod.name,
-        slug: selectedMod.slug,
-        fileId: '',
-        pageUrl: selectedMod.websiteUrl || '',
-        javaTag: selectedMod.recommendedJavaTag,
-      });
-      return;
-    }
+    const file = fileIdStr
+      ? files.find((f) => String(f.id) === fileIdStr)
+      : files.find((f) => Boolean(f.serverPackFileId) || f.isServerPack);
 
-    const file = files.find((f) => String(f.id) === fileIdStr);
-    let serverPackZipUrl: string | undefined;
-    if (file?.serverPackFileId) {
-      try {
-        const res = await api.getCurseForgeServerPackUrl(selectedMod.id, file.serverPackFileId);
-        if (res.url) serverPackZipUrl = res.url;
-      } catch {
-        // Optional for Native mode
-      }
-    }
+    setNativePackStatus('checking');
+    const resolved = await resolvePackUrlForFile(selectedMod, file);
+    setNativePackStatus(resolved.hasPack ? 'ready' : 'missing');
 
     onSelectPack({
       packName: selectedMod.name,
@@ -147,7 +166,8 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
       fileId: fileIdStr,
       pageUrl: selectedMod.websiteUrl || '',
       javaTag: file?.recommendedJavaTag ?? selectedMod.recommendedJavaTag,
-      serverPackZipUrl,
+      serverPackZipUrl: resolved.url ?? '',
+      hasNativeServerPack: resolved.hasPack,
     });
   };
 
@@ -335,6 +355,16 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
         >
           <div style={{ fontSize: 12.5 }}>
             Selected: <strong>{selectedMod.name}</strong> (<code className="mono">{selectedMod.slug}</code>)
+            {nativePackStatus === 'ready' && (
+              <span className="badge badge-running" style={{ marginLeft: 8, fontSize: 10.5 }}>
+                Native Server Pack Ready
+              </span>
+            )}
+            {nativePackStatus === 'missing' && (
+              <span className="badge badge-stopped" style={{ marginLeft: 8, fontSize: 10.5 }}>
+                No Server Pack ZIP (Docker or Manual ZIP)
+              </span>
+            )}
           </div>
           <div style={{ flex: '1 1 240px', maxWidth: 360 }}>
             <select
