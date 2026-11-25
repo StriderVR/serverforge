@@ -12,6 +12,8 @@ import type {
   ImportInspectionResult,
   ImportServerInput,
   MaintenanceStatus,
+  NetworkStatus,
+  PublicHostSource,
   ServerInstance,
   ServerLease,
   StartInstanceInput,
@@ -23,6 +25,9 @@ import type {
 
 export interface InstanceWithJoin extends ServerInstance {
   joinAddress: string;
+  localJoinAddress?: string | null;
+  publicHost?: string;
+  publicHostSource?: PublicHostSource;
 }
 
 export interface InstanceDetail extends InstanceWithJoin {
@@ -74,6 +79,30 @@ export const api = {
     request<SystemSettings>('/api/settings', {
       method: 'PUT',
       body: JSON.stringify(patch),
+    }),
+  getNetworkStatus: (refresh = false) =>
+    request<NetworkStatus>(`/api/network/status${refresh ? '?refresh=1' : ''}`),
+  detectNetwork: () =>
+    request<NetworkStatus>('/api/network/detect', {
+      method: 'POST',
+      body: '{}',
+    }),
+  updateDuckDns: (payload: {
+    domain?: string;
+    token?: string;
+    saveOnSuccess?: boolean;
+    autoUpdate?: boolean;
+  } = {}) =>
+    request<{
+      ok: boolean;
+      saved: boolean;
+      message: string;
+      domain: string;
+      ip: string | null;
+      status: NetworkStatus;
+    }>('/api/network/duckdns/update', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
   getAuditLogs: (limit = 60) => request<AuditLogEntry[]>(`/api/audit?limit=${limit}`),
 
@@ -206,4 +235,21 @@ export function formatRemaining(isoDate: string): string {
     return m > 0 ? `${h}h ${m}m` : `${h}h`;
   }
   return `${diffMin}m`;
+}
+
+export function formatHostSourceLabel(source?: PublicHostSource): string {
+  switch (source) {
+    case 'duckdns':
+    case 'detected_duckdns':
+      return 'DuckDNS';
+    case 'public_ip':
+      return 'Public IP';
+    case 'manual':
+    case 'env':
+      return 'Custom';
+    case 'lan':
+      return 'LAN';
+    default:
+      return 'Local';
+  }
 }

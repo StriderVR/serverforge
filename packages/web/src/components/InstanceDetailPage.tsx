@@ -14,7 +14,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import type { GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
-import { api, formatRemaining, type InstanceDetail } from '../api';
+import { api, formatHostSourceLabel, formatRemaining, type InstanceDetail } from '../api';
 
 interface InstanceDetailPageProps {
   instanceId: string;
@@ -47,6 +47,7 @@ export function InstanceDetailPage({
   const [editLaunchScript, setEditLaunchScript] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedLan, setCopiedLan] = useState(false);
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -222,7 +223,7 @@ export function InstanceDetailPage({
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <button
             type="button"
             className="copy-address"
@@ -232,9 +233,27 @@ export function InstanceDetailPage({
               setTimeout(() => setCopied(false), 1800);
             }}
           >
-            <span>Join: {detail.joinAddress}</span>
+            <span>
+              Join ({formatHostSourceLabel(detail.publicHostSource)}): {detail.joinAddress}
+            </span>
             {copied ? <Check size={13} color="var(--status-online)" /> : <Copy size={13} />}
           </button>
+          {detail.localJoinAddress && (
+            <button
+              type="button"
+              className="copy-address"
+              style={{ fontSize: 12, opacity: 0.85 }}
+              title="Copy local LAN address for computers on the same home network"
+              onClick={() => {
+                navigator.clipboard?.writeText(detail.localJoinAddress!).catch(() => {});
+                setCopiedLan(true);
+                setTimeout(() => setCopiedLan(false), 1800);
+              }}
+            >
+              <span>LAN: {detail.localJoinAddress}</span>
+              {copiedLan ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+            </button>
+          )}
           <span style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
             Ports:{' '}
             <span className="mono">
