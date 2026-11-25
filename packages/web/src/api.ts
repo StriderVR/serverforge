@@ -6,6 +6,7 @@ import type {
   CurseForgeModpackSummary,
   DiscoveredProcess,
   FolderBrowseResult,
+  FolderPickResult,
   GameTemplate,
   HostMetrics,
   ImportInspectionResult,
@@ -122,6 +123,11 @@ export const api = {
 
   // Smart Server Import
   discoverRunningServers: () => request<DiscoveredProcess[]>('/api/import/discover'),
+  pickImportFolder: (initialDir?: string) =>
+    request<FolderPickResult>('/api/import/pick-folder', {
+      method: 'POST',
+      body: JSON.stringify({ initialDir }),
+    }),
   browseFolders: (dir?: string) =>
     request<FolderBrowseResult>(`/api/import/browse${dir !== undefined ? `?dir=${encodeURIComponent(dir)}` : ''}`),
   inspectImportFolder: (folderPath: string) =>

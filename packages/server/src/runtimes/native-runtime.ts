@@ -214,7 +214,15 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
       const scriptPath = path.isAbsolute(script) ? script : path.join(serverDir, script);
       const lower = script.toLowerCase();
       if (lower.endsWith('.bat') || lower.endsWith('.cmd')) {
-        customLaunch = { exe: 'cmd.exe', args: ['/c', scriptPath] };
+        // When relative, run inside cwd=serverDir via `cmd.exe /d /c <script>` to avoid
+        // Windows cmd.exe quote-stripping bugs on folder paths containing spaces.
+        const cmdTarget = path.isAbsolute(script) ? scriptPath : script;
+        customLaunch = { exe: 'cmd.exe', args: ['/d', '/c', cmdTarget] };
+      } else if (lower.endsWith('.ps1')) {
+        customLaunch = {
+          exe: 'powershell.exe',
+          args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+        };
       } else if (lower.endsWith('.sh')) {
         customLaunch = { exe: 'bash', args: [scriptPath] };
       } else if (lower.endsWith('.jar')) {

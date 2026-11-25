@@ -649,6 +649,11 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
   });
 
+  app.post('/api/import/pick-folder', { preHandler: requireAuth }, async (req) => {
+    const body = req.body as { initialDir?: string } | undefined;
+    return smartImport.pickNativeFolder(body?.initialDir);
+  });
+
   app.post('/api/import/inspect', { preHandler: requireAuth }, async (req, reply) => {
     const body = req.body as { folderPath?: string } | undefined;
     if (!body?.folderPath?.trim()) {

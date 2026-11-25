@@ -248,10 +248,26 @@ export interface DiscoveredProcess {
   commandLine: string;
 }
 
+export interface FolderPickResult {
+  supported: boolean;
+  cancelled: boolean;
+  folderPath: string | null;
+  reason?: string;
+}
+
+export interface FolderBrowseEntry {
+  name: string;
+  path: string;
+  isServerFolder?: boolean;
+  serverHint?: string;
+}
+
 export interface FolderBrowseResult {
   currentPath: string;
   parentPath: string | null;
-  directories: Array<{ name: string; path: string }>;
+  directories: FolderBrowseEntry[];
+  currentFolderHint?: string | null;
+  previewFiles?: string[];
 }
 
 export interface ImportLaunchCandidate {
@@ -259,6 +275,13 @@ export interface ImportLaunchCandidate {
   script: string;
   recommended: boolean;
   containsPause?: boolean;
+}
+
+export interface DetectedServerSubfolder {
+  name: string;
+  relativePath: string;
+  path: string;
+  summary: string;
 }
 
 export interface ImportInspectionResult {
@@ -276,6 +299,8 @@ export interface ImportInspectionResult {
   detectedMemoryMb: number;
   detectedConfig: Record<string, string | number | boolean>;
   warnings: string[];
+  autoResolvedFrom?: string | null;
+  detectedSubfolders?: DetectedServerSubfolder[];
 }
 
 export const ImportServerInputSchema = z.object({
