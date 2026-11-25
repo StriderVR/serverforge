@@ -123,11 +123,11 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     ? path.resolve(overrides.dataDir)
     : path.resolve(WORKSPACE_ROOT, process.env.DATA_DIR || 'data');
 
-  const runtimeModeRaw = (overrides.runtimeMode || process.env.RUNTIME_MODE || 'auto').toLowerCase();
+  const runtimeModeRaw = (overrides.runtimeMode || process.env.RUNTIME_MODE || 'native').toLowerCase();
   const runtimeMode: RuntimeMode =
-    runtimeModeRaw === 'docker' || runtimeModeRaw === 'native' || runtimeModeRaw === 'mock'
+    runtimeModeRaw === 'docker' || runtimeModeRaw === 'auto' || runtimeModeRaw === 'mock'
       ? runtimeModeRaw
-      : 'auto';
+      : 'native';
 
   const customCatalogDir = path.join(dataDir, 'custom-games');
   const instancesDir = path.join(dataDir, 'instances');

@@ -108,6 +108,24 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
     try {
       const modFiles = await api.getCurseForgeFiles(mod.id);
       setFiles(modFiles);
+      const latestWithServerPack = modFiles.find((f) => f.serverPackFileId);
+      if (latestWithServerPack?.serverPackFileId) {
+        try {
+          const res = await api.getCurseForgeServerPackUrl(mod.id, latestWithServerPack.serverPackFileId);
+          if (res.url) {
+            onSelectPack({
+              packName: mod.name,
+              slug: mod.slug,
+              fileId: String(latestWithServerPack.id),
+              pageUrl: mod.websiteUrl || '',
+              javaTag: latestWithServerPack.recommendedJavaTag ?? mod.recommendedJavaTag,
+              serverPackZipUrl: res.url,
+            });
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
     } catch {
       // Non-fatal; user can still deploy latest by slug
     } finally {

@@ -247,6 +247,7 @@ export function App() {
         {view === 'deploy' && (
           <DeployPage
             catalog={catalog}
+            metrics={metrics}
             onDeployed={(id) => {
               void refreshData();
               openInstance(id);
@@ -269,6 +270,7 @@ export function App() {
           <InstanceDetailPage
             instanceId={selectedInstanceId}
             catalog={catalog}
+            metrics={metrics}
             liveLogs={liveLogsByInstance[selectedInstanceId] ?? []}
             onBack={() => setView('overview')}
             onDeleted={() => {

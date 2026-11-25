@@ -30,7 +30,7 @@ ports:
     protocol: tcp
     internalOnly: true
 runtimes:
-  preferred: docker
+  preferred: native
   docker:
     image: "thijsvanloef/palworld-server-docker:latest"
     volumes:

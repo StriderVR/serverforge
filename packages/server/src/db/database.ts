@@ -278,6 +278,7 @@ export class AppDatabase {
     id: string,
     patch: Partial<{
       name: string;
+      runtime: RuntimeKind;
       status: InstanceStatus;
       ports: Record<string, number>;
       config: Record<string, string | number | boolean>;
@@ -303,7 +304,7 @@ export class AppDatabase {
     this.db
       .prepare(
         `UPDATE instances SET
-          name = ?, status = ?, ports_json = ?, config_json = ?,
+          name = ?, runtime = ?, status = ?, ports_json = ?, config_json = ?,
           memory_limit_mb = ?, auto_start = ?, discord_enabled = ?,
           container_id = ?, external_dir = ?, launch_script = ?,
           last_error = ?, updated_at = ?, last_started_at = ?
@@ -311,6 +312,7 @@ export class AppDatabase {
       )
       .run(
         updated.name,
+        updated.runtime,
         updated.status,
         JSON.stringify(updated.ports),
         JSON.stringify(updated.config),

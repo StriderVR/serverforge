@@ -176,14 +176,21 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     // Auto-detect standard CurseForge server pack startup scripts
     const isWin = process.platform === 'win32';
     const candidates = isWin
-      ? ['startserver.bat', 'start.bat', 'run.bat', 'ServerStart.bat']
+      ? ['startserver.bat', 'start.bat', 'run.bat', 'ServerStart.bat', 'startserver.ps1', 'run.ps1']
       : ['startserver.sh', 'start.sh', 'run.sh', 'ServerStart.sh'];
     for (const script of candidates) {
       const full = path.join(serverDir, script);
       if (fs.existsSync(full)) {
-        return isWin
-          ? { exe: 'cmd.exe', args: ['/c', full] }
-          : { exe: 'bash', args: [full] };
+        if (!isWin) {
+          return { exe: 'bash', args: [full] };
+        }
+        if (script.toLowerCase().endsWith('.ps1')) {
+          return {
+            exe: 'powershell.exe',
+            args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', full],
+          };
+        }
+        return { exe: 'cmd.exe', args: ['/d', '/c', script] };
       }
     }
     return null;

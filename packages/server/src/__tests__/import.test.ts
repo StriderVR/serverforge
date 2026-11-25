@@ -572,4 +572,41 @@ describe('SmartImportService — Modded Minecraft & Existing Server Import', () 
     const managedMod = path.join(sf.orchestrator.getInstanceDir(imported.id), 'server', 'mods', 'create.jar');
     expect(fs.existsSync(managedMod)).toBe(true);
   });
+
+  it('defaults newly created servers to local native runtime and allows switching an existing docker server to native', async () => {
+    const sf = await makeApp();
+    const { token } = sf.auth.setupInitialAdmin('owner', 'password1234');
+    const headers = { authorization: `Bearer ${token}` };
+
+    // Creating a CurseForge server without specifying runtime defaults to local native
+    const defaultInst = sf.orchestrator.createInstance({
+      name: 'Local ATM10',
+      gameId: 'minecraft-curseforge',
+      config: {},
+      discordEnabled: true,
+      startImmediately: false,
+    });
+    expect(defaultInst.runtime).toBe('native');
+
+    // Existing server created under docker can be switched to native via PUT /api/instances/:id
+    const dockerInst = sf.orchestrator.createInstance({
+      name: 'Legacy Docker MC',
+      gameId: 'minecraft-curseforge',
+      runtime: 'docker',
+      config: {},
+      discordEnabled: true,
+      startImmediately: false,
+    });
+    expect(dockerInst.runtime).toBe('docker');
+
+    const switchRes = await sf.app.inject({
+      method: 'PATCH',
+      url: `/api/instances/${dockerInst.id}/config`,
+      headers,
+      payload: { runtime: 'native' },
+    });
+    expect(switchRes.statusCode).toBe(200);
+    expect(switchRes.json().runtime).toBe('native');
+    expect(sf.orchestrator.getInstance(dockerInst.id)?.runtime).toBe('native');
+  });
 });
