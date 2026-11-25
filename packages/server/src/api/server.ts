@@ -7,6 +7,7 @@ import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import {
   CreateInstanceInputSchema,
+  ImportServerInputSchema,
   StartInstanceInputSchema,
   SystemSettingsSchema,
   UpdateInstanceConfigInputSchema,
@@ -26,6 +27,7 @@ import { EMBEDDED_WEB_ASSETS } from '../embedded-assets.js';
 import { QueryService } from '../query/query-service.js';
 import { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { CurseForgeService, normalizeCurseForgeApiKey } from '../services/curseforge-service.js';
+import { SmartImportService } from '../services/import-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
 import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
@@ -57,6 +59,7 @@ export interface ServerForgeApp {
   leaseReaper: LeaseReaper;
   discord: DiscordBotService;
   curseforge: CurseForgeService;
+  smartImport: SmartImportService;
   updater: UpdaterService;
   maintenance: MaintenanceService;
   close: () => Promise<void>;
@@ -85,6 +88,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
   const discord = new DiscordBotService(config, db, catalog, orchestrator);
   const curseforge = new CurseForgeService(fetchImpl);
+  const smartImport = new SmartImportService();
   const updater = new UpdaterService(config, db, orchestrator, fetchImpl);
   const maintenance = new MaintenanceService(config, db, orchestrator, updater, osRebootExecutor);
   discordStatusFn = () => discord.getStatus();
@@ -630,6 +634,49 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
   });
 
+  // --- Smart Server Import Routes ---
+
+  app.get('/api/import/discover', { preHandler: requireAuth }, async () => {
+    return smartImport.discoverRunningServers();
+  });
+
+  app.get('/api/import/browse', { preHandler: requireAuth }, async (req, reply) => {
+    const q = req.query as { dir?: string };
+    try {
+      return smartImport.browseDirectory(q.dir);
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Unable to browse directory' });
+    }
+  });
+
+  app.post('/api/import/inspect', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { folderPath?: string } | undefined;
+    if (!body?.folderPath?.trim()) {
+      return reply.status(400).send({ error: 'folderPath is required.' });
+    }
+    try {
+      return smartImport.inspectDirectory(body.folderPath);
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Inspection failed' });
+    }
+  });
+
+  app.post('/api/import/execute', { preHandler: requireAuth }, async (req, reply) => {
+    const parsed = ImportServerInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid import configuration', issues: parsed.error.issues });
+    }
+    try {
+      const imported = orchestrator.importInstance(parsed.data, req.authUser?.username || 'admin');
+      return reply.status(201).send({
+        ...imported,
+        joinAddress: orchestrator.getJoinAddress(imported),
+      });
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Import failed' });
+    }
+  });
+
   orchestrator.on('console:line', (data) => {
     broadcast({ type: 'console:line', ...data });
   });
@@ -749,6 +796,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     leaseReaper,
     discord,
     curseforge,
+    smartImport,
     updater,
     maintenance,
     close,

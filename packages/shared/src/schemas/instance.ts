@@ -51,6 +51,8 @@ export const ServerInstanceSchema = z.object({
   autoStart: z.boolean().default(false),
   discordEnabled: z.boolean().default(true),
   containerId: z.string().nullable(),
+  externalDir: z.string().nullable().optional().default(null),
+  launchScript: z.string().nullable().optional().default(null),
   lastError: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -78,6 +80,7 @@ export const UpdateInstanceConfigInputSchema = z.object({
   memoryLimitMb: z.number().int().min(512).max(131072).optional(),
   autoStart: z.boolean().optional(),
   discordEnabled: z.boolean().optional(),
+  launchScript: z.string().nullable().optional(),
   config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
 });
 export type UpdateInstanceConfigInput = z.infer<typeof UpdateInstanceConfigInputSchema>;
@@ -236,6 +239,60 @@ export interface CurseForgeModpackFile {
   downloadUrl: string | null;
   recommendedJavaTag: 'java21' | 'java17' | 'java8' | 'latest';
 }
+
+export interface DiscoveredProcess {
+  pid: number;
+  processName: string;
+  detectedGameId: string;
+  workingDir: string | null;
+  commandLine: string;
+}
+
+export interface FolderBrowseResult {
+  currentPath: string;
+  parentPath: string | null;
+  directories: Array<{ name: string; path: string }>;
+}
+
+export interface ImportLaunchCandidate {
+  label: string;
+  script: string;
+  recommended: boolean;
+  containsPause?: boolean;
+}
+
+export interface ImportInspectionResult {
+  folderPath: string;
+  suggestedName: string;
+  detectedGameId: string;
+  detectedGameName: string;
+  modloader: string | null;
+  modCount: number;
+  worldFolders: string[];
+  hasServerProperties: boolean;
+  rconCurrentlyEnabled: boolean;
+  launchCandidates: ImportLaunchCandidate[];
+  detectedPorts: Record<string, number>;
+  detectedMemoryMb: number;
+  detectedConfig: Record<string, string | number | boolean>;
+  warnings: string[];
+}
+
+export const ImportServerInputSchema = z.object({
+  folderPath: z.string().min(1),
+  mode: z.enum(['link', 'copy']).default('link'),
+  name: z.string().min(2).max(60),
+  gameId: z.string().min(1),
+  runtime: RuntimeKindSchema.default('native'),
+  launchScript: z.string().nullable().optional(),
+  ports: z.record(z.string(), z.number().int().min(1024).max(65535)).optional(),
+  memoryLimitMb: z.number().int().min(512).max(131072).optional(),
+  config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
+  enableRcon: z.boolean().optional().default(true),
+  autoStart: z.boolean().optional().default(false),
+  discordEnabled: z.boolean().optional().default(true),
+});
+export type ImportServerInput = z.input<typeof ImportServerInputSchema>;
 
 export type WsServerEvent =
   | { type: 'console:line'; instanceId: string; line: string; timestamp: string }

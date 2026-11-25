@@ -201,14 +201,36 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
       throw new Error(`Game template "${template.name}" does not define a Native runtime.`);
     }
 
-    const serverDir = path.join(instanceDir, 'server');
+    const serverDir = instance.externalDir
+      ? path.resolve(instance.externalDir)
+      : path.join(instanceDir, 'server');
     fs.mkdirSync(serverDir, { recursive: true });
 
     let customLaunch: { exe: string; args: string[] } | null = null;
-    if (template.id === 'minecraft-curseforge') {
-      customLaunch = await this.prepareCurseForgeServerPack(instance, serverDir, onLog);
-    } else if (nativeSpec.installer === 'steamcmd' && nativeSpec.steamAppId) {
-      await this.ensureSteamCmdInstalled(nativeSpec.steamAppId, serverDir, nativeSpec.steamBeta, onLog);
+    const isWin = process.platform === 'win32';
+
+    if (instance.launchScript) {
+      const script = instance.launchScript.trim();
+      const scriptPath = path.isAbsolute(script) ? script : path.join(serverDir, script);
+      const lower = script.toLowerCase();
+      if (lower.endsWith('.bat') || lower.endsWith('.cmd')) {
+        customLaunch = { exe: 'cmd.exe', args: ['/c', scriptPath] };
+      } else if (lower.endsWith('.sh')) {
+        customLaunch = { exe: 'bash', args: [scriptPath] };
+      } else if (lower.endsWith('.jar')) {
+        customLaunch = {
+          exe: 'java',
+          args: [`-Xms2048M`, `-Xmx${instance.memoryLimitMb}M`, '-jar', scriptPath, 'nogui'],
+        };
+      } else if (fs.existsSync(scriptPath)) {
+        customLaunch = { exe: scriptPath, args: [] };
+      }
+    } else if (!instance.externalDir) {
+      if (template.id === 'minecraft-curseforge') {
+        customLaunch = await this.prepareCurseForgeServerPack(instance, serverDir, onLog);
+      } else if (nativeSpec.installer === 'steamcmd' && nativeSpec.steamAppId) {
+        await this.ensureSteamCmdInstalled(nativeSpec.steamAppId, serverDir, nativeSpec.steamBeta, onLog);
+      }
     }
 
     const vars = buildTemplateVariables({
@@ -217,7 +239,6 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
       memoryLimitMb: instance.memoryLimitMb,
     });
 
-    const isWin = process.platform === 'win32';
     const rawExe = isWin ? nativeSpec.executableWindows : (nativeSpec.executableLinux ?? nativeSpec.executableWindows);
     const defaultExePath =
       path.isAbsolute(rawExe) || (!rawExe.includes('/') && !rawExe.includes('\\'))

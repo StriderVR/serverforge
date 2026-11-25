@@ -1,15 +1,16 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Download, FileCode2, LogOut, PlusCircle, Server, Settings, Wifi, WifiOff } from 'lucide-react';
+import { Download, FileCode2, FolderInput, LogOut, PlusCircle, Server, Settings, Wifi, WifiOff } from 'lucide-react';
 import type { GameTemplate, HostMetrics, UpdaterStatus, WsServerEvent } from '@serverforge/shared';
 import { api, type AuthState, type InstanceWithJoin } from './api';
 import { AuthView } from './components/AuthView';
 import { DeployPage } from './components/DeployPage';
+import { ImportPage } from './components/ImportPage';
 import { InstanceDetailPage } from './components/InstanceDetailPage';
 import { OverviewPage } from './components/OverviewPage';
 import { SettingsPage } from './components/SettingsPage';
 import { TemplatesPage } from './components/TemplatesPage';
 
-type NavView = 'overview' | 'deploy' | 'templates' | 'settings' | 'detail';
+type NavView = 'overview' | 'deploy' | 'import' | 'templates' | 'settings' | 'detail';
 
 export function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -177,6 +178,10 @@ export function App() {
             <PlusCircle size={16} />
             One-Click Deploy
           </button>
+          <button className={`nav-item ${view === 'import' ? 'active' : ''}`} onClick={() => setView('import')}>
+            <FolderInput size={16} />
+            Import Server
+          </button>
           <button className={`nav-item ${view === 'templates' ? 'active' : ''}`} onClick={() => setView('templates')}>
             <FileCode2 size={16} />
             Game Templates
@@ -247,6 +252,16 @@ export function App() {
               openInstance(id);
             }}
             onGoToSettings={() => setView('settings')}
+          />
+        )}
+
+        {view === 'import' && (
+          <ImportPage
+            catalog={catalog}
+            onImported={(id) => {
+              void refreshData();
+              openInstance(id);
+            }}
           />
         )}
 

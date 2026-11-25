@@ -41,6 +41,7 @@ export function InstanceDetailPage({
   const [editMemoryGb, setEditMemoryGb] = useState(4);
   const [editAutoStart, setEditAutoStart] = useState(false);
   const [editDiscord, setEditDiscord] = useState(true);
+  const [editLaunchScript, setEditLaunchScript] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
@@ -54,6 +55,7 @@ export function InstanceDetailPage({
       setEditMemoryGb(Math.round(data.memoryLimitMb / 1024));
       setEditAutoStart(data.autoStart);
       setEditDiscord(data.discordEnabled);
+      setEditLaunchScript(data.launchScript ?? '');
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Failed to load server' });
     }
@@ -110,7 +112,10 @@ export function InstanceDetailPage({
   };
 
   const handleDelete = async () => {
-    if (!window.confirm(`Permanently delete "${detail.name}" and its server files?`)) return;
+    const prompt = detail.externalDir
+      ? `Unlink "${detail.name}" from ServerForge? Your original server files in ${detail.externalDir} will NOT be deleted.`
+      : `Permanently delete "${detail.name}" and its ServerForge-managed server files?`;
+    if (!window.confirm(prompt)) return;
     setBusy(true);
     try {
       await api.deleteInstance(detail.id);
@@ -148,6 +153,12 @@ export function InstanceDetailPage({
           <p className="page-subtitle">
             {template?.name ?? detail.gameId} • Runtime: <span className="mono">{detail.runtime}</span> • Slug:{' '}
             <span className="mono">{detail.slug}</span>
+            {detail.externalDir && (
+              <>
+                {' '}
+                • Linked Folder: <span className="mono">{detail.externalDir}</span>
+              </>
+            )}
           </p>
         </div>
 
@@ -323,6 +334,20 @@ export function InstanceDetailPage({
               />
             </div>
 
+            {detail.runtime === 'native' && (
+              <div className="field">
+                <label htmlFor="edit-launch-script">Custom Startup Script (optional)</label>
+                <input
+                  id="edit-launch-script"
+                  className="input mono"
+                  disabled={!isStopped}
+                  placeholder="e.g., run.bat or startserver.bat"
+                  value={editLaunchScript}
+                  onChange={(e) => setEditLaunchScript(e.target.value)}
+                />
+              </div>
+            )}
+
             <div className="field" style={{ justifyContent: 'center' }}>
               <label className="checkbox-row">
                 <input
@@ -409,6 +434,7 @@ export function InstanceDetailPage({
                       memoryLimitMb: editMemoryGb * 1024,
                       autoStart: editAutoStart,
                       discordEnabled: editDiscord,
+                      launchScript: editLaunchScript.trim() || null,
                       config: editConfig,
                     }),
                   'Configuration saved.'
@@ -419,7 +445,7 @@ export function InstanceDetailPage({
             </button>
 
             <button className="btn btn-danger" disabled={busy} onClick={handleDelete}>
-              <Trash2 size={14} /> Delete Server
+              <Trash2 size={14} /> {detail.externalDir ? 'Unlink Server (Keep Files)' : 'Delete Server'}
             </button>
           </div>
         </div>

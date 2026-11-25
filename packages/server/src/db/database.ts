@@ -52,6 +52,8 @@ export class AppDatabase {
         auto_start INTEGER NOT NULL DEFAULT 0,
         discord_enabled INTEGER NOT NULL DEFAULT 1,
         container_id TEXT,
+        external_dir TEXT,
+        launch_script TEXT,
         last_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -102,6 +104,16 @@ export class AppDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(timestamp DESC);
     `);
+
+    // Safe additive column migrations for existing v1.0/v1.1 SQLite databases
+    const cols = this.db.prepare('PRAGMA table_info(instances)').all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has('external_dir')) {
+      this.db.exec('ALTER TABLE instances ADD COLUMN external_dir TEXT;');
+    }
+    if (!colNames.has('launch_script')) {
+      this.db.exec('ALTER TABLE instances ADD COLUMN launch_script TEXT;');
+    }
   }
 
   close(): void {
@@ -200,6 +212,8 @@ export class AppDatabase {
       autoStart: Boolean(row.auto_start),
       discordEnabled: Boolean(row.discord_enabled),
       containerId: row.container_id ? String(row.container_id) : null,
+      externalDir: row.external_dir ? String(row.external_dir) : null,
+      launchScript: row.launch_script ? String(row.launch_script) : null,
       lastError: row.last_error ? String(row.last_error) : null,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
@@ -233,9 +247,9 @@ export class AppDatabase {
       .prepare(
         `INSERT INTO instances (
           id, slug, name, game_id, runtime, status, ports_json, config_json,
-          memory_limit_mb, auto_start, discord_enabled, container_id, last_error,
-          created_at, updated_at, last_started_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          memory_limit_mb, auto_start, discord_enabled, container_id, external_dir,
+          launch_script, last_error, created_at, updated_at, last_started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         instance.id,
@@ -250,6 +264,8 @@ export class AppDatabase {
         instance.autoStart ? 1 : 0,
         instance.discordEnabled ? 1 : 0,
         instance.containerId,
+        instance.externalDir ?? null,
+        instance.launchScript ?? null,
         instance.lastError,
         instance.createdAt,
         instance.updatedAt,
@@ -269,6 +285,8 @@ export class AppDatabase {
       autoStart: boolean;
       discordEnabled: boolean;
       containerId: string | null;
+      externalDir: string | null;
+      launchScript: string | null;
       lastError: string | null;
       lastStartedAt: string | null;
     }>
@@ -287,7 +305,8 @@ export class AppDatabase {
         `UPDATE instances SET
           name = ?, status = ?, ports_json = ?, config_json = ?,
           memory_limit_mb = ?, auto_start = ?, discord_enabled = ?,
-          container_id = ?, last_error = ?, updated_at = ?, last_started_at = ?
+          container_id = ?, external_dir = ?, launch_script = ?,
+          last_error = ?, updated_at = ?, last_started_at = ?
          WHERE id = ?`
       )
       .run(
@@ -299,6 +318,8 @@ export class AppDatabase {
         updated.autoStart ? 1 : 0,
         updated.discordEnabled ? 1 : 0,
         updated.containerId,
+        updated.externalDir ?? null,
+        updated.launchScript ?? null,
         updated.lastError,
         updated.updatedAt,
         updated.lastStartedAt,

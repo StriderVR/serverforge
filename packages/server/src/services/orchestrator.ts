@@ -7,6 +7,7 @@ import type {
   BackupRecord,
   CreateInstanceInput,
   GameTemplate,
+  ImportServerInput,
   InstanceRuntimeStats,
   RuntimeKind,
   ServerInstance,
@@ -19,6 +20,7 @@ import type { AppConfig } from '../config.js';
 import type { AppDatabase } from '../db/database.js';
 import { ConsoleLogBuffer } from '../runtimes/runtime-adapter.js';
 import type { RuntimeManager } from '../runtimes/runtime-manager.js';
+import { enableRconInServerProperties } from './import-service.js';
 import type { TelemetryService } from './telemetry-service.js';
 
 export class GuardrailError extends Error {
@@ -186,6 +188,8 @@ export class ServerOrchestrator extends EventEmitter {
       autoStart: input.autoStart ?? false,
       discordEnabled: input.discordEnabled ?? true,
       containerId: null,
+      externalDir: null,
+      launchScript: null,
       lastError: null,
       createdAt: now,
       updatedAt: now,
@@ -209,6 +213,82 @@ export class ServerOrchestrator extends EventEmitter {
     return enriched;
   }
 
+  importInstance(input: ImportServerInput, actor = 'admin'): ServerInstance {
+    const template = this.catalog.getTemplate(input.gameId);
+    if (!template) {
+      throw new Error(`Unknown game template: "${input.gameId}"`);
+    }
+
+    const resolvedSource = path.resolve(input.folderPath.trim().replace(/^["']|["']$/g, ''));
+    if (!fs.existsSync(resolvedSource) || !fs.statSync(resolvedSource).isDirectory()) {
+      throw new Error(`Import folder not found: ${resolvedSource}`);
+    }
+
+    const id = crypto.randomUUID();
+    const mode = input.mode ?? 'link';
+    const runtime: RuntimeKind = input.runtime ?? 'native';
+    const ports = this.allocatePorts(template, input.ports);
+    const config = this.buildInitialConfig(template, input.config ?? {});
+    const memoryLimitMb = input.memoryLimitMb ?? Math.round(template.resources.recommendedRamGb * 1024);
+    const now = new Date().toISOString();
+
+    let targetServerDir = resolvedSource;
+    let externalDir: string | null = resolvedSource;
+
+    if (mode === 'copy') {
+      const managedServerDir = path.join(this.getInstanceDir(id), 'server');
+      fs.mkdirSync(managedServerDir, { recursive: true });
+      fs.cpSync(resolvedSource, managedServerDir, { recursive: true, force: true });
+      targetServerDir = managedServerDir;
+      externalDir = null;
+    } else {
+      fs.mkdirSync(this.getInstanceDir(id), { recursive: true });
+    }
+
+    // Safely enable RCON inside server.properties for Minecraft servers if requested
+    const isMinecraft = template.id === 'minecraft' || template.id === 'minecraft-curseforge';
+    if (isMinecraft && input.enableRcon !== false) {
+      const rconPort = ports.rcon ?? 25575;
+      const rconPassword = String(config.RCON_PASSWORD || this.generateSecret(16));
+      config.RCON_PASSWORD = rconPassword;
+      enableRconInServerProperties(targetServerDir, rconPort, rconPassword);
+    }
+
+    const instance: ServerInstance = {
+      id,
+      slug: this.slugify(input.name),
+      name: input.name.trim(),
+      gameId: template.id,
+      runtime,
+      status: 'stopped',
+      ports,
+      config,
+      memoryLimitMb,
+      autoStart: input.autoStart ?? false,
+      discordEnabled: input.discordEnabled ?? true,
+      containerId: null,
+      externalDir,
+      launchScript: input.launchScript?.trim() || null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+      lastStartedAt: null,
+    };
+
+    this.db.createInstance(instance);
+    this.db.addAuditLog({
+      actor,
+      source: 'web',
+      action: 'instance.import',
+      instanceId: instance.id,
+      details: `Imported ${instance.name} (${mode === 'link' ? `linked to ${resolvedSource}` : 'copied to managed storage'})`,
+    });
+
+    const enriched = this.enrichInstance(instance);
+    this.emit('instance:update', enriched);
+    return enriched;
+  }
+
   updateInstanceConfig(
     id: string,
     patch: UpdateInstanceConfigInput,
@@ -225,6 +305,7 @@ export class ServerOrchestrator extends EventEmitter {
       memoryLimitMb: patch.memoryLimitMb ?? existing.memoryLimitMb,
       autoStart: patch.autoStart ?? existing.autoStart,
       discordEnabled: patch.discordEnabled ?? existing.discordEnabled,
+      launchScript: patch.launchScript !== undefined ? patch.launchScript : existing.launchScript,
       config: patch.config ? { ...existing.config, ...patch.config } : existing.config,
     });
     if (!updated) throw new Error('Failed to update instance.');
@@ -538,7 +619,7 @@ export class ServerOrchestrator extends EventEmitter {
     const instance = this.db.getInstanceById(instanceId);
     if (!instance) throw new Error('Server instance not found.');
 
-    const instanceDir = this.getInstanceDir(instance.id);
+    const sourceDir = instance.externalDir ? path.resolve(instance.externalDir) : this.getInstanceDir(instance.id);
     const backupDir = path.join(this.config.backupsDir, instance.id);
     fs.mkdirSync(backupDir, { recursive: true });
 
@@ -552,8 +633,8 @@ export class ServerOrchestrator extends EventEmitter {
       output.on('close', () => resolve());
       archive.on('error', (err) => reject(err));
       archive.pipe(output);
-      if (fs.existsSync(instanceDir)) {
-        archive.directory(instanceDir, false);
+      if (fs.existsSync(sourceDir)) {
+        archive.directory(sourceDir, false);
       }
       void archive.finalize();
     });
@@ -594,9 +675,10 @@ export class ServerOrchestrator extends EventEmitter {
       // Ignore runtime cleanup error if daemon unavailable
     }
 
-    const dir = this.getInstanceDir(instance.id);
-    if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true, force: true });
+    // Only delete ServerForge-managed directory; NEVER touch a user's linked externalDir!
+    const managedDir = this.getInstanceDir(instance.id);
+    if (fs.existsSync(managedDir)) {
+      fs.rmSync(managedDir, { recursive: true, force: true });
     }
 
     this.logs.clear(instance.id);
@@ -605,9 +687,11 @@ export class ServerOrchestrator extends EventEmitter {
     this.db.addAuditLog({
       actor,
       source: 'web',
-      action: 'instance.delete',
+      action: instance.externalDir ? 'instance.unlink' : 'instance.delete',
       instanceId: instance.id,
-      details: `Deleted instance ${instance.name}`,
+      details: instance.externalDir
+        ? `Unlinked ${instance.name} (preserved original files at ${instance.externalDir})`
+        : `Deleted instance ${instance.name}`,
     });
     this.emit('instance:deleted', instance.id);
   }

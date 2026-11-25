@@ -4,8 +4,12 @@ import type {
   CreateInstanceInput,
   CurseForgeModpackFile,
   CurseForgeModpackSummary,
+  DiscoveredProcess,
+  FolderBrowseResult,
   GameTemplate,
   HostMetrics,
+  ImportInspectionResult,
+  ImportServerInput,
   MaintenanceStatus,
   ServerInstance,
   ServerLease,
@@ -115,6 +119,21 @@ export const api = {
     request<CurseForgeModpackFile[]>(`/api/curseforge/mods/${modId}/files`),
   getCurseForgeServerPackUrl: (modId: number, fileId: number) =>
     request<{ url: string | null }>(`/api/curseforge/mods/${modId}/files/${fileId}/download-url`),
+
+  // Smart Server Import
+  discoverRunningServers: () => request<DiscoveredProcess[]>('/api/import/discover'),
+  browseFolders: (dir?: string) =>
+    request<FolderBrowseResult>(`/api/import/browse${dir !== undefined ? `?dir=${encodeURIComponent(dir)}` : ''}`),
+  inspectImportFolder: (folderPath: string) =>
+    request<ImportInspectionResult>('/api/import/inspect', {
+      method: 'POST',
+      body: JSON.stringify({ folderPath }),
+    }),
+  executeImport: (input: ImportServerInput) =>
+    request<InstanceWithJoin>('/api/import/execute', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
 
   getCatalog: () => request<GameTemplate[]>('/api/catalog'),
   getTemplateYaml: (id: string) => request<{ id: string; yaml: string }>(`/api/catalog/${id}/yaml`),
