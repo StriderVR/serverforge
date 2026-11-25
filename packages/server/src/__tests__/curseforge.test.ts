@@ -140,13 +140,26 @@ describe('CurseForge Modded Minecraft Integration', () => {
     expect(env).toContain('CF_FILE_ID=5900123');
   });
 
-  it('proxies CurseForge modpack search and version files through authenticated REST API', async () => {
+  it('verifies key against /v1/mods/search, auto-saves to SQLite, and immediately enables modpack search', async () => {
     const sf = await makeApp();
     const { token } = sf.auth.setupInitialAdmin('owner', 'password1234');
     const headers = { authorization: `Bearer ${token}` };
 
-    sf.db.saveSettings({ curseforgeApiKey: 'test-cf-key' });
+    const validKey = '$2a$10$' + 'x'.repeat(53);
 
+    // Call /api/curseforge/test WITHOUT calling PUT /api/settings first
+    const testRes = await sf.app.inject({
+      method: 'POST',
+      url: '/api/curseforge/test',
+      headers,
+      payload: { apiKey: validKey },
+    });
+    expect(testRes.statusCode).toBe(200);
+    expect(testRes.json().ok).toBe(true);
+    expect(testRes.json().saved).toBe(true);
+    expect(testRes.json().message).toContain('All the Mods 10');
+
+    // Subsequent search uses the auto-saved key right away!
     const searchRes = await sf.app.inject({
       method: 'GET',
       url: '/api/curseforge/search?q=atm10',
@@ -166,5 +179,28 @@ describe('CurseForge Modded Minecraft Integration', () => {
     expect(filesRes.statusCode).toBe(200);
     expect(filesRes.json()[0].id).toBe(5900123);
     expect(filesRes.json()[0].serverPackFileId).toBe(5900124);
+  });
+
+  it('retries once on transient 403 from CurseForge/Cloudflare', async () => {
+    let attempts = 0;
+    const { CurseForgeService } = await import('../services/curseforge-service.js');
+    const cf = new CurseForgeService(
+      (async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return new Response('Forbidden', { status: 403 });
+        }
+        return new Response(
+          JSON.stringify({ data: [{ id: 1, name: 'RLCraft', slug: 'rlcraft' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }) as unknown as typeof fetch,
+      10
+    );
+
+    const validKey = '$2a$10$' + 'z'.repeat(53);
+    const packs = await cf.searchModpacks('rlcraft', validKey);
+    expect(attempts).toBe(2);
+    expect(packs[0].slug).toBe('rlcraft');
   });
 });

@@ -55,28 +55,84 @@ export function buildWindowsSwapScript(params: {
   newExePath: string;
   backupExePath: string;
   workingDir: string;
+  logPath?: string;
 }): string {
   const esc = (p: string) => p.replace(/'/g, "''");
+  const logFile = params.logPath ?? path.join(params.workingDir, 'data', 'updates', 'last-update.log');
   return `$ErrorActionPreference = "Stop"
 $targetPid = ${params.currentPid}
 $currentExe = '${esc(params.currentExePath)}'
 $newExe = '${esc(params.newExePath)}'
 $backupExe = '${esc(params.backupExePath)}'
 $workDir = '${esc(params.workingDir)}'
+$logFile = '${esc(logFile)}'
 
-# Wait up to 20s for old ServerForge.exe process to release file lock
-for ($i = 0; $i -lt 40; $i++) {
-  if (-not (Get-Process -Id $targetPid -ErrorAction SilentlyContinue)) { break }
-  Start-Sleep -Milliseconds 500
+function Write-Log([string]$msg) {
+  $line = "[$(Get-Date -Format 'o')] $msg"
+  Add-Content -Path $logFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
 }
 
-if (Test-Path $currentExe) {
-  Move-Item -Path $currentExe -Destination $backupExe -Force
+function Move-WithRetry([string]$src, [string]$dst, [int]$maxAttempts = 10) {
+  for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+    try {
+      Move-Item -Path $src -Destination $dst -Force
+      return
+    } catch {
+      Write-Log "Move-Item attempt $attempt failed ($src -> $dst): $($_.Exception.Message)"
+      if ($attempt -eq $maxAttempts) { throw }
+      Start-Sleep -Seconds 1
+    }
+  }
 }
-Move-Item -Path $newExe -Destination $currentExe -Force
 
-Start-Process -FilePath $currentExe -WorkingDirectory $workDir
-Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+Write-Log "Starting ServerForge.exe update swap (old PID=$targetPid)"
+
+try {
+  # 1. Wait up to 10s for old ServerForge.exe to exit gracefully, then force-stop if lingering
+  for ($i = 0; $i -lt 20; $i++) {
+    if (-not (Get-Process -Id $targetPid -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if (Get-Process -Id $targetPid -ErrorAction SilentlyContinue) {
+    Write-Log "Old PID $targetPid still alive after 10s; force-terminating to release exe lock."
+    Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+  }
+
+  if (-not (Test-Path $newExe)) {
+    throw "Staged update binary missing at $newExe"
+  }
+
+  # 2. Backup current exe and swap in new exe with retries (handles Defender / NTFS lock delays)
+  $backedUp = $false
+  if (Test-Path $currentExe) {
+    Move-WithRetry $currentExe $backupExe
+    $backedUp = $true
+    Write-Log "Backed up old binary to $backupExe"
+  }
+
+  try {
+    Move-WithRetry $newExe $currentExe
+    Write-Log "Installed new binary at $currentExe"
+  } catch {
+    Write-Log "Swap failed; attempting rollback from $backupExe"
+    if ($backedUp -and (Test-Path $backupExe) -and -not (Test-Path $currentExe)) {
+      Move-Item -Path $backupExe -Destination $currentExe -Force -ErrorAction SilentlyContinue
+    }
+    throw
+  }
+
+  # 3. Clear any Mark-of-the-Web zone flag and relaunch without opening a duplicate browser tab
+  Unblock-File -Path $currentExe -ErrorAction SilentlyContinue
+  $env:NO_OPEN_BROWSER = "1"
+  $proc = Start-Process -FilePath $currentExe -WorkingDirectory $workDir -WindowStyle Normal -PassThru
+  Write-Log "Relaunched ServerForge.exe successfully (new PID=$($proc.Id))"
+} catch {
+  Write-Log "FATAL UPDATE ERROR: $($_.Exception.Message)"
+  exit 1
+} finally {
+  Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+}
 `;
 }
 
@@ -108,11 +164,32 @@ export class UpdaterService {
     return path.join(this.config.updatesDir, 'resume-state.json');
   }
 
+  getUpdateLogPath(): string {
+    return path.join(this.config.updatesDir, 'last-update.log');
+  }
+
+  getLastUpdateLog(): string | null {
+    const logPath = this.getUpdateLogPath();
+    if (!fs.existsSync(logPath)) return null;
+    try {
+      return fs.readFileSync(logPath, 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
+  isUpdating(): boolean {
+    return this.updating;
+  }
+
   /**
    * Snapshots all currently running servers (and their active temporary leases)
    * so they can be automatically rebooted after an app update or PC maintenance reboot.
    */
-  saveResumeState(reason: 'update' | 'reboot', options: { includeRunning?: boolean; postRebootNotify?: boolean } = {}): ResumeStateSnapshot {
+  saveResumeState(
+    reason: 'update' | 'reboot',
+    options: { includeRunning?: boolean; postRebootNotify?: boolean } = {}
+  ): ResumeStateSnapshot {
     const includeRunning = options.includeRunning ?? true;
     const servers: ResumeServerEntry[] = [];
 
@@ -171,7 +248,6 @@ export class UpdaterService {
       return { resumedIds: [], postRebootNotify: false, reason: null };
     }
 
-    // Remove state file immediately so a crash loop cannot occur
     fs.rmSync(statePath, { force: true });
 
     const resumedIds: string[] = [];
@@ -300,11 +376,23 @@ export class UpdaterService {
     }
     this.updating = true;
 
+    const logPath = this.getUpdateLogPath();
+    fs.mkdirSync(this.config.updatesDir, { recursive: true });
+    const appendLog = (msg: string) => {
+      try {
+        fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
+      } catch {
+        // ignore log write failures
+      }
+    };
+    fs.writeFileSync(logPath, `[${new Date().toISOString()}] Update triggered by ${options.actor || 'admin'}\n`, 'utf8');
+
     const report = (
       stage: 'downloading' | 'stopping_servers' | 'installing' | 'restarting' | 'error',
       percent: number,
       message: string
     ) => {
+      appendLog(`[${stage} ${percent}%] ${message}`);
       options.onProgress?.({ stage, percent, message });
     };
 
@@ -340,7 +428,7 @@ export class UpdaterService {
           `Updating ServerForge to v${status.latestVersion}`
         );
 
-        // 3. Prepare atomic Windows EXE swap script
+        // 3. Prepare hardened atomic Windows EXE swap script
         report('installing', 90, 'Preparing ServerForge.exe swap & relaunch...');
         const currentExePath = process.execPath;
         const backupExePath = `${currentExePath}.bak`;
@@ -351,6 +439,7 @@ export class UpdaterService {
           newExePath,
           backupExePath,
           workingDir: WORKSPACE_ROOT,
+          logPath,
         });
         fs.writeFileSync(swapScriptPath, scriptContent, 'utf8');
 
@@ -373,7 +462,7 @@ export class UpdaterService {
             );
             child.unref();
             void options.onShutdownRequested();
-          }, 400);
+          }, 300);
         }
 
         return {
@@ -413,7 +502,7 @@ export class UpdaterService {
       if (!options.dryRun) {
         setTimeout(() => {
           void options.onShutdownRequested();
-        }, 400);
+        }, 300);
       }
 
       return {
@@ -455,7 +544,10 @@ export class UpdaterService {
         const { done, value } = await reader.read();
         if (done) break;
         if (value) {
-          out.write(Buffer.from(value));
+          const ok = out.write(Buffer.from(value));
+          if (!ok) {
+            await new Promise<void>((resolve) => out.once('drain', resolve));
+          }
           downloaded += value.byteLength;
           if (total > 0) {
             const pct = Math.min(100, Math.round((downloaded / total) * 100));

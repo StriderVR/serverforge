@@ -85,6 +85,9 @@ export function App() {
           void refreshData();
         } else if (msg.type === 'updater:progress') {
           setUpdaterProgress({ stage: msg.stage, percent: msg.percent, message: msg.message });
+          if (msg.stage === 'error') {
+            setReconnectingState(null);
+          }
         }
       } catch {
         // ignore malformed frames

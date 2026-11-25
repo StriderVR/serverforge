@@ -55,6 +55,8 @@ export function SettingsPage({
   const [showCfKey, setShowCfKey] = useState(false);
   const [testingCfKey, setTestingCfKey] = useState(false);
   const [cfTestResult, setCfTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [updateLog, setUpdateLog] = useState<string | null>(null);
+  const [showUpdateLog, setShowUpdateLog] = useState(false);
 
   const [inspection, setInspection] = useState<WindowsRebootInspection | null>(null);
   const [scanningReboots, setScanningReboots] = useState(false);
@@ -304,14 +306,49 @@ export function SettingsPage({
               </div>
             )}
 
-            <label className="checkbox-row" style={{ marginTop: 8, paddingTop: 10, borderTop: '1px solid var(--border-subtle)' }}>
-              <input
-                type="checkbox"
-                checked={settings.autoUpdateOnBoot}
-                onChange={(e) => setSettings({ ...settings, autoUpdateOnBoot: e.target.checked })}
-              />
-              <span>Auto-apply new GitHub Releases on PC boot (click Save Settings below)</span>
-            </label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 8, paddingTop: 10, borderTop: '1px solid var(--border-subtle)', flexWrap: 'wrap' }}>
+              <label className="checkbox-row" style={{ padding: 0 }}>
+                <input
+                  type="checkbox"
+                  checked={settings.autoUpdateOnBoot}
+                  onChange={(e) => setSettings({ ...settings, autoUpdateOnBoot: e.target.checked })}
+                />
+                <span>Auto-apply new GitHub Releases on PC boot</span>
+              </label>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={async () => {
+                  if (showUpdateLog) {
+                    setShowUpdateLog(false);
+                    return;
+                  }
+                  const res = await api.getUpdaterLog().catch(() => ({ log: null }));
+                  setUpdateLog(res.log);
+                  setShowUpdateLog(true);
+                }}
+              >
+                {showUpdateLog ? 'Hide Update Log' : 'View Update Log'}
+              </button>
+            </div>
+
+            {showUpdateLog && (
+              <pre
+                style={{
+                  margin: '10px 0 0',
+                  padding: 10,
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--bg-terminal)',
+                  border: '1px solid var(--border-subtle)',
+                  maxHeight: 160,
+                  overflowY: 'auto',
+                  fontSize: 11,
+                  whiteSpace: 'pre-wrap',
+                }}
+              >
+                {updateLog || 'No update log recorded yet.'}
+              </pre>
+            )}
           </div>
         </section>
 
@@ -539,7 +576,7 @@ export function SettingsPage({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-sm"
+                    className="btn btn-primary btn-sm"
                     disabled={testingCfKey}
                     onClick={async () => {
                       setTestingCfKey(true);
@@ -550,6 +587,9 @@ export function SettingsPage({
                           setSettings({ ...settings, curseforgeApiKey: res.normalizedKey });
                         }
                         setCfTestResult({ ok: res.ok, message: res.message });
+                        if (res.ok && res.saved) {
+                          onSaved();
+                        }
                       } catch (err) {
                         setCfTestResult({
                           ok: false,
@@ -560,7 +600,7 @@ export function SettingsPage({
                       }
                     }}
                   >
-                    <CheckCircle2 size={14} /> {testingCfKey ? 'Testing...' : 'Test Key'}
+                    <CheckCircle2 size={14} /> {testingCfKey ? 'Verifying...' : 'Verify & Save Key'}
                   </button>
                 </div>
                 {cfTestResult && (
@@ -581,7 +621,7 @@ export function SettingsPage({
                   >
                     console.curseforge.com
                   </a>{' '}
-                  (API keys tab) — not a UUID author upload token. Click <strong>Save Settings</strong> after testing.
+                  (API keys tab). Clicking <strong>Verify &amp; Save Key</strong> tests live modpack search and saves it automatically.
                 </span>
               </div>
 

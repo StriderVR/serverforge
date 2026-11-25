@@ -69,14 +69,57 @@ jobs:
             if ($html.Content -notmatch "ServerForge") {
               throw "Embedded React Web UI failed to load from ServerForge.exe"
             }
-            if (-not (Test-Path (Join-Path $TestDir "catalog\games\minecraft.yaml"))) {
-              throw "Expected ServerForge.exe to extract built-in game templates on first run"
+            if (-not (Test-Path (Join-Path $TestDir "catalog\games\minecraft-curseforge.yaml"))) {
+              throw "Expected ServerForge.exe to extract built-in minecraft-curseforge.yaml on first run"
             }
-            Write-Host "Standalone ServerForge.exe smoke test PASSED!"
+            Write-Host "Standalone ServerForge.exe boot smoke test PASSED!"
+
+            # Live Windows self-update swap verification: stage a copy as ServerForge.new.exe, run swap script, confirm relaunch!
+            Write-Host "Testing live Windows ServerForge.exe atomic swap & relaunch..."
+            $UpdatesDir = Join-Path $TestDir "data\updates"
+            New-Item -ItemType Directory -Force -Path $UpdatesDir | Out-Null
+            $CurrentExe = Join-Path $TestDir "ServerForge.exe"
+            $NewExe = Join-Path $UpdatesDir "ServerForge.new.exe"
+            $BackupExe = "$CurrentExe.bak"
+            $LogFile = Join-Path $UpdatesDir "last-update.log"
+            $SwapScript = Join-Path $UpdatesDir "apply-update.ps1"
+            Copy-Item $CurrentExe $NewExe -Force
+
+            $genCmd = "import { buildWindowsSwapScript } from './packages/server/dist/services/updater-service.js'; import fs from 'node:fs'; fs.writeFileSync(process.argv[1], buildWindowsSwapScript({ currentPid: Number(process.argv[2]), currentExePath: process.argv[3], newExePath: process.argv[4], backupExePath: process.argv[5], workingDir: process.argv[6], logPath: process.argv[7] }));"
+            node --input-type=module -e $genCmd $SwapScript $proc.Id $CurrentExe $NewExe $BackupExe $TestDir $LogFile
+
+            $swapProc = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $SwapScript) -PassThru -WindowStyle Hidden
+            Start-Sleep -Milliseconds 500
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            $swapProc.WaitForExit(30000) | Out-Null
+
+            if (-not (Test-Path $BackupExe)) {
+              Write-Host (Get-Content $LogFile -Raw -ErrorAction SilentlyContinue)
+              throw "Self-update swap did not create ServerForge.exe.bak"
+            }
+
+            $restartedOk = $false
+            for ($i = 0; $i -lt 25; $i++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $h2 = Invoke-RestMethod -Uri "http://127.0.0.1:3099/api/health" -TimeoutSec 2
+                if ($h2.status -eq "ok") {
+                  Write-Host "Post-swap health check PASSED: $($h2 | ConvertTo-Json -Compress)"
+                  $restartedOk = $true
+                  break
+                }
+              } catch {}
+            }
+            Write-Host "--- last-update.log ---"
+            Get-Content $LogFile -ErrorAction SilentlyContinue
+            if (-not $restartedOk) { throw "Relaunched ServerForge.exe did not respond to /api/health after swap" }
+            Write-Host "Live Windows self-update swap & relaunch PASSED!"
           } finally {
+            Get-Process -Name "ServerForge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             if ($proc -and -not $proc.HasExited) {
-              Stop-Process -Id $proc.Id -Force
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
             }
+            Start-Sleep -Milliseconds 500
             Remove-Item -Path $TestDir -Recurse -Force -ErrorAction SilentlyContinue
           }
 

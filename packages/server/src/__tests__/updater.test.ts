@@ -57,7 +57,7 @@ describe('UpdaterService — One-Click GitHub Self-Updater & Auto-Resume', () =>
     expect(compareSemver('2.0.0', '1.9.9')).toBe(1);
   });
 
-  it('generates a clean Windows PowerShell atomic EXE swap script', () => {
+  it('generates a hardened Windows PowerShell atomic EXE swap script with retries, rollback, logging, and Unblock-File', () => {
     const script = buildWindowsSwapScript({
       currentPid: 4321,
       currentExePath: 'C:\\ServerForge\\ServerForge.exe',
@@ -67,6 +67,11 @@ describe('UpdaterService — One-Click GitHub Self-Updater & Auto-Resume', () =>
     });
     expect(script).toContain('$targetPid = 4321');
     expect(script).toContain('ServerForge.exe.bak');
+    expect(script).toContain('Move-WithRetry');
+    expect(script).toContain('Stop-Process -Id $targetPid -Force');
+    expect(script).toContain('Unblock-File -Path $currentExe');
+    expect(script).toContain('$env:NO_OPEN_BROWSER = "1"');
+    expect(script).toContain('last-update.log');
     expect(script).toContain('Start-Process -FilePath $currentExe');
   });
 

@@ -21,15 +21,19 @@ export function normalizeCurseForgeApiKey(raw: string): string {
   ) {
     key = key.slice(1, -1).trim();
   }
-  // Unescape shell-escaped \$ -> $
   if (key.includes('\\$')) {
     key = key.replace(/\\\$/g, '$');
   }
-  // Unescape Docker Compose $$ -> $
   if (key.startsWith('$$2a$$') || key.startsWith('$$2b$$') || key.startsWith('$$2y$$')) {
     key = key.replace(/\$\$/g, '$');
   }
   return key;
+}
+
+export function maskApiKey(key: string): string {
+  if (!key) return '(empty)';
+  if (key.length <= 12) return `${key.slice(0, 3)}... (${key.length} chars)`;
+  return `${key.slice(0, 7)}...${key.slice(-4)} (${key.length} chars)`;
 }
 
 export function validateCurseForgeKeyFormat(key: string): string | null {
@@ -40,7 +44,7 @@ export function validateCurseForgeKeyFormat(key: string): string | null {
     return 'That looks like a CurseForge Author Upload Token (UUID from legacy/author settings). Modpack search & downloads require a Core API Key starting with "$2a$10$..." from https://console.curseforge.com/ -> API keys.';
   }
   if (!key.startsWith('$2a$') && !key.startsWith('$2b$') && !key.startsWith('$2y$')) {
-    return `Key does not start with "$2a$10$..." (starts with "${key.slice(0, 6)}...", length ${key.length}). Copy the full Core API Key from https://console.curseforge.com/ -> API keys.`;
+    return `Key does not start with "$2a$10$..." (got ${maskApiKey(key)}). Copy the full Core API Key from https://console.curseforge.com/ -> API keys.`;
   }
   if (key.length < 55 || key.length > 65) {
     return `Key length looks truncated (${key.length} chars; standard CurseForge Core API keys are 60 characters starting with "$2a$10$"). Make sure the entire key was copied.`;
@@ -64,7 +68,6 @@ export function recommendJavaTag(gameVersions: string[]): JavaImageTag {
 
   if (mcVersions.length === 0) return 'java21';
 
-  // Sort highest Minecraft version first
   mcVersions.sort((a, b) => (b.minor !== a.minor ? b.minor - a.minor : b.patch - a.patch));
   const latest = mcVersions[0];
 
@@ -121,7 +124,10 @@ interface CfFilesResponse {
 }
 
 export class CurseForgeService {
-  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly retryDelayMs = 1200
+  ) {}
 
   private assertApiKey(rawKey: string): string {
     const key = normalizeCurseForgeApiKey(rawKey);
@@ -139,13 +145,35 @@ export class CurseForgeService {
   private buildHeaders(key: string): Record<string, string> {
     return {
       Accept: 'application/json',
-      'User-Agent': 'ServerForge/1.1.1 (+https://github.com/StriderVR/serverforge)',
+      'User-Agent': 'ServerForge/1.1.2 (+https://github.com/StriderVR/serverforge)',
       'x-api-key': key,
     };
   }
 
+  private async fetchWithRetry(url: string, key: string): Promise<Response> {
+    let lastRes: Response | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await this.fetchImpl(url, {
+        headers: this.buildHeaders(key),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.ok) return res;
+      lastRes = res;
+      // Retry once on transient Cloudflare 403/429/5xx responses
+      if (attempt === 0 && (res.status === 403 || res.status === 429 || res.status >= 500)) {
+        if (this.retryDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, this.retryDelayMs));
+        }
+        continue;
+      }
+      break;
+    }
+    return lastRes!;
+  }
+
   private async buildHttpError(res: Response, key: string): Promise<Error> {
     const bodyText = await res.text().catch(() => '');
+    const keyInfo = maskApiKey(key);
     if (res.status === 403 || res.status === 401) {
       const formatHint = validateCurseForgeKeyFormat(key);
       if (formatHint) {
@@ -153,16 +181,20 @@ export class CurseForgeService {
       }
       if (/cloudflare|just a moment/i.test(bodyText)) {
         return new Error(
-          `Request was blocked by Cloudflare WAF (HTTP ${res.status}). Wait a moment and retry, or check if a VPN/proxy is interfering.`
+          `Request was temporarily blocked by Cloudflare WAF (HTTP ${res.status}). Click Retry or paste the CurseForge modpack URL directly.`
         );
       }
       return new Error(
-        `CurseForge rejected the API key (HTTP ${res.status}). Make sure the key is active in https://console.curseforge.com/ -> API keys (not revoked, and copied without missing characters).`
+        `CurseForge rejected the saved API key [${keyInfo}] (HTTP ${res.status}). Open Settings -> Verify & Save Key to confirm the active key from console.curseforge.com.`
       );
     }
     return new Error(`CurseForge API returned HTTP ${res.status}${bodyText ? `: ${bodyText.slice(0, 140)}` : ''}`);
   }
 
+  /**
+   * Tests the exact `/v1/mods/search` endpoint used by the Modpack Browser so
+   * verification guarantees modpack browsing works immediately.
+   */
   async testApiKey(rawKey: string): Promise<{ ok: boolean; message: string; normalizedKey: string }> {
     const key = normalizeCurseForgeApiKey(rawKey);
     const formatIssue = validateCurseForgeKeyFormat(key);
@@ -170,19 +202,29 @@ export class CurseForgeService {
       return { ok: false, message: formatIssue, normalizedKey: key };
     }
 
-    const res = await this.fetchImpl(`${CURSEFORGE_API_BASE}/games/${MINECRAFT_GAME_ID}`, {
-      headers: this.buildHeaders(key),
-      signal: AbortSignal.timeout(10_000),
+    const params = new URLSearchParams({
+      gameId: String(MINECRAFT_GAME_ID),
+      classId: String(MODPACKS_CLASS_ID),
+      sortField: '2',
+      sortOrder: 'desc',
+      pageSize: '1',
     });
+
+    const res = await this.fetchWithRetry(`${CURSEFORGE_API_BASE}/mods/search?${params.toString()}`, key);
 
     if (!res.ok) {
       const err = await this.buildHttpError(res, key);
       return { ok: false, message: err.message, normalizedKey: key };
     }
 
+    const payload = (await res.json().catch(() => ({}))) as CfSearchResponse;
+    const samplePack = payload.data?.[0]?.name;
+
     return {
       ok: true,
-      message: 'CurseForge API key verified! Modpack search and Docker auto-downloads are ready.',
+      message: samplePack
+        ? `CurseForge API key verified & saved! Modpack search confirmed (e.g., "${samplePack}").`
+        : 'CurseForge API key verified & saved! Modpack search and Docker auto-downloads are ready.',
       normalizedKey: key,
     };
   }
@@ -204,10 +246,7 @@ export class CurseForgeService {
       params.set('searchFilter', query.trim());
     }
 
-    const res = await this.fetchImpl(`${CURSEFORGE_API_BASE}/mods/search?${params.toString()}`, {
-      headers: this.buildHeaders(key),
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await this.fetchWithRetry(`${CURSEFORGE_API_BASE}/mods/search?${params.toString()}`, key);
 
     if (!res.ok) {
       throw await this.buildHttpError(res, key);
@@ -243,10 +282,7 @@ export class CurseForgeService {
       pageSize: String(Math.min(Math.max(pageSize, 1), 50)),
     });
 
-    const res = await this.fetchImpl(`${CURSEFORGE_API_BASE}/mods/${modId}/files?${params.toString()}`, {
-      headers: this.buildHeaders(key),
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await this.fetchWithRetry(`${CURSEFORGE_API_BASE}/mods/${modId}/files?${params.toString()}`, key);
 
     if (!res.ok) {
       throw await this.buildHttpError(res, key);
@@ -271,12 +307,9 @@ export class CurseForgeService {
 
   async getServerPackDownloadUrl(modId: number, serverPackFileId: number, rawKey: string): Promise<string | null> {
     const key = this.assertApiKey(rawKey);
-    const res = await this.fetchImpl(
+    const res = await this.fetchWithRetry(
       `${CURSEFORGE_API_BASE}/mods/${modId}/files/${serverPackFileId}/download-url`,
-      {
-        headers: this.buildHeaders(key),
-        signal: AbortSignal.timeout(10_000),
-      }
+      key
     );
     if (!res.ok) return null;
     const payload = (await res.json()) as { data?: string };

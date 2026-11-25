@@ -14,10 +14,15 @@ export function isSeaExecutable(): boolean {
   try {
     // Node 22 built-in node:sea module detects Single Executable Application mode
     const sea = process.getBuiltinModule?.('node:sea') as { isSea?: () => boolean } | undefined;
-    return Boolean(sea?.isSea?.());
+    if (sea?.isSea?.()) return true;
   } catch {
-    return false;
+    // ignore and check fallback below
   }
+  if (IS_BUNDLED_EXE) {
+    const exeName = path.basename(process.execPath).toLowerCase();
+    return exeName !== 'node' && exeName !== 'node.exe';
+  }
+  return false;
 }
 
 function resolveWorkspaceRoot(): string {

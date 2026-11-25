@@ -34,6 +34,34 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
   const [files, setFiles] = useState<CurseForgeModpackFile[]>([]);
   const [selectedFileId, setSelectedFileId] = useState<string>('');
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [urlInput, setUrlInput] = useState('');
+  const [urlNotice, setUrlNotice] = useState<string | null>(null);
+
+  const handleApplyPastedUrl = () => {
+    setUrlNotice(null);
+    const trimmed = urlInput.trim();
+    const match = trimmed.match(
+      /curseforge\.com\/minecraft\/modpacks\/([a-z0-9-]+)(?:\/(?:files|download)\/(\d+))?/i
+    );
+    if (!match) {
+      setUrlNotice('Paste a CurseForge modpack URL like https://www.curseforge.com/minecraft/modpacks/all-the-mods-10');
+      return;
+    }
+    const slug = match[1].toLowerCase();
+    const fileId = match[2] ?? '';
+    const prettyName = slug
+      .split('-')
+      .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ''))
+      .join(' ');
+    onSelectPack({
+      packName: prettyName,
+      slug,
+      fileId,
+      pageUrl: trimmed,
+      javaTag: 'java21',
+    });
+    setUrlNotice(`Loaded "${prettyName}" (${slug}${fileId ? ` #${fileId}` : ''}) into the deploy form below.`);
+  };
 
   const runSearch = async (searchText: string) => {
     setError(null);
@@ -136,7 +164,7 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
           >
             console.curseforge.com
           </a>
-          ) in Settings to search modpacks here and enable Docker auto-downloads. Or paste a Server Pack ZIP path below.
+          ) in Settings and click <strong>Verify &amp; Save Key</strong> to search modpacks here and enable Docker auto-downloads.
         </div>
         <button type="button" className="btn btn-sm" onClick={onGoToSettings}>
           Open Settings
@@ -180,7 +208,35 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
         </form>
       </div>
 
-      {error && <div className="alert alert-error">{error}</div>}
+      {error && (
+        <div className="alert alert-error" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+          <span>{error}</span>
+          <div className="btn-row">
+            <button type="button" className="btn btn-sm" onClick={() => void runSearch(query)}>
+              Retry
+            </button>
+            <button type="button" className="btn btn-sm" onClick={onGoToSettings}>
+              Open Settings
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          className="input"
+          style={{ flex: '1 1 260px', fontSize: 12.5 }}
+          placeholder="Or paste any CurseForge modpack URL directly (e.g., https://www.curseforge.com/minecraft/modpacks/all-the-mods-10)"
+          value={urlInput}
+          onChange={(e) => setUrlInput(e.target.value)}
+        />
+        <button type="button" className="btn btn-sm" onClick={handleApplyPastedUrl} disabled={!urlInput.trim()}>
+          Use URL
+        </button>
+      </div>
+      {urlNotice && (
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>{urlNotice}</div>
+      )}
 
       <div
         style={{

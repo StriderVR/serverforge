@@ -449,23 +449,76 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     return updater.checkForUpdates(q.refresh === '1' || q.refresh === 'true');
   });
 
+  app.get('/api/updater/log', { preHandler: requireAuth }, async () => ({
+    log: updater.getLastUpdateLog(),
+  }));
+
   app.post('/api/updater/apply', { preHandler: requireAuth }, async (req, reply) => {
     const body = req.body as { resumeRunningServers?: boolean; dryRun?: boolean } | undefined;
-    try {
-      const result = await updater.applyUpdate({
-        resumeRunningServers: body?.resumeRunningServers ?? true,
-        dryRun: Boolean(body?.dryRun),
-        actor: req.authUser?.username || 'admin',
-        onProgress: (ev) => broadcast({ type: 'updater:progress', ...ev }),
-        onShutdownRequested: async () => {
-          await close();
-          process.exit(0);
-        },
-      });
-      return { ok: true, restarting: !body?.dryRun, ...result };
-    } catch (err) {
-      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Update failed' });
+    const resumeRunningServers = body?.resumeRunningServers ?? true;
+    const actor = req.authUser?.username || 'admin';
+
+    const forceShutdown = async () => {
+      // Hard exit timer ensures open browser HTTP/WS keep-alive sockets never block .exe swap
+      const hardExit = setTimeout(() => process.exit(0), 2500);
+      hardExit.unref?.();
+      try {
+        await close();
+      } finally {
+        process.exit(0);
+      }
+    };
+
+    if (body?.dryRun) {
+      try {
+        const result = await updater.applyUpdate({
+          resumeRunningServers,
+          dryRun: true,
+          actor,
+          onProgress: (ev) => broadcast({ type: 'updater:progress', ...ev }),
+          onShutdownRequested: async () => {},
+        });
+        return { ok: true, restarting: false, ...result };
+      } catch (err) {
+        return reply.status(400).send({ error: err instanceof Error ? err.message : 'Update failed' });
+      }
     }
+
+    if (updater.isUpdating()) {
+      return reply.status(409).send({ error: 'An update is already in progress.' });
+    }
+
+    const status = await updater.checkForUpdates(true);
+    if (status.error) {
+      return reply.status(400).send({ error: status.error });
+    }
+    if (!status.latestVersion) {
+      return reply.status(400).send({ error: 'No GitHub Release found to update to.' });
+    }
+    if (status.installMode === 'exe' && !status.exeDownloadUrl) {
+      return reply.status(400).send({ error: `Release v${status.latestVersion} has no ServerForge.exe asset.` });
+    }
+
+    // Run download, server save/stop, and Windows EXE swap asynchronously while streaming progress over WebSocket
+    void updater
+      .applyUpdate({
+        resumeRunningServers,
+        dryRun: false,
+        actor,
+        onProgress: (ev) => broadcast({ type: 'updater:progress', ...ev }),
+        onShutdownRequested: forceShutdown,
+      })
+      .catch((err) => {
+        console.error('[Updater] Background update failed:', err);
+      });
+
+    return reply.status(202).send({
+      ok: true,
+      accepted: true,
+      restarting: true,
+      targetVersion: status.latestVersion,
+      rememberedServers: resumeRunningServers ? status.runningServers.length : 0,
+    });
   });
 
   // --- Maintenance & Managed Daily PC Reboot Routes ---
@@ -517,9 +570,22 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   }));
 
   app.post('/api/curseforge/test', { preHandler: requireAuth }, async (req) => {
-    const body = req.body as { apiKey?: string } | undefined;
+    const body = req.body as { apiKey?: string; saveOnSuccess?: boolean } | undefined;
     const keyToTest = body?.apiKey !== undefined ? body.apiKey : getEffectiveCurseForgeKey();
-    return curseforge.testApiKey(keyToTest);
+    const result = await curseforge.testApiKey(keyToTest);
+    let saved = false;
+    if (result.ok && body?.saveOnSuccess !== false && result.normalizedKey) {
+      db.saveSettings({ curseforgeApiKey: result.normalizedKey }, config.publicHost);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'settings.curseforge_key_verified',
+        instanceId: null,
+        details: 'Verified and saved CurseForge Core API key',
+      });
+      saved = true;
+    }
+    return { ...result, saved };
   });
 
   app.get('/api/curseforge/search', { preHandler: requireAuth }, async (req, reply) => {

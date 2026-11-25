@@ -75,8 +75,9 @@ export const api = {
   // Updater
   getUpdaterStatus: (refresh = false) =>
     request<UpdaterStatus>(`/api/updater/status${refresh ? '?refresh=1' : ''}`),
+  getUpdaterLog: () => request<{ log: string | null }>('/api/updater/log'),
   applyUpdate: (resumeRunningServers = true) =>
-    request<{ ok: boolean; restarting: boolean; targetVersion: string; rememberedServers: number }>(
+    request<{ ok: boolean; accepted?: boolean; restarting: boolean; targetVersion: string; rememberedServers: number }>(
       '/api/updater/apply',
       {
         method: 'POST',
@@ -104,9 +105,9 @@ export const api = {
   // CurseForge
   getCurseForgeStatus: () => request<{ configured: boolean }>('/api/curseforge/status'),
   testCurseForgeKey: (apiKey?: string) =>
-    request<{ ok: boolean; message: string; normalizedKey: string }>('/api/curseforge/test', {
+    request<{ ok: boolean; saved?: boolean; message: string; normalizedKey: string }>('/api/curseforge/test', {
       method: 'POST',
-      body: JSON.stringify(apiKey !== undefined ? { apiKey } : {}),
+      body: JSON.stringify(apiKey !== undefined ? { apiKey, saveOnSuccess: true } : { saveOnSuccess: true }),
     }),
   searchCurseForge: (q: string) =>
     request<CurseForgeModpackSummary[]>(`/api/curseforge/search?q=${encodeURIComponent(q)}`),
