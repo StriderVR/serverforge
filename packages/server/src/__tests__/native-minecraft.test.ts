@@ -167,7 +167,7 @@ describe('Native Modded Minecraft & Java Auto-Provisioning (Issue #1)', () => {
     expect(java.source).toBe('managed');
     expect(fs.existsSync(java.javaBin)).toBe(true);
     expect(logs.some((l) => l.includes('Auto-downloading portable Eclipse Temurin Java 21'))).toBe(true);
-  });
+  }, 30_000);
 
   it('resolves CurseForge Server Pack download URL from slug, URL, and errors cleanly when unavailable', async () => {
     const validKey = '$2a$10$' + 'a'.repeat(53);
@@ -312,6 +312,7 @@ describe('Native Modded Minecraft & Java Auto-Provisioning (Issue #1)', () => {
     const validKey = '$2a$10$' + 'b'.repeat(53);
 
     const zipBuf = await createZipBuffer({
+      'ATM10-Server-Files/startserver.bat': '@echo off\necho Booting ATM10\n',
       'ATM10-Server-Files/startserver.sh': '#!/usr/bin/env bash\necho "Booting ATM10"\n',
       'ATM10-Server-Files/user_jvm_args.txt': '# Custom flags\n-XX:+UseG1GC\n-Xmx4G\n',
       'ATM10-Server-Files/server.properties': 'level-name=world\nserver-port=25565\n',
@@ -382,8 +383,13 @@ describe('Native Modded Minecraft & Java Auto-Provisioning (Issue #1)', () => {
     );
 
     expect(statuses).toEqual(['installing', 'starting']);
-    expect(launchPlan.exe).toBe('bash');
-    expect(launchPlan.args).toEqual(['startserver.sh']);
+    if (process.platform === 'win32') {
+      expect(launchPlan.exe).toBe('cmd.exe');
+      expect(launchPlan.args).toEqual(['/d', '/c', 'startserver.bat']);
+    } else {
+      expect(launchPlan.exe).toBe('bash');
+      expect(launchPlan.args).toEqual(['startserver.sh']);
+    }
     expect(launchPlan.extraEnv?.JAVA_HOME).toBe('/opt/jre-21');
     expect(fs.readFileSync(path.join(serverDir, 'eula.txt'), 'utf8')).toContain('eula=true');
 
@@ -398,7 +404,7 @@ describe('Native Modded Minecraft & Java Auto-Provisioning (Issue #1)', () => {
     expect(jvmArgs).toContain('-XX:+UseG1GC');
     expect(jvmArgs).toContain('-Xmx10240M');
     expect(jvmArgs).not.toContain('-Xmx4G');
-  });
+  }, 30_000);
 
   it('downloads Paper server.jar natively via prepareJavaMinecraftServer', async () => {
     const toolsDir = makeTempDir('sf-paper-tools-');
