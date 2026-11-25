@@ -9,6 +9,7 @@ import type {
   GameTemplate,
   ImportServerInput,
   InstanceRuntimeStats,
+  PublicHostSource,
   RuntimeKind,
   ServerInstance,
   ServerLease,
@@ -21,6 +22,7 @@ import type { AppDatabase } from '../db/database.js';
 import { ConsoleLogBuffer } from '../runtimes/runtime-adapter.js';
 import type { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { enableRconInServerProperties } from './import-service.js';
+import type { NetworkAddressService } from './network-service.js';
 import type { TelemetryService } from './telemetry-service.js';
 
 export class GuardrailError extends Error {
@@ -52,7 +54,8 @@ export class ServerOrchestrator extends EventEmitter {
     private readonly db: AppDatabase,
     private readonly catalog: CatalogService,
     private readonly runtimeManager: RuntimeManager,
-    private readonly telemetry: TelemetryService
+    private readonly telemetry: TelemetryService,
+    private readonly network?: NetworkAddressService
   ) {
     super();
   }
@@ -148,12 +151,34 @@ export class ServerOrchestrator extends EventEmitter {
     return inst ? this.enrichInstance(inst) : null;
   }
 
-  getJoinAddress(instance: ServerInstance): string {
-    const settings = this.db.getSettings(this.config.publicHost);
+  getJoinAddressInfo(instance: ServerInstance): {
+    joinAddress: string;
+    localJoinAddress: string | null;
+    publicHost: string;
+    publicHostSource: PublicHostSource;
+  } {
     const template = this.catalog.getTemplate(instance.gameId);
     const primarySpec = template?.ports.find((p) => p.primary) ?? template?.ports[0];
     const port = primarySpec ? instance.ports[primarySpec.key] : Object.values(instance.ports)[0];
-    return `${settings.publicHost}:${port}`;
+
+    const resolved = this.network
+      ? this.network.resolveEffectiveHost()
+      : { host: this.db.getSettings(this.config.publicHost).publicHost, source: 'fallback' as PublicHostSource };
+
+    const lanIp = this.network?.getLanIp() ?? null;
+    const localJoinAddress =
+      lanIp && lanIp.toLowerCase() !== resolved.host.toLowerCase() ? `${lanIp}:${port}` : null;
+
+    return {
+      joinAddress: `${resolved.host}:${port}`,
+      localJoinAddress,
+      publicHost: resolved.host,
+      publicHostSource: resolved.source,
+    };
+  }
+
+  getJoinAddress(instance: ServerInstance): string {
+    return this.getJoinAddressInfo(instance).joinAddress;
   }
 
   createInstance(input: CreateInstanceInput, actor = 'admin', source: 'web' | 'discord' = 'web'): ServerInstance {

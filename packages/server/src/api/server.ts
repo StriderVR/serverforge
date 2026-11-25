@@ -30,6 +30,7 @@ import { CurseForgeService, normalizeCurseForgeApiKey } from '../services/cursef
 import { SmartImportService } from '../services/import-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
 import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
+import { NetworkAddressService, normalizeDuckDnsDomain } from '../services/network-service.js';
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
 import { TelemetryService } from '../services/telemetry-service.js';
 import { UpdaterService } from '../services/updater-service.js';
@@ -45,6 +46,8 @@ declare module 'fastify' {
 export interface CreateAppOptions extends Partial<AppConfig> {
   fetchImpl?: typeof fetch;
   osRebootExecutor?: OsRebootExecutor;
+  detectDuckDnsDomainsImpl?: () => Promise<string[]>;
+  detectLanIpImpl?: () => string | null;
 }
 
 export interface ServerForgeApp {
@@ -55,6 +58,7 @@ export interface ServerForgeApp {
   catalog: CatalogService;
   runtimeManager: RuntimeManager;
   telemetry: TelemetryService;
+  network: NetworkAddressService;
   orchestrator: ServerOrchestrator;
   leaseReaper: LeaseReaper;
   discord: DiscordBotService;
@@ -66,7 +70,7 @@ export interface ServerForgeApp {
 }
 
 export async function createServerForgeApp(overrides: CreateAppOptions = {}): Promise<ServerForgeApp> {
-  const { fetchImpl, osRebootExecutor, ...configOverrides } = overrides;
+  const { fetchImpl, osRebootExecutor, detectDuckDnsDomainsImpl, detectLanIpImpl, ...configOverrides } = overrides;
   const config = loadConfig(configOverrides);
   const db = new AppDatabase(config.dbPath);
   const auth = new AuthService(db, config.jwtSecret);
@@ -92,7 +96,12 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
 
   let discordStatusFn = () => ({ connected: false, botTag: null as string | null });
   const telemetry = new TelemetryService(db, runtimeManager, () => discordStatusFn(), config.publicHost);
-  const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry);
+  const network = new NetworkAddressService(config, db, {
+    fetchImpl,
+    detectDuckDnsDomainsImpl,
+    detectLanIpImpl,
+  });
+  const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry, network);
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
   const discord = new DiscordBotService(config, db, catalog, orchestrator);
   const smartImport = new SmartImportService();
@@ -218,6 +227,9 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     if (typeof patch.curseforgeApiKey === 'string') {
       patch.curseforgeApiKey = normalizeCurseForgeApiKey(patch.curseforgeApiKey);
     }
+    if (typeof patch.duckdnsDomain === 'string' && patch.duckdnsDomain.trim()) {
+      patch.duckdnsDomain = normalizeDuckDnsDomain(patch.duckdnsDomain) || patch.duckdnsDomain.trim();
+    }
     const updated = db.saveSettings(patch, config.publicHost);
     db.addAuditLog({
       actor: req.authUser?.username || 'admin',
@@ -227,6 +239,54 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       details: 'Updated system & Discord guardrails settings',
     });
     return updated;
+  });
+
+  // --- Network & DuckDNS Public Address Discovery ---
+
+  app.get('/api/network/status', { preHandler: requireAuth }, async (req) => {
+    const q = req.query as { refresh?: string };
+    return network.getStatus(q.refresh === '1' || q.refresh === 'true');
+  });
+
+  app.post('/api/network/detect', { preHandler: requireAuth }, async () => {
+    return network.refresh(true);
+  });
+
+  app.post('/api/network/duckdns/update', { preHandler: requireAuth }, async (req) => {
+    const body = req.body as
+      | { domain?: string; token?: string; saveOnSuccess?: boolean; autoUpdate?: boolean }
+      | undefined;
+    const result = await network.updateDuckDns({
+      domain: body?.domain,
+      token: body?.token,
+    });
+    let saved = false;
+    if (result.ok && body?.saveOnSuccess !== false) {
+      const settingsPatch: Partial<import('@serverforge/shared').SystemSettings> = {
+        duckdnsDomain: result.domain,
+        publicHostMode: 'duckdns',
+      };
+      if (body?.token !== undefined && body.token.trim()) {
+        settingsPatch.duckdnsToken = body.token.trim();
+      }
+      if (body?.autoUpdate !== undefined) {
+        settingsPatch.duckdnsAutoUpdate = Boolean(body.autoUpdate);
+      }
+      db.saveSettings(settingsPatch, config.publicHost);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'settings.duckdns_updated',
+        instanceId: null,
+        details: `Verified and updated DuckDNS domain ${result.domain}`,
+      });
+      saved = true;
+    }
+    return {
+      ...result,
+      saved,
+      status: network.getStatusSync(),
+    };
   });
 
   app.get('/api/audit', { preHandler: requireAuth }, async (req) => {
@@ -284,13 +344,13 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
 
   // --- Server Instances ---
 
+  const withJoinInfo = <T extends import('@serverforge/shared').ServerInstance>(inst: T) => ({
+    ...inst,
+    ...orchestrator.getJoinAddressInfo(inst),
+  });
+
   app.get('/api/instances', { preHandler: requireAuth }, async () => {
-    const settings = db.getSettings(config.publicHost);
-    return orchestrator.listInstances().map((inst) => ({
-      ...inst,
-      joinAddress: orchestrator.getJoinAddress(inst),
-      publicHost: settings.publicHost,
-    }));
+    return orchestrator.listInstances().map((inst) => withJoinInfo(inst));
   });
 
   app.get('/api/instances/:id', { preHandler: requireAuth }, async (req, reply) => {
@@ -298,8 +358,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const inst = orchestrator.getInstance(id);
     if (!inst) return reply.status(404).send({ error: 'Instance not found' });
     return {
-      ...inst,
-      joinAddress: orchestrator.getJoinAddress(inst),
+      ...withJoinInfo(inst),
       logs: orchestrator.logs.getLines(inst.id),
       backups: db.listBackups(inst.id),
     };
@@ -320,10 +379,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
           source: 'web',
         });
       }
-      return reply.status(201).send({
-        ...inst,
-        joinAddress: orchestrator.getJoinAddress(inst),
-      });
+      return reply.status(201).send(withJoinInfo(inst));
     } catch (err) {
       const status = err instanceof GuardrailError ? 409 : 400;
       return reply.status(status).send({ error: err instanceof Error ? err.message : 'Failed to create instance' });
@@ -338,7 +394,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
     try {
       const updated = orchestrator.updateInstanceConfig(id, parsed.data, req.authUser?.username || 'admin');
-      return { ...updated, joinAddress: orchestrator.getJoinAddress(updated) };
+      return withJoinInfo(updated);
     } catch (err) {
       return reply.status(400).send({ error: err instanceof Error ? err.message : 'Update failed' });
     }
@@ -356,7 +412,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
         requestedBy: parsed.data.requestedBy || req.authUser?.username || 'admin',
         source: 'web',
       });
-      return { ...started, joinAddress: orchestrator.getJoinAddress(started) };
+      return withJoinInfo(started);
     } catch (err) {
       const status = err instanceof GuardrailError ? 409 : 400;
       return reply.status(status).send({ error: err instanceof Error ? err.message : 'Failed to start server' });
@@ -367,7 +423,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const { id } = req.params as { id: string };
     try {
       const stopped = await orchestrator.stopInstance(id, req.authUser?.username || 'admin', 'web');
-      return { ...stopped, joinAddress: orchestrator.getJoinAddress(stopped) };
+      return withJoinInfo(stopped);
     } catch (err) {
       return reply.status(400).send({ error: err instanceof Error ? err.message : 'Failed to stop server' });
     }
@@ -377,7 +433,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const { id } = req.params as { id: string };
     try {
       const restarted = await orchestrator.restartInstance(id, req.authUser?.username || 'admin');
-      return { ...restarted, joinAddress: orchestrator.getJoinAddress(restarted) };
+      return withJoinInfo(restarted);
     } catch (err) {
       const status = err instanceof GuardrailError ? 409 : 400;
       return reply.status(status).send({ error: err instanceof Error ? err.message : 'Failed to restart server' });
@@ -680,10 +736,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
     try {
       const imported = orchestrator.importInstance(parsed.data, req.authUser?.username || 'admin');
-      return reply.status(201).send({
-        ...imported,
-        joinAddress: orchestrator.getJoinAddress(imported),
-      });
+      return reply.status(201).send(withJoinInfo(imported));
     } catch (err) {
       return reply.status(400).send({ error: err instanceof Error ? err.message : 'Import failed' });
     }
@@ -783,6 +836,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
 
   const close = async () => {
     clearInterval(metricsTimer);
+    network.stop();
     leaseReaper.stop();
     maintenance.stop();
     await discord.stop();
@@ -804,6 +858,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     catalog,
     runtimeManager,
     telemetry,
+    network,
     orchestrator,
     leaseReaper,
     discord,

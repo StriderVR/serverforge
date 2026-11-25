@@ -179,7 +179,16 @@ export class AppDatabase {
       return SystemSettingsSchema.parse({ publicHost: defaultPublicHost });
     }
     try {
-      return SystemSettingsSchema.parse(JSON.parse(row.value_json));
+      const parsed = SystemSettingsSchema.parse(JSON.parse(row.value_json));
+      const trimmedDefault = defaultPublicHost.trim();
+      if (
+        (!parsed.publicHost.trim() || parsed.publicHost.trim().toLowerCase() === 'localhost') &&
+        trimmedDefault &&
+        trimmedDefault.toLowerCase() !== 'localhost'
+      ) {
+        return { ...parsed, publicHost: trimmedDefault };
+      }
+      return parsed;
     } catch {
       return SystemSettingsSchema.parse({ publicHost: defaultPublicHost });
     }

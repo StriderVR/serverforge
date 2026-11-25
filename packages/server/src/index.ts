@@ -20,6 +20,7 @@ function openBrowserOnWindows(url: string): void {
 async function main() {
   const sf = await createServerForgeApp();
   await sf.orchestrator.reconcileOnStartup();
+  await sf.network.start(3000);
   sf.leaseReaper.start(30_000);
   sf.maintenance.start(60_000);
   await sf.discord.start();
@@ -27,11 +28,13 @@ async function main() {
   await sf.app.listen({ host: sf.config.host, port: sf.config.port });
 
   const localUrl = `http://${sf.config.host === '0.0.0.0' ? 'localhost' : sf.config.host}:${sf.config.port}`;
+  const netStatus = sf.network.getStatusSync();
 
   console.log('');
   console.log('======================================================');
   console.log(`  ServerForge v${sf.config.appVersion} Control Plane is ONLINE`);
   console.log(`  Dashboard:    ${localUrl}`);
+  console.log(`  Public Host:  ${netStatus.effectiveHost} (${netStatus.effectiveHostSource})`);
   console.log(`  Data Folder:  ${WORKSPACE_ROOT}`);
   console.log(`  Runtime Mode: ${sf.config.runtimeMode}`);
   console.log(`  Templates:    ${sf.catalog.listTemplates().length} games loaded`);

@@ -15,7 +15,7 @@ import {
   Timer,
 } from 'lucide-react';
 import type { GameTemplate, HostMetrics } from '@serverforge/shared';
-import { api, formatRemaining, type InstanceWithJoin } from '../api';
+import { api, formatHostSourceLabel, formatRemaining, type InstanceWithJoin } from '../api';
 
 interface OverviewPageProps {
   metrics: HostMetrics | null;
@@ -218,9 +218,30 @@ export function OverviewPage({
                   type="button"
                   className="copy-address"
                   onClick={() => copyAddress(inst.id, inst.joinAddress)}
-                  title="Copy server join address"
+                  title={
+                    inst.localJoinAddress
+                      ? `Copy public join address (LAN: ${inst.localJoinAddress})`
+                      : 'Copy server join address'
+                  }
                 >
-                  <span>{inst.joinAddress}</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{inst.joinAddress}</span>
+                    {inst.publicHostSource && (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          padding: '1px 5px',
+                          borderRadius: 4,
+                          background: 'var(--bg-elevated)',
+                          color: 'var(--text-muted)',
+                          border: '1px solid var(--border-subtle)',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {formatHostSourceLabel(inst.publicHostSource)}
+                      </span>
+                    )}
+                  </span>
                   {copiedId === inst.id ? <Check size={13} color="var(--status-online)" /> : <Copy size={13} />}
                 </button>
 

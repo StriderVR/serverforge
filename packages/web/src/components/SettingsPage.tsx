@@ -5,6 +5,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  Globe,
   Package,
   Power,
   RefreshCw,
@@ -17,11 +18,13 @@ import type {
   AuditLogEntry,
   HostMetrics,
   MaintenanceStatus,
+  NetworkStatus,
+  PublicHostMode,
   SystemSettings,
   UpdaterStatus,
   WindowsRebootInspection,
 } from '@serverforge/shared';
-import { api } from '../api';
+import { api, formatHostSourceLabel } from '../api';
 
 interface SettingsPageProps {
   metrics: HostMetrics | null;
@@ -42,6 +45,7 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [maintenance, setMaintenance] = useState<MaintenanceStatus | null>(null);
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(null);
   const [allowedRolesText, setAllowedRolesText] = useState('');
   const [adminRolesText, setAdminRolesText] = useState('');
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
@@ -51,6 +55,11 @@ export function SettingsPage({
   const [applyingUpdate, setApplyingUpdate] = useState(false);
   const [resumeOnUpdate, setResumeOnUpdate] = useState(true);
   const [rebootingPc, setRebootingPc] = useState(false);
+
+  const [detectingNetwork, setDetectingNetwork] = useState(false);
+  const [showDuckToken, setShowDuckToken] = useState(false);
+  const [updatingDuckDns, setUpdatingDuckDns] = useState(false);
+  const [duckResult, setDuckResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const [showCfKey, setShowCfKey] = useState(false);
   const [testingCfKey, setTestingCfKey] = useState(false);
@@ -65,13 +74,15 @@ export function SettingsPage({
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
   const loadAll = async () => {
-    const [s, logs, maint] = await Promise.all([
+    const [s, logs, maint, net] = await Promise.all([
       api.getSettings(),
       api.getAuditLogs(40),
       api.getMaintenanceStatus(),
+      api.getNetworkStatus().catch(() => null),
     ]);
     setSettings(s);
     setMaintenance(maint);
+    if (net) setNetworkStatus(net);
     setAllowedRolesText(s.discordAllowedRoleIds.join(', '));
     setAdminRolesText(s.discordAdminRoleIds.join(', '));
     setAuditLogs(logs);
@@ -80,6 +91,20 @@ export function SettingsPage({
   useEffect(() => {
     void loadAll();
   }, []);
+
+  const handleDetectNetwork = async () => {
+    setDetectingNetwork(true);
+    setDuckResult(null);
+    try {
+      const detected = await api.detectNetwork();
+      setNetworkStatus(detected);
+      onSaved();
+    } catch (err) {
+      setNotice({ kind: 'error', text: err instanceof Error ? err.message : 'Network detection failed' });
+    } finally {
+      setDetectingNetwork(false);
+    }
+  };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,8 +124,13 @@ export function SettingsPage({
         discordAdminRoleIds: parseIds(adminRolesText),
       });
       setSettings(saved);
-      setMaintenance(await api.getMaintenanceStatus());
-      setNotice({ kind: 'success', text: 'Settings, guardrails, and schedules saved.' });
+      const [maint, net] = await Promise.all([
+        api.getMaintenanceStatus(),
+        api.getNetworkStatus().catch(() => null),
+      ]);
+      setMaintenance(maint);
+      if (net) setNetworkStatus(net);
+      setNotice({ kind: 'success', text: 'Settings, public address, guardrails, and schedules saved.' });
       onSaved();
     } catch (err) {
       setNotice({ kind: 'error', text: err instanceof Error ? err.message : 'Save failed' });
@@ -537,17 +567,204 @@ export function SettingsPage({
           <div className="panel-body">
             <div className="form-grid">
               <div className="field full">
-                <label htmlFor="set-public-host">Public / Tailscale Hostname or IP</label>
-                <input
-                  id="set-public-host"
-                  className="input mono"
-                  value={settings.publicHost}
-                  onChange={(e) => setSettings({ ...settings, publicHost: e.target.value })}
-                  placeholder="e.g., 100.64.0.12 or games.yourdomain.com"
-                />
-                <span className="field-hint">
-                  Displayed in copyable join addresses and Discord embeds when friends boot a server.
-                </span>
+                <div
+                  style={{
+                    padding: 12,
+                    borderRadius: 'var(--radius-sm)',
+                    background: 'var(--bg-elevated)',
+                    border: '1px solid var(--border-subtle)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 600, fontSize: 13 }}>
+                      <Globe size={14} color="var(--accent)" />
+                      Public Join Address &amp; DuckDNS
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={detectingNetwork}
+                      onClick={() => void handleDetectNetwork()}
+                    >
+                      <RefreshCw size={12} /> {detectingNetwork ? 'Detecting...' : 'Re-detect Now'}
+                    </button>
+                  </div>
+
+                  {networkStatus && (
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div>
+                        Active Join Host:{' '}
+                        <strong className="mono" style={{ color: 'var(--text-primary)' }}>
+                          {networkStatus.effectiveHost}
+                        </strong>{' '}
+                        <span className="badge badge-running" style={{ fontSize: 10, marginLeft: 4 }}>
+                          {formatHostSourceLabel(networkStatus.effectiveHostSource)}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                        <span>
+                          Public IP: <span className="mono">{networkStatus.publicIp ?? 'Not detected'}</span>
+                        </span>
+                        <span>
+                          Local LAN IP: <span className="mono">{networkStatus.lanIp ?? 'Not detected'}</span>
+                        </span>
+                      </div>
+                      {networkStatus.detectedDuckDnsDomains.length > 0 && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
+                          <span>Detected DuckDNS on this PC:</span>
+                          {networkStatus.detectedDuckDnsDomains.map((dom) => (
+                            <button
+                              key={dom}
+                              type="button"
+                              className="btn btn-sm"
+                              style={{ padding: '2px 8px', fontSize: 11.5 }}
+                              onClick={() =>
+                                setSettings({
+                                  ...settings,
+                                  publicHostMode: 'duckdns',
+                                  duckdnsDomain: dom,
+                                })
+                              }
+                            >
+                              Use {dom}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="form-grid" style={{ gap: 10 }}>
+                    <div className="field">
+                      <label htmlFor="set-public-host-mode">Public Address Mode</label>
+                      <select
+                        id="set-public-host-mode"
+                        className="select"
+                        value={settings.publicHostMode}
+                        onChange={(e) =>
+                          setSettings({
+                            ...settings,
+                            publicHostMode: e.target.value as PublicHostMode,
+                          })
+                        }
+                      >
+                        <option value="auto">Automatic (DuckDNS -&gt; Public IP)</option>
+                        <option value="duckdns">DuckDNS Domain</option>
+                        <option value="manual">Custom Hostname / Tailscale / IP</option>
+                      </select>
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="set-duckdns-domain">DuckDNS Domain (optional)</label>
+                      <input
+                        id="set-duckdns-domain"
+                        className="input mono"
+                        value={settings.duckdnsDomain}
+                        onChange={(e) => {
+                          setDuckResult(null);
+                          setSettings({ ...settings, duckdnsDomain: e.target.value });
+                        }}
+                        placeholder="e.g., myserver.duckdns.org"
+                      />
+                    </div>
+
+                    <div className="field full">
+                      <label htmlFor="set-duckdns-token">DuckDNS Account Token (optional — for built-in DDNS updates)</label>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <input
+                          id="set-duckdns-token"
+                          type={showDuckToken ? 'text' : 'password'}
+                          className="input mono"
+                          value={settings.duckdnsToken}
+                          onChange={(e) => {
+                            setDuckResult(null);
+                            setSettings({ ...settings, duckdnsToken: e.target.value });
+                          }}
+                          placeholder="Paste your DuckDNS token from duckdns.org"
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          title={showDuckToken ? 'Hide token' : 'Show token'}
+                          onClick={() => setShowDuckToken((v) => !v)}
+                        >
+                          {showDuckToken ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          disabled={updatingDuckDns}
+                          onClick={async () => {
+                            setUpdatingDuckDns(true);
+                            setDuckResult(null);
+                            try {
+                              const res = await api.updateDuckDns({
+                                domain: settings.duckdnsDomain,
+                                token: settings.duckdnsToken,
+                                saveOnSuccess: true,
+                                autoUpdate: settings.duckdnsAutoUpdate,
+                              });
+                              setDuckResult({ ok: res.ok, message: res.message });
+                              setNetworkStatus(res.status);
+                              if (res.ok && res.saved) {
+                                setSettings({
+                                  ...settings,
+                                  duckdnsDomain: res.domain,
+                                  publicHostMode: 'duckdns',
+                                });
+                                onSaved();
+                              }
+                            } catch (err) {
+                              setDuckResult({
+                                ok: false,
+                                message: err instanceof Error ? err.message : 'DuckDNS update failed',
+                              });
+                            } finally {
+                              setUpdatingDuckDns(false);
+                            }
+                          }}
+                        >
+                          <CheckCircle2 size={14} /> {updatingDuckDns ? 'Updating...' : 'Update & Save DuckDNS'}
+                        </button>
+                      </div>
+                      <label className="checkbox-row" style={{ paddingTop: 6 }}>
+                        <input
+                          type="checkbox"
+                          checked={settings.duckdnsAutoUpdate}
+                          onChange={(e) => setSettings({ ...settings, duckdnsAutoUpdate: e.target.checked })}
+                        />
+                        <span>Keep DuckDNS IP updated automatically from ServerForge (every 15m)</span>
+                      </label>
+                      {duckResult && (
+                        <div
+                          className={`alert ${duckResult.ok ? 'alert-success' : 'alert-error'}`}
+                          style={{ marginTop: 6, marginBottom: 0 }}
+                        >
+                          {duckResult.message}
+                        </div>
+                      )}
+                    </div>
+
+                    {settings.publicHostMode !== 'duckdns' && (
+                      <div className="field full">
+                        <label htmlFor="set-public-host">Custom / Tailscale Hostname or IP</label>
+                        <input
+                          id="set-public-host"
+                          className="input mono"
+                          value={settings.publicHost}
+                          onChange={(e) => setSettings({ ...settings, publicHost: e.target.value })}
+                          placeholder="e.g., 100.64.0.12 or games.yourdomain.com (leave localhost for auto)"
+                        />
+                        <span className="field-hint">
+                          Displayed in copyable join addresses and Discord embeds when friends boot a server.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
 
               <div className="field full">
