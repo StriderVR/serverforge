@@ -8,10 +8,14 @@
     "dev": "pnpm --parallel --filter @serverforge/server --filter @serverforge/web dev",
     "dev:mock": "RUNTIME_MODE=mock pnpm --parallel --filter @serverforge/server --filter @serverforge/web dev",
     "build": "pnpm --filter @serverforge/shared build && pnpm --filter @serverforge/server build && pnpm --filter @serverforge/web build",
+    "bundle:exe": "node scripts/build-exe-bundle.mjs",
     "start": "node packages/server/dist/index.js",
     "start:mock": "RUNTIME_MODE=mock node packages/server/dist/index.js",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
   },
   "engines": {
     "node": ">=22.5.0",

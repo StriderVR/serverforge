@@ -22,6 +22,7 @@ import { CatalogService } from '../catalog/catalog-service.js';
 import { loadConfig, type AppConfig } from '../config.js';
 import { AppDatabase } from '../db/database.js';
 import { DiscordBotService } from '../discord/bot.js';
+import { EMBEDDED_WEB_ASSETS } from '../embedded-assets.js';
 import { QueryService } from '../query/query-service.js';
 import { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
@@ -455,9 +456,26 @@ export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): 
     });
   });
 
-  // --- Serve Compiled React Web UI in Production ---
+  // --- Serve Compiled React Web UI in Production / Standalone EXE ---
 
-  if (fs.existsSync(path.join(config.webDistDir, 'index.html'))) {
+  const embeddedKeys = Object.keys(EMBEDDED_WEB_ASSETS);
+  if (embeddedKeys.length > 0) {
+    app.setNotFoundHandler((req, reply) => {
+      if (req.url.startsWith('/api/') || req.url.startsWith('/ws')) {
+        return reply.status(404).send({ error: 'Route not found' });
+      }
+      const cleanPath = req.url.split('?')[0].replace(/^\/+/, '');
+      const asset = EMBEDDED_WEB_ASSETS[cleanPath] ?? EMBEDDED_WEB_ASSETS['index.html'];
+      if (!asset) {
+        return reply.status(404).send({ error: 'Asset not found' });
+      }
+      reply.header('Content-Type', asset.mimeType);
+      if (cleanPath.startsWith('assets/')) {
+        reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+      return reply.send(Buffer.from(asset.contentBase64, 'base64'));
+    });
+  } else if (fs.existsSync(path.join(config.webDistDir, 'index.html'))) {
     await app.register(fastifyStatic, {
       root: config.webDistDir,
       prefix: '/',

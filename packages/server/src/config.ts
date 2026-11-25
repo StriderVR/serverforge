@@ -3,13 +3,60 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import {
+  EMBEDDED_CATALOG_FILES,
+  EMBEDDED_ENV_EXAMPLE,
+  IS_BUNDLED_EXE,
+} from './embedded-assets.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+export function isSeaExecutable(): boolean {
+  try {
+    // Node 22 built-in node:sea module detects Single Executable Application mode
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const sea = process.getBuiltinModule?.('node:sea') as { isSea?: () => boolean } | undefined;
+    return Boolean(sea?.isSea?.());
+  } catch {
+    return false;
+  }
+}
 
-// Workspace root is three levels up from packages/server/src (or dist)
-export const WORKSPACE_ROOT = path.resolve(__dirname, '../../..');
+function resolveWorkspaceRoot(): string {
+  if (process.env.SERVERFORGE_HOME) {
+    return path.resolve(process.env.SERVERFORGE_HOME);
+  }
+  if (isSeaExecutable()) {
+    return path.dirname(process.execPath);
+  }
+  if (IS_BUNDLED_EXE) {
+    return process.cwd();
+  }
+  const currentFile = fileURLToPath(import.meta.url);
+  return path.resolve(path.dirname(currentFile), '../../..');
+}
 
+export const WORKSPACE_ROOT = resolveWorkspaceRoot();
+
+function materializeBundledDefaults(rootDir: string): void {
+  if (!IS_BUNDLED_EXE) return;
+
+  // Create .env beside ServerForge.exe on first run if absent
+  const envPath = path.join(rootDir, '.env');
+  if (!fs.existsSync(envPath) && EMBEDDED_ENV_EXAMPLE) {
+    fs.writeFileSync(envPath, EMBEDDED_ENV_EXAMPLE, 'utf8');
+  }
+
+  // Extract built-in YAML game templates beside ServerForge.exe so users can inspect/extend them
+  const catalogDir = path.join(rootDir, 'catalog', 'games');
+  fs.mkdirSync(catalogDir, { recursive: true });
+  for (const [filename, content] of Object.entries(EMBEDDED_CATALOG_FILES)) {
+    const target = path.join(catalogDir, filename);
+    if (!fs.existsSync(target)) {
+      fs.writeFileSync(target, content, 'utf8');
+    }
+  }
+}
+
+materializeBundledDefaults(WORKSPACE_ROOT);
 dotenv.config({ path: path.join(WORKSPACE_ROOT, '.env') });
 
 export type RuntimeMode = 'auto' | 'docker' | 'native' | 'mock';

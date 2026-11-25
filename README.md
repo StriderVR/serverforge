@@ -15,17 +15,31 @@
 
 ## Quick Start on Windows 11
 
-### Prerequisites
+### Option 1 (Easiest): Standalone `ServerForge.exe` (No Node.js Required)
+
+1. Go to this repository's **Releases** page on GitHub and download **`ServerForge.exe`**.
+2. Put `ServerForge.exe` in a dedicated folder on your Windows 11 server PC (for example `C:\ServerForge\ServerForge.exe`).
+3. **Double-click `ServerForge.exe`**!
+   - On first launch it automatically creates `.env` and `catalog/games/*.yaml` right beside the `.exe`, starts the control plane, and opens `http://localhost:3000` in your browser.
+   - To enable Discord slash commands, open `.env` in Notepad, paste your `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and `DISCORD_GUILD_ID`, and restart `ServerForge.exe`.
+   - For running real game servers, install **Docker Desktop** (for Minecraft, Factorio, Satisfactory, Palworld) and/or **SteamCMD** (`C:\steamcmd\steamcmd.exe` for Native Windows **Ark: Survival Ascended**).
+
+### Option 2: Run from Source (or Build `ServerForge.exe` Yourself)
+
+#### Prerequisites
 - **Node.js 22.5+** (`winget install OpenJS.NodeJS.LTS`)
 - **Docker Desktop** (recommended for Minecraft, Factorio, Satisfactory, Palworld) and/or **SteamCMD** (recommended for Native Windows **Ark: Survival Ascended**)
 
-### Install & Build
+#### Install & Build
 
 Open PowerShell in the cloned `serverforge` directory:
 
 ```powershell
 # Basic setup + auto-download Valve SteamCMD into data/tools/steamcmd
 .\scripts\install-windows.ps1 -InstallSteamCmd
+
+# Optional: build your own local standalone ServerForge.exe
+.\scripts\build-windows-exe.ps1
 
 # Optional: also register Windows Startup Task (runs at boot without RDP) and open port 3000
 # (Run PowerShell as Administrator for these flags)

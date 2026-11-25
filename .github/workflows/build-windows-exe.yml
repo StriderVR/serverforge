@@ -1,0 +1,101 @@
+name: Build Windows ServerForge.exe
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run typecheck & automated tests
+        run: |
+          pnpm build
+          pnpm typecheck
+          pnpm test
+
+      - name: Build standalone ServerForge.exe (Node 22 SEA)
+        shell: pwsh
+        run: .\scripts\build-windows-exe.ps1
+
+      - name: Smoke-test compiled ServerForge.exe
+        shell: pwsh
+        run: |
+          $TestDir = Join-Path $env:TEMP "sf-exe-smoke"
+          New-Item -ItemType Directory -Force -Path $TestDir | Out-Null
+          Copy-Item "dist-exe\ServerForge.exe" (Join-Path $TestDir "ServerForge.exe")
+
+          $env:RUNTIME_MODE = "mock"
+          $env:PORT = "3099"
+          $env:NO_OPEN_BROWSER = "1"
+
+          $proc = Start-Process -FilePath (Join-Path $TestDir "ServerForge.exe") -WorkingDirectory $TestDir -PassThru -NoNewWindow
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 20; $i++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:3099/api/health" -TimeoutSec 2
+                if ($health.status -eq "ok") {
+                  Write-Host "Health check passed: $($health | ConvertTo-Json -Compress)"
+                  $ok = $true
+                  break
+                }
+              } catch {}
+            }
+            if (-not $ok) { throw "ServerForge.exe did not respond to /api/health" }
+
+            $html = Invoke-WebRequest -Uri "http://127.0.0.1:3099/" -UseBasicParsing
+            if ($html.Content -notmatch "ServerForge") {
+              throw "Embedded React Web UI failed to load from ServerForge.exe"
+            }
+            if (-not (Test-Path (Join-Path $TestDir "catalog\games\minecraft.yaml"))) {
+              throw "Expected ServerForge.exe to extract built-in game templates on first run"
+            }
+            Write-Host "Standalone ServerForge.exe smoke test PASSED!"
+          } finally {
+            if ($proc -and -not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force
+            }
+            Remove-Item -Path $TestDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload ServerForge.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ServerForge-win-x64
+          path: dist-exe/ServerForge.exe
+
+      - name: Publish GitHub Release with ServerForge.exe
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-exe/ServerForge.exe
+          generate_release_notes: true
+          body: |
+            ## ServerForge for Windows 11 (Standalone `.exe`)
+
+            1. Download **`ServerForge.exe`** below into any folder on your Windows 11 server PC (for example `C:\ServerForge\ServerForge.exe`).
+            2. Double-click **`ServerForge.exe`** — no Node.js installation needed!
+            3. On first launch it creates `.env` and `catalog/games/*.yaml` next to the `.exe` and opens the Web Dashboard at `http://localhost:3000`.
+            4. To enable the Discord Bot, open `.env` in Notepad, paste your `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and `DISCORD_GUILD_ID`, and restart `ServerForge.exe`.
