@@ -25,7 +25,7 @@ import { DiscordBotService } from '../discord/bot.js';
 import { EMBEDDED_WEB_ASSETS } from '../embedded-assets.js';
 import { QueryService } from '../query/query-service.js';
 import { RuntimeManager } from '../runtimes/runtime-manager.js';
-import { CurseForgeService } from '../services/curseforge-service.js';
+import { CurseForgeService, normalizeCurseForgeApiKey } from '../services/curseforge-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
 import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
@@ -72,7 +72,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
 
   const getEffectiveCurseForgeKey = () => {
     const settings = db.getSettings(config.publicHost);
-    return (settings.curseforgeApiKey || config.curseforgeApiKey || '').trim();
+    return normalizeCurseForgeApiKey(settings.curseforgeApiKey || config.curseforgeApiKey || '');
   };
 
   const runtimeManager = new RuntimeManager(config.runtimeMode, config.toolsDir, queryService, () => ({
@@ -203,7 +203,11 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     if (!parsed.success) {
       return reply.status(400).send({ error: 'Invalid settings payload', issues: parsed.error.issues });
     }
-    const updated = db.saveSettings(parsed.data, config.publicHost);
+    const patch = { ...parsed.data };
+    if (typeof patch.curseforgeApiKey === 'string') {
+      patch.curseforgeApiKey = normalizeCurseForgeApiKey(patch.curseforgeApiKey);
+    }
+    const updated = db.saveSettings(patch, config.publicHost);
     db.addAuditLog({
       actor: req.authUser?.username || 'admin',
       source: 'web',
@@ -511,6 +515,12 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   app.get('/api/curseforge/status', { preHandler: requireAuth }, async () => ({
     configured: Boolean(getEffectiveCurseForgeKey()),
   }));
+
+  app.post('/api/curseforge/test', { preHandler: requireAuth }, async (req) => {
+    const body = req.body as { apiKey?: string } | undefined;
+    const keyToTest = body?.apiKey !== undefined ? body.apiKey : getEffectiveCurseForgeKey();
+    return curseforge.testApiKey(keyToTest);
+  });
 
   app.get('/api/curseforge/search', { preHandler: requireAuth }, async (req, reply) => {
     const q = req.query as { q?: string; limit?: string };

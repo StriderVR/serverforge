@@ -103,6 +103,11 @@ export const api = {
 
   // CurseForge
   getCurseForgeStatus: () => request<{ configured: boolean }>('/api/curseforge/status'),
+  testCurseForgeKey: (apiKey?: string) =>
+    request<{ ok: boolean; message: string; normalizedKey: string }>('/api/curseforge/test', {
+      method: 'POST',
+      body: JSON.stringify(apiKey !== undefined ? { apiKey } : {}),
+    }),
   searchCurseForge: (q: string) =>
     request<CurseForgeModpackSummary[]>(`/api/curseforge/search?q=${encodeURIComponent(q)}`),
   getCurseForgeFiles: (modId: number) =>

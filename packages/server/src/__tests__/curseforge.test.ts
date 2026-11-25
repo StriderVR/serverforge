@@ -3,7 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServerForgeApp, type ServerForgeApp } from '../api/server.js';
-import { parseCurseForgeUrl, recommendJavaTag } from '../services/curseforge-service.js';
+import {
+  normalizeCurseForgeApiKey,
+  parseCurseForgeUrl,
+  recommendJavaTag,
+  validateCurseForgeKeyFormat,
+} from '../services/curseforge-service.js';
 
 describe('CurseForge Modded Minecraft Integration', () => {
   const cleanups: Array<() => Promise<void>> = [];
@@ -69,6 +74,17 @@ describe('CurseForge Modded Minecraft Integration', () => {
     while (cleanups.length) {
       await cleanups.pop()!();
     }
+  });
+
+  it('normalizes escaped/quoted CurseForge keys and flags UUID author tokens clearly', () => {
+    const rawCore = '$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ12345';
+    expect(normalizeCurseForgeApiKey(`"${rawCore}"`)).toBe(rawCore);
+    expect(normalizeCurseForgeApiKey(rawCore.replace(/\$/g, '$$'))).toBe(rawCore);
+    expect(normalizeCurseForgeApiKey(rawCore.replace(/\$/g, '\\$'))).toBe(rawCore);
+
+    expect(validateCurseForgeKeyFormat('123e4567-e89b-12d3-a456-426614174000')).toMatch(/Author Upload Token/);
+    expect(validateCurseForgeKeyFormat('$2a$10$short')).toMatch(/truncated/);
+    expect(validateCurseForgeKeyFormat('$2a$10$' + 'a'.repeat(53))).toBeNull();
   });
 
   it('recommends the exact Java Docker image tag for Minecraft versions', () => {

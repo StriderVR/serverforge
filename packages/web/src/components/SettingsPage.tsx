@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import {
   Bot,
+  CheckCircle2,
   Download,
+  Eye,
+  EyeOff,
   Package,
   Power,
   RefreshCw,
@@ -48,6 +51,10 @@ export function SettingsPage({
   const [applyingUpdate, setApplyingUpdate] = useState(false);
   const [resumeOnUpdate, setResumeOnUpdate] = useState(true);
   const [rebootingPc, setRebootingPc] = useState(false);
+
+  const [showCfKey, setShowCfKey] = useState(false);
+  const [testingCfKey, setTestingCfKey] = useState(false);
+  const [cfTestResult, setCfTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const [inspection, setInspection] = useState<WindowsRebootInspection | null>(null);
   const [scanningReboots, setScanningReboots] = useState(false);
@@ -508,18 +515,73 @@ export function SettingsPage({
 
               <div className="field full">
                 <label htmlFor="set-cf-key" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Package size={13} /> CurseForge API Key (for Modded Minecraft)
+                  <Package size={13} /> CurseForge Core API Key (for Modded Minecraft)
                 </label>
-                <input
-                  id="set-cf-key"
-                  type="password"
-                  className="input mono"
-                  value={settings.curseforgeApiKey}
-                  onChange={(e) => setSettings({ ...settings, curseforgeApiKey: e.target.value })}
-                  placeholder="$2a$10$... (free key from console.curseforge.com)"
-                />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    id="set-cf-key"
+                    type={showCfKey ? 'text' : 'password'}
+                    className="input mono"
+                    value={settings.curseforgeApiKey}
+                    onChange={(e) => {
+                      setCfTestResult(null);
+                      setSettings({ ...settings, curseforgeApiKey: e.target.value });
+                    }}
+                    placeholder="$2a$10$... (60-char Core API key from console.curseforge.com)"
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    title={showCfKey ? 'Hide key' : 'Show key'}
+                    onClick={() => setShowCfKey((v) => !v)}
+                  >
+                    {showCfKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={testingCfKey}
+                    onClick={async () => {
+                      setTestingCfKey(true);
+                      setCfTestResult(null);
+                      try {
+                        const res = await api.testCurseForgeKey(settings.curseforgeApiKey);
+                        if (res.normalizedKey && res.normalizedKey !== settings.curseforgeApiKey) {
+                          setSettings({ ...settings, curseforgeApiKey: res.normalizedKey });
+                        }
+                        setCfTestResult({ ok: res.ok, message: res.message });
+                      } catch (err) {
+                        setCfTestResult({
+                          ok: false,
+                          message: err instanceof Error ? err.message : 'Test failed',
+                        });
+                      } finally {
+                        setTestingCfKey(false);
+                      }
+                    }}
+                  >
+                    <CheckCircle2 size={14} /> {testingCfKey ? 'Testing...' : 'Test Key'}
+                  </button>
+                </div>
+                {cfTestResult && (
+                  <div
+                    className={`alert ${cfTestResult.ok ? 'alert-success' : 'alert-error'}`}
+                    style={{ marginTop: 8, marginBottom: 0 }}
+                  >
+                    {cfTestResult.message}
+                  </div>
+                )}
                 <span className="field-hint">
-                  Enables the live CurseForge Modpack Browser in One-Click Deploy and automatic modpack downloads in Docker.
+                  Use a <strong>Core API Key</strong> starting with <code className="mono">$2a$10$...</code> from{' '}
+                  <a
+                    href="https://console.curseforge.com/"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                  >
+                    console.curseforge.com
+                  </a>{' '}
+                  (API keys tab) — not a UUID author upload token. Click <strong>Save Settings</strong> after testing.
                 </span>
               </div>
 

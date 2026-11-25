@@ -6,6 +6,48 @@ const MODPACKS_CLASS_ID = 4471;
 
 export type JavaImageTag = 'java21' | 'java17' | 'java8' | 'latest';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Normalizes a pasted CurseForge API key by trimming whitespace, stripping
+ * accidental surrounding quotes, and unescaping Docker Compose / shell escapes
+ * (e.g. `$$2a$$10$$...` or `\$2a\$10\$...` -> `$2a$10$...`).
+ */
+export function normalizeCurseForgeApiKey(raw: string): string {
+  let key = raw.trim();
+  if (
+    (key.startsWith('"') && key.endsWith('"')) ||
+    (key.startsWith("'") && key.endsWith("'"))
+  ) {
+    key = key.slice(1, -1).trim();
+  }
+  // Unescape shell-escaped \$ -> $
+  if (key.includes('\\$')) {
+    key = key.replace(/\\\$/g, '$');
+  }
+  // Unescape Docker Compose $$ -> $
+  if (key.startsWith('$$2a$$') || key.startsWith('$$2b$$') || key.startsWith('$$2y$$')) {
+    key = key.replace(/\$\$/g, '$');
+  }
+  return key;
+}
+
+export function validateCurseForgeKeyFormat(key: string): string | null {
+  if (!key) {
+    return 'CurseForge API key is empty. Generate a free Core API Key at https://console.curseforge.com/ (API keys tab).';
+  }
+  if (UUID_REGEX.test(key)) {
+    return 'That looks like a CurseForge Author Upload Token (UUID from legacy/author settings). Modpack search & downloads require a Core API Key starting with "$2a$10$..." from https://console.curseforge.com/ -> API keys.';
+  }
+  if (!key.startsWith('$2a$') && !key.startsWith('$2b$') && !key.startsWith('$2y$')) {
+    return `Key does not start with "$2a$10$..." (starts with "${key.slice(0, 6)}...", length ${key.length}). Copy the full Core API Key from https://console.curseforge.com/ -> API keys.`;
+  }
+  if (key.length < 55 || key.length > 65) {
+    return `Key length looks truncated (${key.length} chars; standard CurseForge Core API keys are 60 characters starting with "$2a$10$"). Make sure the entire key was copied.`;
+  }
+  return null;
+}
+
 /**
  * Selects the optimal itzg/minecraft-server Java Docker image tag for a given list
  * of CurseForge gameVersions (e.g., ["1.21.1", "NeoForge"] or ["1.12.2", "Forge"]).
@@ -81,22 +123,76 @@ interface CfFilesResponse {
 export class CurseForgeService {
   constructor(private readonly fetchImpl: typeof fetch = fetch) {}
 
-  private assertApiKey(apiKey: string): string {
-    const key = apiKey.trim();
+  private assertApiKey(rawKey: string): string {
+    const key = normalizeCurseForgeApiKey(rawKey);
     if (!key) {
       throw new Error(
         'CurseForge API key is not configured. Add your free key in Settings (from console.curseforge.com) or paste a direct CurseForge URL / Server Pack ZIP.'
       );
     }
+    if (UUID_REGEX.test(key)) {
+      throw new Error(validateCurseForgeKeyFormat(key)!);
+    }
     return key;
+  }
+
+  private buildHeaders(key: string): Record<string, string> {
+    return {
+      Accept: 'application/json',
+      'User-Agent': 'ServerForge/1.1.1 (+https://github.com/StriderVR/serverforge)',
+      'x-api-key': key,
+    };
+  }
+
+  private async buildHttpError(res: Response, key: string): Promise<Error> {
+    const bodyText = await res.text().catch(() => '');
+    if (res.status === 403 || res.status === 401) {
+      const formatHint = validateCurseForgeKeyFormat(key);
+      if (formatHint) {
+        return new Error(`CurseForge rejected the key (HTTP ${res.status}): ${formatHint}`);
+      }
+      if (/cloudflare|just a moment/i.test(bodyText)) {
+        return new Error(
+          `Request was blocked by Cloudflare WAF (HTTP ${res.status}). Wait a moment and retry, or check if a VPN/proxy is interfering.`
+        );
+      }
+      return new Error(
+        `CurseForge rejected the API key (HTTP ${res.status}). Make sure the key is active in https://console.curseforge.com/ -> API keys (not revoked, and copied without missing characters).`
+      );
+    }
+    return new Error(`CurseForge API returned HTTP ${res.status}${bodyText ? `: ${bodyText.slice(0, 140)}` : ''}`);
+  }
+
+  async testApiKey(rawKey: string): Promise<{ ok: boolean; message: string; normalizedKey: string }> {
+    const key = normalizeCurseForgeApiKey(rawKey);
+    const formatIssue = validateCurseForgeKeyFormat(key);
+    if (formatIssue) {
+      return { ok: false, message: formatIssue, normalizedKey: key };
+    }
+
+    const res = await this.fetchImpl(`${CURSEFORGE_API_BASE}/games/${MINECRAFT_GAME_ID}`, {
+      headers: this.buildHeaders(key),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!res.ok) {
+      const err = await this.buildHttpError(res, key);
+      return { ok: false, message: err.message, normalizedKey: key };
+    }
+
+    return {
+      ok: true,
+      message: 'CurseForge API key verified! Modpack search and Docker auto-downloads are ready.',
+      normalizedKey: key,
+    };
   }
 
   async searchModpacks(
     query: string,
-    apiKey: string,
+    rawKey: string,
     pageSize = 12
   ): Promise<CurseForgeModpackSummary[]> {
-    const key = this.assertApiKey(apiKey);
+    const key = this.assertApiKey(rawKey);
     const params = new URLSearchParams({
       gameId: String(MINECRAFT_GAME_ID),
       classId: String(MODPACKS_CLASS_ID),
@@ -109,18 +205,12 @@ export class CurseForgeService {
     }
 
     const res = await this.fetchImpl(`${CURSEFORGE_API_BASE}/mods/search?${params.toString()}`, {
-      headers: {
-        Accept: 'application/json',
-        'x-api-key': key,
-      },
+      headers: this.buildHeaders(key),
       signal: AbortSignal.timeout(10_000),
     });
 
-    if (res.status === 403 || res.status === 401) {
-      throw new Error('CurseForge rejected the API key (HTTP 403). Double-check your key in Settings.');
-    }
     if (!res.ok) {
-      throw new Error(`CurseForge API returned HTTP ${res.status}`);
+      throw await this.buildHttpError(res, key);
     }
 
     const payload = (await res.json()) as CfSearchResponse;
@@ -147,25 +237,19 @@ export class CurseForgeService {
     });
   }
 
-  async getModpackFiles(modId: number, apiKey: string, pageSize = 20): Promise<CurseForgeModpackFile[]> {
-    const key = this.assertApiKey(apiKey);
+  async getModpackFiles(modId: number, rawKey: string, pageSize = 20): Promise<CurseForgeModpackFile[]> {
+    const key = this.assertApiKey(rawKey);
     const params = new URLSearchParams({
       pageSize: String(Math.min(Math.max(pageSize, 1), 50)),
     });
 
     const res = await this.fetchImpl(`${CURSEFORGE_API_BASE}/mods/${modId}/files?${params.toString()}`, {
-      headers: {
-        Accept: 'application/json',
-        'x-api-key': key,
-      },
+      headers: this.buildHeaders(key),
       signal: AbortSignal.timeout(10_000),
     });
 
-    if (res.status === 403 || res.status === 401) {
-      throw new Error('CurseForge rejected the API key (HTTP 403). Double-check your key in Settings.');
-    }
     if (!res.ok) {
-      throw new Error(`CurseForge API returned HTTP ${res.status}`);
+      throw await this.buildHttpError(res, key);
     }
 
     const payload = (await res.json()) as CfFilesResponse;
@@ -185,15 +269,12 @@ export class CurseForgeService {
     });
   }
 
-  async getServerPackDownloadUrl(modId: number, serverPackFileId: number, apiKey: string): Promise<string | null> {
-    const key = this.assertApiKey(apiKey);
+  async getServerPackDownloadUrl(modId: number, serverPackFileId: number, rawKey: string): Promise<string | null> {
+    const key = this.assertApiKey(rawKey);
     const res = await this.fetchImpl(
       `${CURSEFORGE_API_BASE}/mods/${modId}/files/${serverPackFileId}/download-url`,
       {
-        headers: {
-          Accept: 'application/json',
-          'x-api-key': key,
-        },
+        headers: this.buildHeaders(key),
         signal: AbortSignal.timeout(10_000),
       }
     );
