@@ -5,11 +5,12 @@
 ## Key Capabilities
 
 - **One-Click Web Dashboard**: Deploy, start, stop, restart, edit configuration, watch real-time streaming console logs (WebSocket), send RCON/console commands, and take timestamped `.zip` world backups from any browser (no Remote Desktop required).
+- **One-Click GitHub Self-Updater**: Check for new GitHub Releases and update `ServerForge.exe` with a single click — automatically saving & stopping running servers before updating and rebooting them afterward with active leases preserved.
+- **Managed Daily PC Reboots & Auto-Reboot Inspector**: Let ServerForge safely handle your Windows 11 PC's daily morning restart (10-min Discord warning, optional deferral if players are online, full graceful world save before `shutdown /r`, and auto-recovery on boot) — plus a built-in scanner to detect and disable conflicting Windows reboot Scheduled Tasks.
+- **CurseForge Modded Minecraft**: Built-in CurseForge Modpack browser & version picker (All the Mods, Better MC, RLCraft, Create, etc.) with automatic Java 8/17/21 runtime selection, Docker `AUTO_CURSEFORGE`, and Native Server Pack `.zip` support.
 - **Discord Temporary Server Booting**: Role-gated Discord slash commands (`/server list`, `/server start`, `/server extend`, `/server stop`, `/server status`) with interactive **Extend +1h** and **Save & Stop** buttons.
 - **Automatic Idle & Lease Auto-Shutdown**: Protects your PC's power and RAM by automatically warning Discord 10 minutes before shutdown, running each game's native save command (RCON / Palworld REST API), and cleanly stopping servers when either the temporary lease expires or the server sits empty with 0 players.
-- **Resource Guardrails**: Enforces configurable max concurrent running servers, keeps a configurable OS RAM reserve free for Windows 11, and automatically assigns non-overlapping ports when deploying multiple instances of the same game.
-- **Hybrid Runtime Architecture**: Supports both **Docker Desktop (WSL2)** and **Native Windows SteamCMD / Java** processes per instance — ideal for running RAM-heavy Windows-native servers like **Ark: Survival Ascended** natively alongside Dockerized servers.
-- **Zero-Code Scalability (YAML Game Catalog)**: Ships with 5 built-in templates — **Minecraft (Java/Paper/Modded)**, **Satisfactory**, **Factorio**, **Palworld**, and **Ark: Survival Ascended**. Add new games anytime by dropping a `.yaml` file into `catalog/games/` or importing one directly in the Web UI.
+- **Resource Guardrails & Zero-Code Scalability**: Enforces max concurrent servers, Windows OS RAM reserves, automatic port allocation, and declarative YAML templates (`catalog/games/*.yaml`) — Minecraft, Minecraft (CurseForge Modpack), Satisfactory, Factorio, Palworld, and Ark: Survival Ascended included out of the box.
 
 ---
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeKindSchema } from './game-template.js';
+import { RuntimeKindSchema, type RuntimeKind } from './game-template.js';
 
 export const InstanceStatusSchema = z.enum([
   'stopped',
@@ -67,14 +67,16 @@ export const CreateInstanceInputSchema = z.object({
   memoryLimitMb: z.number().int().min(512).max(131072).optional(),
   ports: z.record(z.string(), z.number().int().min(1024).max(65535)).optional(),
   config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
+  autoStart: z.boolean().optional().default(false),
   discordEnabled: z.boolean().optional().default(true),
   startImmediately: z.boolean().optional().default(false),
 });
-export type CreateInstanceInput = z.infer<typeof CreateInstanceInputSchema>;
+export type CreateInstanceInput = z.input<typeof CreateInstanceInputSchema>;
 
 export const UpdateInstanceConfigInputSchema = z.object({
   name: z.string().min(2).max(60).optional(),
   memoryLimitMb: z.number().int().min(512).max(131072).optional(),
+  autoStart: z.boolean().optional(),
   discordEnabled: z.boolean().optional(),
   config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
 });
@@ -89,7 +91,7 @@ export const StartInstanceInputSchema = z.object({
   source: z.enum(['web', 'discord']).optional().default('web'),
   channelId: z.string().optional(),
 });
-export type StartInstanceInput = z.infer<typeof StartInstanceInputSchema>;
+export type StartInstanceInput = z.input<typeof StartInstanceInputSchema>;
 
 export const SystemSettingsSchema = z.object({
   publicHost: z.string().default('localhost'),
@@ -102,6 +104,16 @@ export const SystemSettingsSchema = z.object({
   discordAllowedRoleIds: z.array(z.string()).default([]),
   discordAdminRoleIds: z.array(z.string()).default([]),
   discordNotifyChannelId: z.string().default(''),
+  githubRepo: z.string().default('StriderVR/serverforge'),
+  autoUpdateOnBoot: z.boolean().default(false),
+  dailyRebootEnabled: z.boolean().default(false),
+  dailyRebootTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Time must be HH:MM (24-hour)')
+    .default('04:00'),
+  dailyRebootDelayIfPlayersOnline: z.boolean().default(true),
+  dailyRebootResumePolicy: z.enum(['resume_running', 'autostart_only']).default('autostart_only'),
+  curseforgeApiKey: z.string().default(''),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
 
@@ -152,9 +164,84 @@ export const AuditLogEntrySchema = z.object({
 });
 export type AuditLogEntry = z.infer<typeof AuditLogEntrySchema>;
 
+export interface UpdaterStatus {
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  releaseName: string | null;
+  releaseNotes: string | null;
+  releaseUrl: string | null;
+  publishedAt: string | null;
+  exeDownloadUrl: string | null;
+  exeSizeBytes: number | null;
+  installMode: 'exe' | 'source';
+  githubRepo: string;
+  runningServers: Array<{ id: string; name: string; runtime: RuntimeKind }>;
+  error: string | null;
+}
+
+export interface MaintenanceStatus {
+  enabled: boolean;
+  dailyRebootTime: string;
+  nextRebootAt: string | null;
+  delayIfPlayersOnline: boolean;
+  resumePolicy: 'resume_running' | 'autostart_only';
+  deferredUntil: string | null;
+  lastRebootTriggeredAt: string | null;
+}
+
+export interface WindowsRebootEvent {
+  timestamp: string;
+  process: string;
+  reason: string;
+  message: string;
+}
+
+export interface WindowsScheduledRebootTask {
+  taskPath: string;
+  taskName: string;
+  state: string;
+  command: string;
+  nextRunTime: string | null;
+}
+
+export interface WindowsRebootInspection {
+  platform: string;
+  supported: boolean;
+  recentRestarts: WindowsRebootEvent[];
+  scheduledRebootTasks: WindowsScheduledRebootTask[];
+  notes: string[];
+}
+
+export interface CurseForgeModpackSummary {
+  id: number;
+  name: string;
+  slug: string;
+  summary: string;
+  downloadCount: number;
+  logoUrl: string | null;
+  websiteUrl: string | null;
+  latestGameVersions: string[];
+  recommendedJavaTag: 'java21' | 'java17' | 'java8' | 'latest';
+}
+
+export interface CurseForgeModpackFile {
+  id: number;
+  displayName: string;
+  fileName: string;
+  fileDate: string;
+  gameVersions: string[];
+  isServerPack: boolean;
+  serverPackFileId: number | null;
+  downloadUrl: string | null;
+  recommendedJavaTag: 'java21' | 'java17' | 'java8' | 'latest';
+}
+
 export type WsServerEvent =
   | { type: 'console:line'; instanceId: string; line: string; timestamp: string }
   | { type: 'instance:update'; instance: ServerInstance }
   | { type: 'instance:deleted'; instanceId: string }
   | { type: 'host:metrics'; metrics: HostMetrics }
-  | { type: 'lease:warning'; lease: ServerLease; instanceName: string; reason: 'ttl' | 'idle'; minutesRemaining: number };
+  | { type: 'lease:warning'; lease: ServerLease; instanceName: string; reason: 'ttl' | 'idle'; minutesRemaining: number }
+  | { type: 'updater:progress'; stage: 'downloading' | 'stopping_servers' | 'installing' | 'restarting' | 'error'; percent: number; message: string }
+  | { type: 'maintenance:notice'; kind: 'warning' | 'deferred' | 'rebooting' | 'online'; message: string };

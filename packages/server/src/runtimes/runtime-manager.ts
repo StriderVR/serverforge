@@ -14,9 +14,10 @@ export class RuntimeManager {
   constructor(
     public readonly mode: RuntimeMode,
     toolsDir: string,
-    queryService: QueryService
+    queryService: QueryService,
+    getGlobalVars: () => Record<string, string> = () => ({})
   ) {
-    this.docker = new DockerRuntimeAdapter(queryService);
+    this.docker = new DockerRuntimeAdapter(queryService, getGlobalVars);
     this.native = new NativeProcessRuntimeAdapter(toolsDir, queryService);
     this.mock = new MockRuntimeAdapter();
   }

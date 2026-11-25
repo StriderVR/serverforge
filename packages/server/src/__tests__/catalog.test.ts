@@ -29,6 +29,7 @@ describe('CatalogService & Built-in Game Templates', () => {
       'ark-survival-ascended',
       'factorio',
       'minecraft',
+      'minecraft-curseforge',
       'palworld',
       'satisfactory',
     ]);

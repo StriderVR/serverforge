@@ -25,9 +25,12 @@ import { DiscordBotService } from '../discord/bot.js';
 import { EMBEDDED_WEB_ASSETS } from '../embedded-assets.js';
 import { QueryService } from '../query/query-service.js';
 import { RuntimeManager } from '../runtimes/runtime-manager.js';
+import { CurseForgeService } from '../services/curseforge-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
+import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
 import { TelemetryService } from '../services/telemetry-service.js';
+import { UpdaterService } from '../services/updater-service.js';
 
 const AUTH_COOKIE = 'sf_token';
 
@@ -35,6 +38,11 @@ declare module 'fastify' {
   interface FastifyRequest {
     authUser?: AuthTokenPayload;
   }
+}
+
+export interface CreateAppOptions extends Partial<AppConfig> {
+  fetchImpl?: typeof fetch;
+  osRebootExecutor?: OsRebootExecutor;
 }
 
 export interface ServerForgeApp {
@@ -48,22 +56,37 @@ export interface ServerForgeApp {
   orchestrator: ServerOrchestrator;
   leaseReaper: LeaseReaper;
   discord: DiscordBotService;
+  curseforge: CurseForgeService;
+  updater: UpdaterService;
+  maintenance: MaintenanceService;
   close: () => Promise<void>;
 }
 
-export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): Promise<ServerForgeApp> {
-  const config = loadConfig(overrides);
+export async function createServerForgeApp(overrides: CreateAppOptions = {}): Promise<ServerForgeApp> {
+  const { fetchImpl, osRebootExecutor, ...configOverrides } = overrides;
+  const config = loadConfig(configOverrides);
   const db = new AppDatabase(config.dbPath);
   const auth = new AuthService(db, config.jwtSecret);
   const catalog = new CatalogService(config.catalogDir, config.customCatalogDir);
   const queryService = new QueryService();
-  const runtimeManager = new RuntimeManager(config.runtimeMode, config.toolsDir, queryService);
+
+  const getEffectiveCurseForgeKey = () => {
+    const settings = db.getSettings(config.publicHost);
+    return (settings.curseforgeApiKey || config.curseforgeApiKey || '').trim();
+  };
+
+  const runtimeManager = new RuntimeManager(config.runtimeMode, config.toolsDir, queryService, () => ({
+    CF_API_KEY: getEffectiveCurseForgeKey(),
+  }));
 
   let discordStatusFn = () => ({ connected: false, botTag: null as string | null });
   const telemetry = new TelemetryService(db, runtimeManager, () => discordStatusFn(), config.publicHost);
   const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry);
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
   const discord = new DiscordBotService(config, db, catalog, orchestrator);
+  const curseforge = new CurseForgeService(fetchImpl);
+  const updater = new UpdaterService(config, db, orchestrator, fetchImpl);
+  const maintenance = new MaintenanceService(config, db, orchestrator, updater, osRebootExecutor);
   discordStatusFn = () => discord.getStatus();
 
   const app = Fastify({ logger: false });
@@ -101,6 +124,7 @@ export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): 
 
   app.get('/api/health', async () => ({
     status: 'ok',
+    version: config.appVersion,
     runtimeMode: config.runtimeMode,
     needsSetup: auth.needsInitialSetup(),
   }));
@@ -414,6 +438,122 @@ export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): 
     }
   };
 
+  // --- App Self-Updater Routes ---
+
+  app.get('/api/updater/status', { preHandler: requireAuth }, async (req) => {
+    const q = req.query as { refresh?: string };
+    return updater.checkForUpdates(q.refresh === '1' || q.refresh === 'true');
+  });
+
+  app.post('/api/updater/apply', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { resumeRunningServers?: boolean; dryRun?: boolean } | undefined;
+    try {
+      const result = await updater.applyUpdate({
+        resumeRunningServers: body?.resumeRunningServers ?? true,
+        dryRun: Boolean(body?.dryRun),
+        actor: req.authUser?.username || 'admin',
+        onProgress: (ev) => broadcast({ type: 'updater:progress', ...ev }),
+        onShutdownRequested: async () => {
+          await close();
+          process.exit(0);
+        },
+      });
+      return { ok: true, restarting: !body?.dryRun, ...result };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Update failed' });
+    }
+  });
+
+  // --- Maintenance & Managed Daily PC Reboot Routes ---
+
+  app.get('/api/maintenance/status', { preHandler: requireAuth }, async () => {
+    return maintenance.getStatus();
+  });
+
+  app.post('/api/maintenance/reboot', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { resumeRunningServers?: boolean; reason?: string } | undefined;
+    try {
+      const res = await maintenance.triggerRebootNow({
+        resumeRunningServers: body?.resumeRunningServers ?? true,
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        reason: body?.reason?.trim() || 'Manual reboot from Web Dashboard',
+      });
+      return { ok: true, rebooting: true, ...res };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Reboot failed' });
+    }
+  });
+
+  app.get('/api/maintenance/inspect-reboots', { preHandler: requireAuth }, async () => {
+    return maintenance.inspectWindowsAutoReboots();
+  });
+
+  app.post('/api/maintenance/disable-task', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { taskPath?: string; taskName?: string } | undefined;
+    if (!body?.taskName) {
+      return reply.status(400).send({ error: 'taskName is required.' });
+    }
+    try {
+      await maintenance.disableWindowsScheduledTask(
+        body.taskPath || '\\',
+        body.taskName,
+        req.authUser?.username || 'admin'
+      );
+      return { ok: true };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Could not disable task' });
+    }
+  });
+
+  // --- CurseForge Modpack Search & Files Proxy Routes ---
+
+  app.get('/api/curseforge/status', { preHandler: requireAuth }, async () => ({
+    configured: Boolean(getEffectiveCurseForgeKey()),
+  }));
+
+  app.get('/api/curseforge/search', { preHandler: requireAuth }, async (req, reply) => {
+    const q = req.query as { q?: string; limit?: string };
+    try {
+      const results = await curseforge.searchModpacks(
+        q.q ?? '',
+        getEffectiveCurseForgeKey(),
+        Number(q.limit) || 12
+      );
+      return results;
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'CurseForge search failed' });
+    }
+  });
+
+  app.get('/api/curseforge/mods/:modId/files', { preHandler: requireAuth }, async (req, reply) => {
+    const { modId } = req.params as { modId: string };
+    const idNum = Number.parseInt(modId, 10);
+    if (!Number.isFinite(idNum) || idNum <= 0) {
+      return reply.status(400).send({ error: 'Invalid modId' });
+    }
+    try {
+      const files = await curseforge.getModpackFiles(idNum, getEffectiveCurseForgeKey());
+      return files;
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Could not fetch modpack versions' });
+    }
+  });
+
+  app.get('/api/curseforge/mods/:modId/files/:fileId/download-url', { preHandler: requireAuth }, async (req, reply) => {
+    const { modId, fileId } = req.params as { modId: string; fileId: string };
+    try {
+      const url = await curseforge.getServerPackDownloadUrl(
+        Number.parseInt(modId, 10),
+        Number.parseInt(fileId, 10),
+        getEffectiveCurseForgeKey()
+      );
+      return { url };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Failed to resolve download URL' });
+    }
+  });
+
   orchestrator.on('console:line', (data) => {
     broadcast({ type: 'console:line', ...data });
   });
@@ -431,6 +571,23 @@ export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): 
       reason,
       minutesRemaining,
     });
+  });
+
+  maintenance.on('notice', (notice: { kind: 'warning' | 'deferred' | 'rebooting' | 'online'; message: string }) => {
+    broadcast({ type: 'maintenance:notice', ...notice });
+    const titleMap = {
+      warning: 'Scheduled Maintenance Reboot Warning',
+      deferred: 'Maintenance Reboot Deferred',
+      rebooting: 'Server PC Rebooting',
+      online: 'Server PC Back Online',
+    };
+    const colorMap = {
+      warning: 0xf59e0b,
+      deferred: 0x0ea5e9,
+      rebooting: 0xef4444,
+      online: 0x10b981,
+    };
+    void discord.sendChannelNotice(titleMap[notice.kind], notice.message, colorMap[notice.kind]);
   });
 
   const metricsTimer = setInterval(async () => {
@@ -492,6 +649,7 @@ export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): 
   const close = async () => {
     clearInterval(metricsTimer);
     leaseReaper.stop();
+    maintenance.stop();
     await discord.stop();
     for (const sock of wsClients) {
       sock.close();
@@ -500,6 +658,8 @@ export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): 
     await app.close();
     db.close();
   };
+
+  maintenance.setShutdownHandler(close);
 
   return {
     app,
@@ -512,6 +672,9 @@ export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): 
     orchestrator,
     leaseReaper,
     discord,
+    curseforge,
+    updater,
+    maintenance,
     close,
   };
 }

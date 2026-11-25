@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import {
+  EMBEDDED_APP_VERSION,
   EMBEDDED_CATALOG_FILES,
   EMBEDDED_ENV_EXAMPLE,
   IS_BUNDLED_EXE,
@@ -12,7 +13,6 @@ import {
 export function isSeaExecutable(): boolean {
   try {
     // Node 22 built-in node:sea module detects Single Executable Application mode
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const sea = process.getBuiltinModule?.('node:sea') as { isSea?: () => boolean } | undefined;
     return Boolean(sea?.isSea?.());
   } catch {
@@ -36,6 +36,22 @@ function resolveWorkspaceRoot(): string {
 
 export const WORKSPACE_ROOT = resolveWorkspaceRoot();
 
+function resolveAppVersion(): string {
+  if (EMBEDDED_APP_VERSION) return EMBEDDED_APP_VERSION;
+  try {
+    const pkgPath = path.join(WORKSPACE_ROOT, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: string };
+      if (pkg.version) return pkg.version;
+    }
+  } catch {
+    // fallback below
+  }
+  return '1.1.0';
+}
+
+export const APP_VERSION = resolveAppVersion();
+
 function materializeBundledDefaults(rootDir: string): void {
   if (!IS_BUNDLED_EXE) return;
 
@@ -45,7 +61,7 @@ function materializeBundledDefaults(rootDir: string): void {
     fs.writeFileSync(envPath, EMBEDDED_ENV_EXAMPLE, 'utf8');
   }
 
-  // Extract built-in YAML game templates beside ServerForge.exe so users can inspect/extend them
+  // Extract any new built-in YAML game templates beside ServerForge.exe without overwriting user edits
   const catalogDir = path.join(rootDir, 'catalog', 'games');
   fs.mkdirSync(catalogDir, { recursive: true });
   for (const [filename, content] of Object.entries(EMBEDDED_CATALOG_FILES)) {
@@ -62,6 +78,7 @@ dotenv.config({ path: path.join(WORKSPACE_ROOT, '.env') });
 export type RuntimeMode = 'auto' | 'docker' | 'native' | 'mock';
 
 export interface AppConfig {
+  appVersion: string;
   port: number;
   host: string;
   publicHost: string;
@@ -72,12 +89,14 @@ export interface AppConfig {
   instancesDir: string;
   backupsDir: string;
   toolsDir: string;
+  updatesDir: string;
   webDistDir: string;
   dbPath: string;
   jwtSecret: string;
   discordToken: string;
   discordClientId: string;
   discordGuildId: string;
+  curseforgeApiKey: string;
 }
 
 function loadOrCreateJwtSecret(dataDir: string): string {
@@ -109,12 +128,14 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const instancesDir = path.join(dataDir, 'instances');
   const backupsDir = path.join(dataDir, 'backups');
   const toolsDir = path.join(dataDir, 'tools');
+  const updatesDir = path.join(dataDir, 'updates');
 
-  for (const dir of [dataDir, customCatalogDir, instancesDir, backupsDir, toolsDir]) {
+  for (const dir of [dataDir, customCatalogDir, instancesDir, backupsDir, toolsDir, updatesDir]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
   return {
+    appVersion: overrides.appVersion ?? APP_VERSION,
     port: overrides.port ?? Number(process.env.PORT || 3000),
     host: overrides.host ?? (process.env.HOST || '0.0.0.0'),
     publicHost: overrides.publicHost ?? (process.env.PUBLIC_HOST || 'localhost'),
@@ -125,11 +146,13 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     instancesDir,
     backupsDir,
     toolsDir,
+    updatesDir,
     webDistDir: overrides.webDistDir ?? path.join(WORKSPACE_ROOT, 'packages', 'web', 'dist'),
     dbPath: overrides.dbPath ?? path.join(dataDir, 'serverforge.sqlite'),
     jwtSecret: overrides.jwtSecret ?? loadOrCreateJwtSecret(dataDir),
     discordToken: overrides.discordToken ?? (process.env.DISCORD_TOKEN || ''),
     discordClientId: overrides.discordClientId ?? (process.env.DISCORD_CLIENT_ID || ''),
     discordGuildId: overrides.discordGuildId ?? (process.env.DISCORD_GUILD_ID || ''),
+    curseforgeApiKey: overrides.curseforgeApiKey ?? (process.env.CURSEFORGE_API_KEY || ''),
   };
 }

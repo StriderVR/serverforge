@@ -58,9 +58,12 @@ for (const file of fs.readdirSync(CATALOG_DIR)) {
   }
 }
 const envExample = fs.existsSync(ENV_EXAMPLE_PATH) ? fs.readFileSync(ENV_EXAMPLE_PATH, 'utf8') : '';
+const rootPkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const appVersion = rootPkg.version || '1.0.0';
 
 const embeddedModuleCode = `
 export const IS_BUNDLED_EXE = true;
+export const EMBEDDED_APP_VERSION = ${JSON.stringify(appVersion)};
 export const EMBEDDED_WEB_ASSETS = ${JSON.stringify(webAssets)};
 export const EMBEDDED_CATALOG_FILES = ${JSON.stringify(catalogFiles)};
 export const EMBEDDED_ENV_EXAMPLE = ${JSON.stringify(envExample)};

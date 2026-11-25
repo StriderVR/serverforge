@@ -1,0 +1,143 @@
+id: minecraft-curseforge
+name: "Minecraft (CurseForge Modpack)"
+shortName: "MC Modpack"
+category: sandbox
+description: "Dedicated modded Minecraft server built directly from any CurseForge modpack (All the Mods, Better MC, RLCraft, Create, Prominence II, etc.) with automatic Java 8/17/21 runtime selection."
+accentColor: "#f97316"
+joinHint: "Launch matching CurseForge pack -> Multiplayer -> {{HOST}}:{{PORT_GAME}}"
+resources:
+  minRamGb: 6
+  recommendedRamGb: 8
+  minDiskGb: 15
+ports:
+  - key: game
+    label: "Game Port"
+    defaultPort: 25565
+    protocol: tcp
+    primary: true
+  - key: rcon
+    label: "RCON Port"
+    defaultPort: 25575
+    protocol: tcp
+    internalOnly: true
+runtimes:
+  preferred: docker
+  docker:
+    image: "itzg/minecraft-server:{{JAVA_IMAGE_TAG}}"
+    volumes:
+      - hostSubdir: "data"
+        containerPath: "/data"
+    envTemplate:
+      EULA: "TRUE"
+      TYPE: "AUTO_CURSEFORGE"
+      CF_API_KEY: "{{CF_API_KEY}}"
+      CF_SLUG: "{{CF_SLUG}}"
+      CF_FILE_ID: "{{CF_FILE_ID}}"
+      CF_PAGE_URL: "{{CF_PAGE_URL}}"
+      CF_FORCE_SYNCHRONIZE: "{{CF_FORCE_SYNCHRONIZE}}"
+      MEMORY: "{{MEMORY_MB}}M"
+      USE_AIKAR_FLAGS: "{{USE_AIKAR_FLAGS}}"
+      MOTD: "{{MOTD}}"
+      MAX_PLAYERS: "{{MAX_PLAYERS}}"
+      DIFFICULTY: "{{DIFFICULTY}}"
+      MODE: "{{GAMEMODE}}"
+      VIEW_DISTANCE: "{{VIEW_DISTANCE}}"
+      ONLINE_MODE: "{{ONLINE_MODE}}"
+      ENABLE_RCON: "true"
+      RCON_PORT: "{{PORT_RCON}}"
+      RCON_PASSWORD: "{{RCON_PASSWORD}}"
+      SERVER_PORT: "{{PORT_GAME}}"
+  native:
+    installer: custom
+    executableWindows: "java"
+    executableLinux: "java"
+    argsTemplate: "-Xms2048M -Xmx{{MEMORY_MB}}M -jar server.jar nogui"
+    saveSubdir: "server"
+    envTemplate:
+      SERVER_PORT: "{{PORT_GAME}}"
+      RCON_PORT: "{{PORT_RCON}}"
+      RCON_PASSWORD: "{{RCON_PASSWORD}}"
+query:
+  protocol: minecraft-slp
+  portKey: game
+  rconPortKey: rcon
+  passwordField: RCON_PASSWORD
+  listPlayersCommand: "list"
+  listPlayersCountRegex: "There are (\\d+) of a max"
+lifecycle:
+  bootGraceSeconds: 480
+  gracefulStopTimeoutSeconds: 60
+  saveMethod: rcon
+  saveCommand: "save-all"
+  stopCommand: "stop"
+configFields:
+  - key: CF_SLUG
+    label: "CurseForge Modpack Slug"
+    description: "Auto-filled when picking from the CurseForge browser (e.g. all-the-mods-10, better-mc-forge-bmc4)."
+    type: string
+    default: ""
+  - key: CF_FILE_ID
+    label: "Modpack File / Version ID (optional)"
+    description: "Leave blank to automatically install the latest release of the modpack."
+    type: string
+    default: ""
+  - key: CF_PAGE_URL
+    label: "CurseForge Modpack Page URL (optional)"
+    description: "Alternative to slug — paste a CurseForge modpack or file URL directly."
+    type: string
+    default: ""
+  - key: SERVER_PACK_ZIP
+    label: "Native Server Pack ZIP URL or Path (Native Runtime)"
+    description: "Optional direct download URL or local .zip path for running without Docker."
+    type: string
+    default: ""
+  - key: JAVA_IMAGE_TAG
+    label: "Java Runtime Version (Docker)"
+    description: "Java 21 for MC 1.20.5+, Java 17 for MC 1.18-1.20.4, Java 8 for MC 1.16.5 and older."
+    type: select
+    default: "java21"
+    options: ["java21", "java17", "java8", "latest"]
+    required: true
+  - key: MOTD
+    label: "Server MOTD"
+    type: string
+    default: "ServerForge CurseForge Modpack"
+  - key: MAX_PLAYERS
+    label: "Max Players"
+    type: number
+    default: 8
+    min: 1
+    max: 100
+  - key: DIFFICULTY
+    label: "Difficulty"
+    type: select
+    default: "normal"
+    options: ["peaceful", "easy", "normal", "hard"]
+  - key: GAMEMODE
+    label: "Game Mode"
+    type: select
+    default: "survival"
+    options: ["survival", "creative", "adventure"]
+  - key: VIEW_DISTANCE
+    label: "View Distance (chunks)"
+    type: number
+    default: 8
+    min: 4
+    max: 32
+  - key: USE_AIKAR_FLAGS
+    label: "Use Aikar's GC Flags (Recommended for Modpacks)"
+    type: boolean
+    default: true
+  - key: CF_FORCE_SYNCHRONIZE
+    label: "Force Sync Mods on Boot (When Updating Pack Version)"
+    type: boolean
+    default: false
+  - key: ONLINE_MODE
+    label: "Verify Mojang Accounts"
+    type: boolean
+    default: true
+  - key: RCON_PASSWORD
+    label: "RCON Password"
+    type: secret
+    autoGenerate: true
+    required: true

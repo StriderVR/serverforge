@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { FileCode2, LogOut, PlusCircle, Server, Settings, Wifi, WifiOff } from 'lucide-react';
-import type { GameTemplate, HostMetrics, WsServerEvent } from '@serverforge/shared';
+import { Download, FileCode2, LogOut, PlusCircle, Server, Settings, Wifi, WifiOff } from 'lucide-react';
+import type { GameTemplate, HostMetrics, UpdaterStatus, WsServerEvent } from '@serverforge/shared';
 import { api, type AuthState, type InstanceWithJoin } from './api';
 import { AuthView } from './components/AuthView';
 import { DeployPage } from './components/DeployPage';
@@ -19,6 +19,17 @@ export function App() {
   const [metrics, setMetrics] = useState<HostMetrics | null>(null);
   const [catalog, setCatalog] = useState<GameTemplate[]>([]);
   const [instances, setInstances] = useState<InstanceWithJoin[]>([]);
+  const [updaterStatus, setUpdaterStatus] = useState<UpdaterStatus | null>(null);
+  const [updaterProgress, setUpdaterProgress] = useState<{
+    stage: string;
+    percent: number;
+    message: string;
+  } | null>(null);
+  const [reconnectingState, setReconnectingState] = useState<{
+    label: string;
+    expectedVersion?: string;
+  } | null>(null);
+
   const [wsConnected, setWsConnected] = useState(false);
   const [liveLogsByInstance, setLiveLogsByInstance] = useState<
     Record<string, Array<{ timestamp: string; line: string }>>
@@ -27,6 +38,15 @@ export function App() {
   const checkAuth = useCallback(async () => {
     const state = await api.getAuthMe();
     setAuth(state);
+  }, []);
+
+  const refreshUpdater = useCallback(async (force = false) => {
+    try {
+      const st = await api.getUpdaterStatus(force);
+      setUpdaterStatus(st);
+    } catch {
+      // Non-fatal if offline
+    }
   }, []);
 
   const refreshData = useCallback(async () => {
@@ -43,6 +63,7 @@ export function App() {
   useEffect(() => {
     if (!auth?.authenticated) return;
     void refreshData();
+    void refreshUpdater(false);
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
@@ -62,6 +83,8 @@ export function App() {
           });
         } else if (msg.type === 'instance:update' || msg.type === 'instance:deleted') {
           void refreshData();
+        } else if (msg.type === 'updater:progress') {
+          setUpdaterProgress({ stage: msg.stage, percent: msg.percent, message: msg.message });
         }
       } catch {
         // ignore malformed frames
@@ -76,7 +99,30 @@ export function App() {
       clearInterval(poll);
       ws.close();
     };
-  }, [auth?.authenticated, refreshData]);
+  }, [auth?.authenticated, refreshData, refreshUpdater]);
+
+  // Auto-poll /api/health while ServerForge is updating or rebooting the host PC
+  useEffect(() => {
+    if (!reconnectingState) return;
+    let sawOffline = false;
+
+    const timer = setInterval(async () => {
+      try {
+        const health = await api.getHealth();
+        if (
+          health.status === 'ok' &&
+          (sawOffline ||
+            (reconnectingState.expectedVersion && health.version === reconnectingState.expectedVersion))
+        ) {
+          window.location.reload();
+        }
+      } catch {
+        sawOffline = true;
+      }
+    }, 2500);
+
+    return () => clearInterval(timer);
+  }, [reconnectingState]);
 
   if (!auth) {
     return (
@@ -110,7 +156,9 @@ export function App() {
           </div>
           <div>
             <div className="brand-title">ServerForge</div>
-            <span className="brand-sub">Game Control Plane</span>
+            <span className="brand-sub">
+              {updaterStatus ? `v${updaterStatus.currentVersion}` : 'Game Control Plane'}
+            </span>
           </div>
         </div>
 
@@ -132,11 +180,21 @@ export function App() {
           </button>
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
             <Settings size={16} />
-            Discord &amp; Guardrails
+            Settings &amp; Automation
           </button>
         </nav>
 
         <div className="sidebar-footer">
+          {updaterStatus?.updateAvailable && (
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              style={{ width: '100%' }}
+              onClick={() => setView('settings')}
+            >
+              <Download size={13} /> Update v{updaterStatus.latestVersion} Ready
+            </button>
+          )}
           <div className="status-line">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               {wsConnected ? <Wifi size={13} color="var(--status-online)" /> : <WifiOff size={13} />}
@@ -152,6 +210,21 @@ export function App() {
       </aside>
 
       <main className="main-content">
+        {reconnectingState && (
+          <div className="alert alert-info" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <strong>{reconnectingState.label}</strong>
+            <span>
+              {updaterProgress?.message ||
+                'Waiting for ServerForge to come back online. This page will reload automatically.'}
+            </span>
+            {updaterProgress && (
+              <div className="progress-track">
+                <div className="progress-fill" style={{ width: `${updaterProgress.percent}%` }} />
+              </div>
+            )}
+          </div>
+        )}
+
         {view === 'overview' && (
           <OverviewPage
             metrics={metrics}
@@ -170,6 +243,7 @@ export function App() {
               void refreshData();
               openInstance(id);
             }}
+            onGoToSettings={() => setView('settings')}
           />
         )}
 
@@ -191,7 +265,18 @@ export function App() {
           <TemplatesPage catalog={catalog} onRefreshCatalog={() => void refreshData()} />
         )}
 
-        {view === 'settings' && <SettingsPage metrics={metrics} onSaved={() => void refreshData()} />}
+        {view === 'settings' && (
+          <SettingsPage
+            metrics={metrics}
+            updaterStatus={updaterStatus}
+            updaterProgress={updaterProgress}
+            onSaved={() => void refreshData()}
+            onRefreshUpdater={refreshUpdater}
+            onStartReconnecting={(label, expectedVersion) =>
+              setReconnectingState({ label, expectedVersion })
+            }
+          />
+        )}
       </main>
     </div>
   );

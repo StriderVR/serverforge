@@ -45,10 +45,10 @@ describe('ServerForge REST API End-to-End', () => {
     const { token } = setupRes.json() as { token: string };
     const authHeaders = { authorization: `Bearer ${token}` };
 
-    // 3. Catalog returns all 5 initial games
+    // 3. Catalog returns all 6 initial games
     const catRes = await sf.app.inject({ method: 'GET', url: '/api/catalog', headers: authHeaders });
     expect(catRes.statusCode).toBe(200);
-    expect(catRes.json()).toHaveLength(5);
+    expect(catRes.json()).toHaveLength(6);
 
     // 4. Deploy & immediately start Ark: Survival Ascended
     const deployRes = await sf.app.inject({
@@ -87,7 +87,7 @@ describe('ServerForge REST API End-to-End', () => {
     expect(backupRes.statusCode).toBe(201);
     expect(backupRes.json().sizeBytes).toBeGreaterThan(0);
 
-    // 7. Import a 6th game template (Valheim) live via API
+    // 7. Import a 7th game template (Valheim) live via API
     const importRes = await sf.app.inject({
       method: 'POST',
       url: '/api/catalog/import',
@@ -119,7 +119,7 @@ runtimes:
     expect(importRes.statusCode).toBe(201);
 
     const updatedCat = await sf.app.inject({ method: 'GET', url: '/api/catalog', headers: authHeaders });
-    expect(updatedCat.json()).toHaveLength(6);
+    expect(updatedCat.json()).toHaveLength(7);
 
     // 8. Stop and delete instance cleanly
     const stopRes = await sf.app.inject({

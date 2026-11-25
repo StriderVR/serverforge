@@ -43,6 +43,24 @@ export class DiscordBotService {
     return { connected: this.connected, botTag: this.botTag };
   }
 
+  async sendChannelNotice(title: string, description: string, color = 0xf59e0b): Promise<void> {
+    if (!this.client || !this.connected) return;
+    const settings = this.db.getSettings(this.config.publicHost);
+    if (!settings.discordNotifyChannelId) return;
+    try {
+      const ch = (await this.client.channels.fetch(settings.discordNotifyChannelId)) as TextBasedChannel | null;
+      if (!ch || !('send' in ch)) return;
+      const embed = new EmbedBuilder()
+        .setTitle(title)
+        .setDescription(description)
+        .setColor(color)
+        .setTimestamp();
+      await ch.send({ embeds: [embed] });
+    } catch (err) {
+      console.error('[DiscordBot] Failed to send channel notice:', err);
+    }
+  }
+
   private buildEmbed(outcome: CommandOutcome): EmbedBuilder {
     const embed = new EmbedBuilder()
       .setTitle(outcome.title)

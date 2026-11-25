@@ -4,7 +4,7 @@
  *
  * When building the standalone ServerForge.exe bundle via scripts/build-exe-bundle.mjs,
  * esbuild replaces this module with the compiled React web assets, built-in YAML
- * game templates, and .env.example so ServerForge.exe runs as a single self-contained file.
+ * game templates, .env.example, and app version so ServerForge.exe runs as a single self-contained file.
  */
 
 export interface EmbeddedAsset {
@@ -13,6 +13,8 @@ export interface EmbeddedAsset {
 }
 
 export const IS_BUNDLED_EXE = false;
+
+export const EMBEDDED_APP_VERSION = '';
 
 export const EMBEDDED_WEB_ASSETS: Record<string, EmbeddedAsset> = {};
 

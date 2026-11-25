@@ -2,19 +2,22 @@ import React, { useEffect, useState } from 'react';
 import { Play, Rocket } from 'lucide-react';
 import type { GameTemplate, RuntimeKind } from '@serverforge/shared';
 import { api } from '../api';
+import { CurseForgeBrowser, type SelectedCurseForgePack } from './CurseForgeBrowser';
 
 interface DeployPageProps {
   catalog: GameTemplate[];
   onDeployed: (instanceId: string) => void;
+  onGoToSettings: () => void;
 }
 
-export function DeployPage({ catalog, onDeployed }: DeployPageProps) {
+export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPageProps) {
   const [selectedId, setSelectedId] = useState<string>(catalog[0]?.id ?? '');
   const selected = catalog.find((t) => t.id === selectedId) ?? catalog[0] ?? null;
 
   const [name, setName] = useState('');
   const [runtime, setRuntime] = useState<RuntimeKind>('docker');
   const [memoryGb, setMemoryGb] = useState<number>(4);
+  const [autoStart, setAutoStart] = useState(false);
   const [discordEnabled, setDiscordEnabled] = useState(true);
   const [config, setConfig] = useState<Record<string, string | number | boolean>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -25,6 +28,7 @@ export function DeployPage({ catalog, onDeployed }: DeployPageProps) {
     setName(`${selected.shortName} Server`);
     setRuntime(selected.runtimes.preferred);
     setMemoryGb(selected.resources.recommendedRamGb);
+    setAutoStart(false);
     const defaults: Record<string, string | number | boolean> = {};
     for (const field of selected.configFields) {
       if (field.default !== undefined) {
@@ -39,6 +43,20 @@ export function DeployPage({ catalog, onDeployed }: DeployPageProps) {
     setError(null);
   }, [selected?.id]);
 
+  const handleSelectCurseForgePack = (pack: SelectedCurseForgePack) => {
+    setName(pack.packName.slice(0, 56));
+    setMemoryGb((prev) => Math.max(prev, 8));
+    setConfig((prev) => ({
+      ...prev,
+      CF_SLUG: pack.slug,
+      CF_FILE_ID: pack.fileId,
+      CF_PAGE_URL: pack.pageUrl,
+      JAVA_IMAGE_TAG: pack.javaTag,
+      MOTD: `${pack.packName} — ServerForge`,
+      ...(pack.serverPackZipUrl ? { SERVER_PACK_ZIP: pack.serverPackZipUrl } : {}),
+    }));
+  };
+
   const handleDeploy = async (startImmediately: boolean) => {
     if (!selected) return;
     setError(null);
@@ -50,6 +68,7 @@ export function DeployPage({ catalog, onDeployed }: DeployPageProps) {
         runtime,
         memoryLimitMb: Math.round(memoryGb * 1024),
         config,
+        autoStart,
         discordEnabled,
         startImmediately,
       });
@@ -106,6 +125,13 @@ export function DeployPage({ catalog, onDeployed }: DeployPageProps) {
 
           <div className="panel-body">
             {error && <div className="alert alert-error">{error}</div>}
+
+            {selected.id === 'minecraft-curseforge' && (
+              <CurseForgeBrowser
+                onSelectPack={handleSelectCurseForgePack}
+                onGoToSettings={onGoToSettings}
+              />
+            )}
 
             <div className="form-grid">
               <div className="field">
@@ -168,6 +194,15 @@ export function DeployPage({ catalog, onDeployed }: DeployPageProps) {
                     onChange={(e) => setDiscordEnabled(e.target.checked)}
                   />
                   <span>Allow authorized Discord members to temporarily boot this server</span>
+                </label>
+                <label className="checkbox-row" style={{ paddingTop: 2 }}>
+                  <input
+                    id="deploy-autostart"
+                    type="checkbox"
+                    checked={autoStart}
+                    onChange={(e) => setAutoStart(e.target.checked)}
+                  />
+                  <span>Auto-start when server PC boots (after daily morning restart)</span>
                 </label>
               </div>
 

@@ -2,13 +2,18 @@ import type {
   AuditLogEntry,
   BackupRecord,
   CreateInstanceInput,
+  CurseForgeModpackFile,
+  CurseForgeModpackSummary,
   GameTemplate,
   HostMetrics,
+  MaintenanceStatus,
   ServerInstance,
   ServerLease,
   StartInstanceInput,
   SystemSettings,
   UpdateInstanceConfigInput,
+  UpdaterStatus,
+  WindowsRebootInspection,
 } from '@serverforge/shared';
 
 export interface InstanceWithJoin extends ServerInstance {
@@ -44,6 +49,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getHealth: () => request<{ status: string; version: string; runtimeMode: string; needsSetup: boolean }>('/api/health'),
   getAuthMe: () => request<AuthState>('/api/auth/me'),
   setupAdmin: (username: string, password: string) =>
     request<{ user: { id: string; username: string } }>('/api/auth/setup', {
@@ -65,6 +71,44 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   getAuditLogs: (limit = 60) => request<AuditLogEntry[]>(`/api/audit?limit=${limit}`),
+
+  // Updater
+  getUpdaterStatus: (refresh = false) =>
+    request<UpdaterStatus>(`/api/updater/status${refresh ? '?refresh=1' : ''}`),
+  applyUpdate: (resumeRunningServers = true) =>
+    request<{ ok: boolean; restarting: boolean; targetVersion: string; rememberedServers: number }>(
+      '/api/updater/apply',
+      {
+        method: 'POST',
+        body: JSON.stringify({ resumeRunningServers }),
+      }
+    ),
+
+  // Maintenance & Daily Reboot
+  getMaintenanceStatus: () => request<MaintenanceStatus>('/api/maintenance/status'),
+  triggerPcReboot: (resumeRunningServers = true, reason?: string) =>
+    request<{ ok: boolean; rebooting: boolean; stoppedServers: number; rememberedServers: number }>(
+      '/api/maintenance/reboot',
+      {
+        method: 'POST',
+        body: JSON.stringify({ resumeRunningServers, reason }),
+      }
+    ),
+  inspectWindowsReboots: () => request<WindowsRebootInspection>('/api/maintenance/inspect-reboots'),
+  disableWindowsTask: (taskPath: string, taskName: string) =>
+    request<{ ok: boolean }>('/api/maintenance/disable-task', {
+      method: 'POST',
+      body: JSON.stringify({ taskPath, taskName }),
+    }),
+
+  // CurseForge
+  getCurseForgeStatus: () => request<{ configured: boolean }>('/api/curseforge/status'),
+  searchCurseForge: (q: string) =>
+    request<CurseForgeModpackSummary[]>(`/api/curseforge/search?q=${encodeURIComponent(q)}`),
+  getCurseForgeFiles: (modId: number) =>
+    request<CurseForgeModpackFile[]>(`/api/curseforge/mods/${modId}/files`),
+  getCurseForgeServerPackUrl: (modId: number, fileId: number) =>
+    request<{ url: string | null }>(`/api/curseforge/mods/${modId}/files/${fileId}/download-url`),
 
   getCatalog: () => request<GameTemplate[]>('/api/catalog'),
   getTemplateYaml: (id: string) => request<{ id: string; yaml: string }>(`/api/catalog/${id}/yaml`),

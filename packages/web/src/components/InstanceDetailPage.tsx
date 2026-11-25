@@ -39,6 +39,7 @@ export function InstanceDetailPage({
   const [backupNote, setBackupNote] = useState('');
   const [editConfig, setEditConfig] = useState<Record<string, string | number | boolean>>({});
   const [editMemoryGb, setEditMemoryGb] = useState(4);
+  const [editAutoStart, setEditAutoStart] = useState(false);
   const [editDiscord, setEditDiscord] = useState(true);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -51,6 +52,7 @@ export function InstanceDetailPage({
       setDetail(data);
       setEditConfig(data.config);
       setEditMemoryGb(Math.round(data.memoryLimitMb / 1024));
+      setEditAutoStart(data.autoStart);
       setEditDiscord(data.discordEnabled);
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Failed to load server' });
@@ -331,6 +333,15 @@ export function InstanceDetailPage({
                 />
                 <span>Allow temporary Discord boot via /server start</span>
               </label>
+              <label className="checkbox-row" style={{ paddingTop: 2 }}>
+                <input
+                  type="checkbox"
+                  disabled={!isStopped}
+                  checked={editAutoStart}
+                  onChange={(e) => setEditAutoStart(e.target.checked)}
+                />
+                <span>Auto-start when server PC boots</span>
+              </label>
             </div>
 
             {(template?.configFields ?? []).map((field) => (
@@ -396,6 +407,7 @@ export function InstanceDetailPage({
                   () =>
                     api.updateInstanceConfig(detail.id, {
                       memoryLimitMb: editMemoryGb * 1024,
+                      autoStart: editAutoStart,
                       discordEnabled: editDiscord,
                       config: editConfig,
                     }),

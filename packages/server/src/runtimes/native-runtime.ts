@@ -88,6 +88,107 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     });
   }
 
+  private async prepareCurseForgeServerPack(
+    instance: ServerInstance,
+    serverDir: string,
+    onLog: (line: string) => void
+  ): Promise<{ exe: string; args: string[] } | null> {
+    const zipSource = String(instance.config.SERVER_PACK_ZIP ?? '').trim();
+    const markerPath = path.join(serverDir, '.serverforge-pack-installed');
+
+    if (zipSource && !fs.existsSync(markerPath)) {
+      const localZipPath = path.join(serverDir, 'server-pack.zip');
+      if (/^https?:\/\//i.test(zipSource)) {
+        onLog(`[CurseForge] Downloading Native Server Pack ZIP...`);
+        const res = await fetch(zipSource, { signal: AbortSignal.timeout(300_000) });
+        if (!res.ok) {
+          throw new Error(`Failed to download Server Pack ZIP (HTTP ${res.status})`);
+        }
+        const buf = Buffer.from(await res.arrayBuffer());
+        fs.writeFileSync(localZipPath, buf);
+      } else if (fs.existsSync(zipSource)) {
+        onLog(`[CurseForge] Copying local Server Pack ZIP from ${zipSource}...`);
+        fs.copyFileSync(zipSource, localZipPath);
+      } else {
+        throw new Error(`SERVER_PACK_ZIP path not found: ${zipSource}`);
+      }
+
+      onLog('[CurseForge] Extracting Server Pack ZIP...');
+      await new Promise<void>((resolve, reject) => {
+        const isWin = process.platform === 'win32';
+        const proc = isWin
+          ? spawn('powershell.exe', [
+              '-NoProfile',
+              '-Command',
+              `Expand-Archive -Path '${localZipPath.replace(/'/g, "''")}' -DestinationPath '${serverDir.replace(/'/g, "''")}' -Force`,
+            ])
+          : spawn('unzip', ['-o', localZipPath, '-d', serverDir]);
+
+        proc.on('error', (err) => reject(err));
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Server Pack ZIP extraction exited with code ${code}`));
+        });
+      });
+
+      fs.rmSync(localZipPath, { force: true });
+      fs.writeFileSync(markerPath, new Date().toISOString(), 'utf8');
+      onLog('[CurseForge] Server Pack extracted cleanly.');
+    }
+
+    // Write eula.txt and merge key server.properties values (port + RCON)
+    fs.writeFileSync(path.join(serverDir, 'eula.txt'), 'eula=true\n', 'utf8');
+    const propsPath = path.join(serverDir, 'server.properties');
+    const existingLines = fs.existsSync(propsPath)
+      ? fs.readFileSync(propsPath, 'utf8').split(/\r?\n/)
+      : [];
+    const overrides: Record<string, string> = {
+      'server-port': String(instance.ports.game ?? 25565),
+      'enable-rcon': 'true',
+      'rcon.port': String(instance.ports.rcon ?? 25575),
+      'rcon.password': String(instance.config.RCON_PASSWORD ?? ''),
+      'max-players': String(instance.config.MAX_PLAYERS ?? 8),
+      motd: String(instance.config.MOTD ?? 'ServerForge CurseForge Modpack'),
+    };
+    const seen = new Set<string>();
+    const updatedLines = existingLines.map((line) => {
+      const idx = line.indexOf('=');
+      if (idx > 0 && !line.trimStart().startsWith('#')) {
+        const key = line.slice(0, idx).trim();
+        if (key in overrides) {
+          seen.add(key);
+          return `${key}=${overrides[key]}`;
+        }
+      }
+      return line;
+    });
+    for (const [k, v] of Object.entries(overrides)) {
+      if (!seen.has(k)) updatedLines.push(`${k}=${v}`);
+    }
+    fs.writeFileSync(propsPath, updatedLines.filter(Boolean).join('\n') + '\n', 'utf8');
+
+    // Update user_jvm_args.txt memory cap if present (standard Forge/NeoForge 1.18+ server packs)
+    const jvmArgsPath = path.join(serverDir, 'user_jvm_args.txt');
+    if (fs.existsSync(jvmArgsPath)) {
+      fs.writeFileSync(jvmArgsPath, `-Xms2048M\n-Xmx${instance.memoryLimitMb}M\n`, 'utf8');
+    }
+
+    // Auto-detect standard CurseForge server pack startup scripts
+    const isWin = process.platform === 'win32';
+    const candidates = isWin
+      ? ['startserver.bat', 'start.bat', 'run.bat', 'ServerStart.bat']
+      : ['startserver.sh', 'start.sh', 'run.sh', 'ServerStart.sh'];
+    for (const script of candidates) {
+      const full = path.join(serverDir, script);
+      if (fs.existsSync(full)) {
+        return isWin
+          ? { exe: 'cmd.exe', args: ['/c', full] }
+          : { exe: 'bash', args: [full] };
+      }
+    }
+    return null;
+  }
+
   async start(
     instance: ServerInstance,
     template: GameTemplate,
@@ -103,7 +204,10 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     const serverDir = path.join(instanceDir, 'server');
     fs.mkdirSync(serverDir, { recursive: true });
 
-    if (nativeSpec.installer === 'steamcmd' && nativeSpec.steamAppId) {
+    let customLaunch: { exe: string; args: string[] } | null = null;
+    if (template.id === 'minecraft-curseforge') {
+      customLaunch = await this.prepareCurseForgeServerPack(instance, serverDir, onLog);
+    } else if (nativeSpec.installer === 'steamcmd' && nativeSpec.steamAppId) {
       await this.ensureSteamCmdInstalled(nativeSpec.steamAppId, serverDir, nativeSpec.steamBeta, onLog);
     }
 
@@ -115,12 +219,14 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
 
     const isWin = process.platform === 'win32';
     const rawExe = isWin ? nativeSpec.executableWindows : (nativeSpec.executableLinux ?? nativeSpec.executableWindows);
-    const exePath = path.isAbsolute(rawExe) || !rawExe.includes('/') && !rawExe.includes('\\')
-      ? rawExe
-      : path.join(serverDir, rawExe);
+    const defaultExePath =
+      path.isAbsolute(rawExe) || (!rawExe.includes('/') && !rawExe.includes('\\'))
+        ? rawExe
+        : path.join(serverDir, rawExe);
 
     const renderedArgs = renderTemplateString(nativeSpec.argsTemplate, vars);
-    const args = splitArgs(renderedArgs);
+    const exePath = customLaunch?.exe ?? defaultExePath;
+    const args = customLaunch?.args ?? splitArgs(renderedArgs);
 
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const [k, v] of Object.entries(nativeSpec.envTemplate)) {

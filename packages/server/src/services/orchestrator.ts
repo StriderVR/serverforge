@@ -183,7 +183,7 @@ export class ServerOrchestrator extends EventEmitter {
       ports,
       config,
       memoryLimitMb,
-      autoStart: false,
+      autoStart: input.autoStart ?? false,
       discordEnabled: input.discordEnabled ?? true,
       containerId: null,
       lastError: null,
@@ -223,6 +223,7 @@ export class ServerOrchestrator extends EventEmitter {
     const updated = this.db.updateInstance(id, {
       name: patch.name?.trim() || existing.name,
       memoryLimitMb: patch.memoryLimitMb ?? existing.memoryLimitMb,
+      autoStart: patch.autoStart ?? existing.autoStart,
       discordEnabled: patch.discordEnabled ?? existing.discordEnabled,
       config: patch.config ? { ...existing.config, ...patch.config } : existing.config,
     });
@@ -609,6 +610,50 @@ export class ServerOrchestrator extends EventEmitter {
       details: `Deleted instance ${instance.name}`,
     });
     this.emit('instance:deleted', instance.id);
+  }
+
+  listRunningInstances(): ServerInstance[] {
+    return this.listInstances().filter(
+      (i) => i.status === 'running' || i.status === 'starting' || i.status === 'installing'
+    );
+  }
+
+  async stopAllRunning(
+    actor = 'System',
+    source: 'web' | 'discord' | 'system' = 'system',
+    reason = 'Shutdown requested'
+  ): Promise<string[]> {
+    const running = this.listRunningInstances();
+    const stoppedIds: string[] = [];
+    for (const inst of running) {
+      try {
+        await this.stopInstance(inst.id, actor, source, reason);
+        stoppedIds.push(inst.id);
+      } catch (err) {
+        console.error(`[Orchestrator] Failed to stop ${inst.name}:`, err);
+      }
+    }
+    return stoppedIds;
+  }
+
+  async startAutoStartInstances(skipIds = new Set<string>()): Promise<string[]> {
+    const startedIds: string[] = [];
+    const candidates = this.listInstances().filter(
+      (i) => i.autoStart && i.status === 'stopped' && !skipIds.has(i.id)
+    );
+    for (const inst of candidates) {
+      try {
+        await this.startInstance(inst.id, {
+          temporary: false,
+          requestedBy: 'AutoStart',
+          source: 'web',
+        });
+        startedIds.push(inst.id);
+      } catch (err) {
+        console.error(`[Orchestrator] Auto-start skipped for ${inst.name}:`, err);
+      }
+    }
+    return startedIds;
   }
 
   /**

@@ -21,6 +21,7 @@ async function main() {
   const sf = await createServerForgeApp();
   await sf.orchestrator.reconcileOnStartup();
   sf.leaseReaper.start(30_000);
+  sf.maintenance.start(60_000);
   await sf.discord.start();
 
   await sf.app.listen({ host: sf.config.host, port: sf.config.port });
@@ -29,7 +30,7 @@ async function main() {
 
   console.log('');
   console.log('======================================================');
-  console.log('  ServerForge Control Plane is ONLINE');
+  console.log(`  ServerForge v${sf.config.appVersion} Control Plane is ONLINE`);
   console.log(`  Dashboard:    ${localUrl}`);
   console.log(`  Data Folder:  ${WORKSPACE_ROOT}`);
   console.log(`  Runtime Mode: ${sf.config.runtimeMode}`);
@@ -44,14 +45,66 @@ async function main() {
     openBrowserOnWindows(localUrl);
   }
 
+  // 1. Resume any servers remembered across a self-update or managed PC reboot
+  const resumeResult = await sf.updater.resumeServersOnStartup();
+  const skipAutoStart = new Set(resumeResult.resumedIds);
+
+  // 2. Start any permanent servers marked 'Auto-Start on PC Boot'
+  const autoStartedIds = await sf.orchestrator.startAutoStartInstances(skipAutoStart);
+
+  if (resumeResult.postRebootNotify) {
+    const totalBooted = resumeResult.resumedIds.length + autoStartedIds.length;
+    setTimeout(() => {
+      void sf.discord.sendChannelNotice(
+        'Server PC Back Online',
+        totalBooted > 0
+          ? `ServerForge v${sf.config.appVersion} is back online after reboot and automatically started ${totalBooted} game server(s).`
+          : `ServerForge v${sf.config.appVersion} is back online after reboot. Use \`/server start\` to boot a game server.`,
+        0x10b981
+      );
+    }, 5000).unref?.();
+  }
+
+  // 3. Optional auto-update check on startup (only if enabled in Settings)
+  const settings = sf.db.getSettings(sf.config.publicHost);
+  if (settings.autoUpdateOnBoot && resumeResult.reason !== 'update') {
+    setTimeout(async () => {
+      try {
+        const status = await sf.updater.checkForUpdates(true);
+        if (status.updateAvailable && status.installMode === 'exe') {
+          console.log(`[AutoUpdate] Newer release v${status.latestVersion} detected on startup — applying update...`);
+          await sf.updater.applyUpdate({
+            resumeRunningServers: true,
+            actor: 'AutoUpdateOnBoot',
+            onShutdownRequested: async () => {
+              await sf.close();
+              process.exit(0);
+            },
+          });
+        }
+      } catch (err) {
+        console.error('[AutoUpdate] Startup update check skipped:', err);
+      }
+    }, 15_000).unref?.();
+  }
+
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
-    console.log(`\n[ServerForge] Received ${signal}, shutting down cleanly...`);
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n[ServerForge] Received ${signal}, saving running servers & shutting down cleanly...`);
+    try {
+      await sf.orchestrator.stopAllRunning('System', 'system', `Host shutdown (${signal})`);
+    } catch {
+      // ignore during forced exit
+    }
     await sf.close();
     process.exit(0);
   };
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGBREAK', () => void shutdown('SIGBREAK'));
 }
 
 main().catch((err) => {

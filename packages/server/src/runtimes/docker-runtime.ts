@@ -11,7 +11,10 @@ export class DockerRuntimeAdapter implements RuntimeAdapter {
   private readonly docker: Docker;
   private readonly activeLogStreams = new Map<string, NodeJS.ReadableStream>();
 
-  constructor(private readonly queryService: QueryService) {
+  constructor(
+    private readonly queryService: QueryService,
+    private readonly getGlobalVars: () => Record<string, string> = () => ({})
+  ) {
     this.docker =
       process.platform === 'win32'
         ? new Docker({ socketPath: '//./pipe/docker_engine' })
@@ -64,6 +67,37 @@ export class DockerRuntimeAdapter implements RuntimeAdapter {
     });
   }
 
+  resolveImage(instance: ServerInstance, template: GameTemplate): string {
+    const dockerSpec = template.runtimes.docker;
+    if (!dockerSpec) {
+      throw new Error(`Game template "${template.name}" does not define a Docker runtime.`);
+    }
+    const vars = buildTemplateVariables({
+      config: { ...this.getGlobalVars(), ...instance.config },
+      ports: instance.ports,
+      memoryLimitMb: instance.memoryLimitMb,
+    });
+    return renderTemplateString(dockerSpec.image, vars) || dockerSpec.image;
+  }
+
+  buildContainerEnv(instance: ServerInstance, template: GameTemplate): string[] {
+    const dockerSpec = template.runtimes.docker;
+    if (!dockerSpec) return [];
+    const vars = buildTemplateVariables({
+      config: { ...this.getGlobalVars(), ...instance.config },
+      ports: instance.ports,
+      memoryLimitMb: instance.memoryLimitMb,
+    });
+    const env: string[] = [];
+    for (const [k, v] of Object.entries(dockerSpec.envTemplate)) {
+      const rendered = renderTemplateString(v, vars);
+      if (rendered !== '') {
+        env.push(`${k}=${rendered}`);
+      }
+    }
+    return env;
+  }
+
   async start(
     instance: ServerInstance,
     template: GameTemplate,
@@ -76,21 +110,10 @@ export class DockerRuntimeAdapter implements RuntimeAdapter {
       throw new Error(`Game template "${template.name}" does not define a Docker runtime.`);
     }
 
-    await this.pullImageIfNeeded(dockerSpec.image, onLog);
+    const image = this.resolveImage(instance, template);
+    await this.pullImageIfNeeded(image, onLog);
 
-    const vars = buildTemplateVariables({
-      config: instance.config,
-      ports: instance.ports,
-      memoryLimitMb: instance.memoryLimitMb,
-    });
-
-    const env: string[] = [];
-    for (const [k, v] of Object.entries(dockerSpec.envTemplate)) {
-      const rendered = renderTemplateString(v, vars);
-      if (rendered !== '') {
-        env.push(`${k}=${rendered}`);
-      }
-    }
+    const env = this.buildContainerEnv(instance, template);
 
     const binds: string[] = [];
     for (const vol of dockerSpec.volumes) {
@@ -125,10 +148,10 @@ export class DockerRuntimeAdapter implements RuntimeAdapter {
       // Container doesn't exist yet
     }
 
-    onLog(`[Docker] Creating container ${name} (${dockerSpec.image})...`);
+    onLog(`[Docker] Creating container ${name} (${image})...`);
     const container = await this.docker.createContainer({
       name,
-      Image: dockerSpec.image,
+      Image: image,
       Env: env,
       Cmd: dockerSpec.command,
       ExposedPorts: exposedPorts,
