@@ -1,0 +1,122 @@
+id: minecraft
+name: "Minecraft (Java / Paper / Modded)"
+shortName: "Minecraft"
+category: sandbox
+description: "Dedicated Minecraft Java Edition server supporting Vanilla, Paper, Fabric, Forge, NeoForge, and Modrinth/CurseForge modpacks."
+accentColor: "#22c55e"
+joinHint: "Multiplayer -> Add Server -> {{HOST}}:{{PORT_GAME}}"
+resources:
+  minRamGb: 2
+  recommendedRamGb: 4
+  minDiskGb: 5
+ports:
+  - key: game
+    label: "Game Port"
+    defaultPort: 25565
+    protocol: tcp
+    primary: true
+  - key: rcon
+    label: "RCON Port"
+    defaultPort: 25575
+    protocol: tcp
+    internalOnly: true
+runtimes:
+  preferred: docker
+  docker:
+    image: "itzg/minecraft-server:latest"
+    volumes:
+      - hostSubdir: "data"
+        containerPath: "/data"
+    envTemplate:
+      EULA: "TRUE"
+      TYPE: "{{SERVER_TYPE}}"
+      VERSION: "{{MC_VERSION}}"
+      MEMORY: "{{MEMORY_MB}}M"
+      MOTD: "{{MOTD}}"
+      MAX_PLAYERS: "{{MAX_PLAYERS}}"
+      DIFFICULTY: "{{DIFFICULTY}}"
+      MODE: "{{GAMEMODE}}"
+      VIEW_DISTANCE: "{{VIEW_DISTANCE}}"
+      ENABLE_RCON: "true"
+      RCON_PORT: "{{PORT_RCON}}"
+      RCON_PASSWORD: "{{RCON_PASSWORD}}"
+      SERVER_PORT: "{{PORT_GAME}}"
+      MODRINTH_MODPACK: "{{MODPACK_SLUG}}"
+      ONLINE_MODE: "{{ONLINE_MODE}}"
+  native:
+    installer: java
+    executableWindows: "java"
+    executableLinux: "java"
+    argsTemplate: "-Xms1024M -Xmx{{MEMORY_MB}}M -jar server.jar nogui"
+    saveSubdir: "data"
+    envTemplate:
+      SERVER_PORT: "{{PORT_GAME}}"
+      RCON_PORT: "{{PORT_RCON}}"
+      RCON_PASSWORD: "{{RCON_PASSWORD}}"
+query:
+  protocol: minecraft-slp
+  portKey: game
+  rconPortKey: rcon
+  passwordField: RCON_PASSWORD
+  listPlayersCommand: "list"
+  listPlayersCountRegex: "There are (\\d+) of a max"
+lifecycle:
+  bootGraceSeconds: 180
+  gracefulStopTimeoutSeconds: 45
+  saveMethod: rcon
+  saveCommand: "save-all"
+  stopCommand: "stop"
+configFields:
+  - key: SERVER_TYPE
+    label: "Server Flavor"
+    description: "Choose Vanilla, Paper (high performance plugins), Fabric, Forge, or NeoForge."
+    type: select
+    default: "PAPER"
+    options: ["PAPER", "VANILLA", "FABRIC", "FORGE", "NEOFORGE", "MODRINTH"]
+    required: true
+  - key: MC_VERSION
+    label: "Minecraft Version"
+    description: "Use LATEST or a pinned version like 1.21.4."
+    type: string
+    default: "LATEST"
+    required: true
+  - key: MOTD
+    label: "Server MOTD"
+    type: string
+    default: "ServerForge Minecraft World"
+  - key: MAX_PLAYERS
+    label: "Max Players"
+    type: number
+    default: 10
+    min: 1
+    max: 100
+  - key: DIFFICULTY
+    label: "Difficulty"
+    type: select
+    default: "normal"
+    options: ["peaceful", "easy", "normal", "hard"]
+  - key: GAMEMODE
+    label: "Game Mode"
+    type: select
+    default: "survival"
+    options: ["survival", "creative", "adventure"]
+  - key: VIEW_DISTANCE
+    label: "View Distance (chunks)"
+    type: number
+    default: 10
+    min: 4
+    max: 32
+  - key: MODPACK_SLUG
+    label: "Modrinth Modpack Slug (optional)"
+    description: "Only used when Server Flavor is set to MODRINTH."
+    type: string
+    default: ""
+  - key: ONLINE_MODE
+    label: "Verify Mojang Accounts"
+    type: boolean
+    default: true
+  - key: RCON_PASSWORD
+    label: "RCON Password"
+    type: secret
+    autoGenerate: true
+    required: true

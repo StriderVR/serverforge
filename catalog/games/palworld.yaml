@@ -1,0 +1,98 @@
+id: palworld
+name: "Palworld"
+shortName: "Palworld"
+category: survival
+description: "Dedicated Palworld multiplayer server with built-in REST API player queries and safe world saving."
+accentColor: "#0ea5e9"
+joinHint: "Join Multiplayer Game -> Bottom IP field -> {{HOST}}:{{PORT_GAME}}"
+resources:
+  minRamGb: 8
+  recommendedRamGb: 16
+  minDiskGb: 15
+ports:
+  - key: game
+    label: "Game Port"
+    defaultPort: 8211
+    protocol: udp
+    primary: true
+  - key: query
+    label: "Steam Query Port"
+    defaultPort: 27015
+    protocol: udp
+  - key: rest
+    label: "REST API Port"
+    defaultPort: 8212
+    protocol: tcp
+    internalOnly: true
+  - key: rcon
+    label: "RCON Port"
+    defaultPort: 25575
+    protocol: tcp
+    internalOnly: true
+runtimes:
+  preferred: docker
+  docker:
+    image: "thijsvanloef/palworld-server-docker:latest"
+    volumes:
+      - hostSubdir: "palworld"
+        containerPath: "/palworld"
+    envTemplate:
+      PLAYERS: "{{MAX_PLAYERS}}"
+      PORT: "{{PORT_GAME}}"
+      QUERY_PORT: "{{PORT_QUERY}}"
+      SERVER_NAME: "{{SERVER_NAME}}"
+      SERVER_DESCRIPTION: "{{SERVER_DESCRIPTION}}"
+      SERVER_PASSWORD: "{{SERVER_PASSWORD}}"
+      ADMIN_PASSWORD: "{{ADMIN_PASSWORD}}"
+      REST_API_ENABLED: "true"
+      REST_API_PORT: "{{PORT_REST}}"
+      RCON_ENABLED: "true"
+      RCON_PORT: "{{PORT_RCON}}"
+      MULTITHREADING: "true"
+      COMMUNITY: "false"
+      UPDATE_ON_BOOT: "true"
+  native:
+    installer: steamcmd
+    steamAppId: 2394010
+    executableWindows: "PalServer.exe"
+    executableLinux: "PalServer.sh"
+    argsTemplate: "-port={{PORT_GAME}} -queryport={{PORT_QUERY}} -players={{MAX_PLAYERS}} -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS"
+    saveSubdir: "Pal/Saved"
+    envTemplate: {}
+query:
+  protocol: palworld-rest
+  portKey: rest
+  rconPortKey: rcon
+  username: "admin"
+  passwordField: ADMIN_PASSWORD
+lifecycle:
+  bootGraceSeconds: 240
+  gracefulStopTimeoutSeconds: 60
+  saveMethod: palworld-rest
+  saveCommand: "Save"
+  stopCommand: "Shutdown 10 ServerForge_Auto_Shutdown"
+configFields:
+  - key: SERVER_NAME
+    label: "Server Name"
+    type: string
+    default: "ServerForge Palworld"
+    required: true
+  - key: SERVER_DESCRIPTION
+    label: "Server Description"
+    type: string
+    default: "Hosted on demand via ServerForge"
+  - key: MAX_PLAYERS
+    label: "Max Players"
+    type: number
+    default: 8
+    min: 2
+    max: 32
+  - key: SERVER_PASSWORD
+    label: "Join Password (optional)"
+    type: secret
+    default: ""
+  - key: ADMIN_PASSWORD
+    label: "Admin / REST API Password"
+    type: secret
+    autoGenerate: true
+    required: true

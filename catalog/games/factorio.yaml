@@ -1,0 +1,77 @@
+id: factorio
+name: "Factorio"
+shortName: "Factorio"
+category: automation
+description: "Headless Factorio 2.0 / Space Age multiplayer server with RCON control and automatic map saves."
+accentColor: "#ea580c"
+joinHint: "Multiplayer -> Connect to address -> {{HOST}}:{{PORT_GAME}}"
+resources:
+  minRamGb: 1
+  recommendedRamGb: 4
+  minDiskGb: 4
+ports:
+  - key: game
+    label: "Game Port"
+    defaultPort: 34197
+    protocol: udp
+    primary: true
+  - key: rcon
+    label: "RCON Port"
+    defaultPort: 27015
+    protocol: tcp
+    internalOnly: true
+runtimes:
+  preferred: docker
+  docker:
+    image: "factoriotools/factorio:stable"
+    volumes:
+      - hostSubdir: "factorio"
+        containerPath: "/factorio"
+    envTemplate:
+      PORT: "{{PORT_GAME}}"
+      RCON_PORT: "{{PORT_RCON}}"
+      RCON_PASSWORD: "{{RCON_PASSWORD}}"
+      SAVE_NAME: "{{SAVE_NAME}}"
+      GENERATE_NEW_SAVE: "true"
+      UPDATE_MODS_ON_START: "true"
+  native:
+    installer: download
+    executableWindows: "bin/x64/factorio.exe"
+    executableLinux: "bin/x64/factorio"
+    argsTemplate: "--start-server-load-latest --port {{PORT_GAME}} --rcon-port {{PORT_RCON}} --rcon-password {{RCON_PASSWORD}}"
+    saveSubdir: "saves"
+    envTemplate: {}
+query:
+  protocol: rcon
+  portKey: rcon
+  rconPortKey: rcon
+  passwordField: RCON_PASSWORD
+  listPlayersCommand: "/players online"
+  listPlayersCountRegex: "Online players \\((\\d+)\\)"
+lifecycle:
+  bootGraceSeconds: 90
+  gracefulStopTimeoutSeconds: 45
+  saveMethod: rcon
+  saveCommand: "/server-save"
+  stopCommand: "/quit"
+configFields:
+  - key: SAVE_NAME
+    label: "Save / World Name"
+    type: string
+    default: "serverforge-factory"
+    required: true
+  - key: MAX_PLAYERS
+    label: "Max Players"
+    type: number
+    default: 10
+    min: 1
+    max: 64
+  - key: SERVER_PASSWORD
+    label: "Game Join Password (optional)"
+    type: secret
+    default: ""
+  - key: RCON_PASSWORD
+    label: "RCON Password"
+    type: secret
+    autoGenerate: true
+    required: true

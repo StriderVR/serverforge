@@ -1,0 +1,2 @@
+export * from './schemas/game-template.js';
+export * from './schemas/instance.js';

@@ -1,0 +1,499 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import cookie from '@fastify/cookie';
+import cors from '@fastify/cors';
+import fastifyStatic from '@fastify/static';
+import websocket from '@fastify/websocket';
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import {
+  CreateInstanceInputSchema,
+  StartInstanceInputSchema,
+  SystemSettingsSchema,
+  UpdateInstanceConfigInputSchema,
+  type WsServerEvent,
+} from '@serverforge/shared';
+interface WsClient {
+  readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+}
+import { AuthService, type AuthTokenPayload } from '../auth/auth-service.js';
+import { CatalogService } from '../catalog/catalog-service.js';
+import { loadConfig, type AppConfig } from '../config.js';
+import { AppDatabase } from '../db/database.js';
+import { DiscordBotService } from '../discord/bot.js';
+import { QueryService } from '../query/query-service.js';
+import { RuntimeManager } from '../runtimes/runtime-manager.js';
+import { LeaseReaper } from '../services/lease-reaper.js';
+import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
+import { TelemetryService } from '../services/telemetry-service.js';
+
+const AUTH_COOKIE = 'sf_token';
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    authUser?: AuthTokenPayload;
+  }
+}
+
+export interface ServerForgeApp {
+  app: FastifyInstance;
+  config: AppConfig;
+  db: AppDatabase;
+  auth: AuthService;
+  catalog: CatalogService;
+  runtimeManager: RuntimeManager;
+  telemetry: TelemetryService;
+  orchestrator: ServerOrchestrator;
+  leaseReaper: LeaseReaper;
+  discord: DiscordBotService;
+  close: () => Promise<void>;
+}
+
+export async function createServerForgeApp(overrides: Partial<AppConfig> = {}): Promise<ServerForgeApp> {
+  const config = loadConfig(overrides);
+  const db = new AppDatabase(config.dbPath);
+  const auth = new AuthService(db, config.jwtSecret);
+  const catalog = new CatalogService(config.catalogDir, config.customCatalogDir);
+  const queryService = new QueryService();
+  const runtimeManager = new RuntimeManager(config.runtimeMode, config.toolsDir, queryService);
+
+  let discordStatusFn = () => ({ connected: false, botTag: null as string | null });
+  const telemetry = new TelemetryService(db, runtimeManager, () => discordStatusFn(), config.publicHost);
+  const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry);
+  const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
+  const discord = new DiscordBotService(config, db, catalog, orchestrator);
+  discordStatusFn = () => discord.getStatus();
+
+  const app = Fastify({ logger: false });
+
+  await app.register(cors, {
+    origin: true,
+    credentials: true,
+  });
+  await app.register(cookie);
+  await app.register(websocket);
+
+  const extractToken = (req: FastifyRequest): string | null => {
+    const cookieToken = req.cookies?.[AUTH_COOKIE];
+    if (cookieToken) return cookieToken;
+    const header = req.headers.authorization;
+    if (header?.startsWith('Bearer ')) {
+      return header.slice(7).trim();
+    }
+    return null;
+  };
+
+  const requireAuth = async (req: FastifyRequest, reply: import('fastify').FastifyReply) => {
+    const token = extractToken(req);
+    if (!token) {
+      return reply.status(401).send({ error: 'Authentication required' });
+    }
+    const payload = auth.verifyToken(token);
+    if (!payload) {
+      return reply.status(401).send({ error: 'Invalid or expired session' });
+    }
+    req.authUser = payload;
+  };
+
+  // --- Health & Auth ---
+
+  app.get('/api/health', async () => ({
+    status: 'ok',
+    runtimeMode: config.runtimeMode,
+    needsSetup: auth.needsInitialSetup(),
+  }));
+
+  app.get('/api/auth/me', async (req) => {
+    const needsSetup = auth.needsInitialSetup();
+    const token = extractToken(req);
+    const user = token ? auth.verifyToken(token) : null;
+    return {
+      needsSetup,
+      authenticated: Boolean(user),
+      user: user ? { id: user.sub, username: user.username, role: user.role } : null,
+    };
+  });
+
+  app.post('/api/auth/setup', async (req, reply) => {
+    const body = req.body as { username?: string; password?: string } | undefined;
+    if (!body?.username || !body?.password) {
+      return reply.status(400).send({ error: 'Username and password are required.' });
+    }
+    try {
+      const { user, token } = auth.setupInitialAdmin(body.username, body.password);
+      reply.setCookie(AUTH_COOKIE, token, {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        maxAge: 60 * 60 * 24 * 7,
+      });
+      return {
+        user: { id: user.id, username: user.username, role: user.role },
+        token,
+      };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Setup failed' });
+    }
+  });
+
+  app.post('/api/auth/login', async (req, reply) => {
+    const body = req.body as { username?: string; password?: string } | undefined;
+    if (!body?.username || !body?.password) {
+      return reply.status(400).send({ error: 'Username and password are required.' });
+    }
+    const res = auth.login(body.username, body.password);
+    if (!res) {
+      return reply.status(401).send({ error: 'Invalid username or password.' });
+    }
+    reply.setCookie(AUTH_COOKIE, res.token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 60 * 60 * 24 * 7,
+    });
+    return {
+      user: { id: res.user.id, username: res.user.username, role: res.user.role },
+      token: res.token,
+    };
+  });
+
+  app.post('/api/auth/logout', async (_req, reply) => {
+    reply.clearCookie(AUTH_COOKIE, { path: '/' });
+    return { ok: true };
+  });
+
+  // --- Protected API Routes ---
+
+  app.get('/api/host/metrics', { preHandler: requireAuth }, async () => {
+    return telemetry.getHostMetrics(orchestrator.getRunningCount());
+  });
+
+  app.get('/api/settings', { preHandler: requireAuth }, async () => {
+    return db.getSettings(config.publicHost);
+  });
+
+  app.put('/api/settings', { preHandler: requireAuth }, async (req, reply) => {
+    const parsed = SystemSettingsSchema.partial().safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid settings payload', issues: parsed.error.issues });
+    }
+    const updated = db.saveSettings(parsed.data, config.publicHost);
+    db.addAuditLog({
+      actor: req.authUser?.username || 'admin',
+      source: 'web',
+      action: 'settings.update',
+      instanceId: null,
+      details: 'Updated system & Discord guardrails settings',
+    });
+    return updated;
+  });
+
+  app.get('/api/audit', { preHandler: requireAuth }, async (req) => {
+    const q = req.query as { limit?: string };
+    const limit = Math.min(Math.max(Number(q.limit) || 50, 1), 250);
+    return db.listAuditLogs(limit);
+  });
+
+  // --- Game Catalog ---
+
+  app.get('/api/catalog', { preHandler: requireAuth }, async () => {
+    return catalog.listTemplates();
+  });
+
+  app.get('/api/catalog/:id/yaml', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const raw = catalog.getTemplateYaml(id);
+    if (!raw) return reply.status(404).send({ error: 'Template not found' });
+    return { id, yaml: raw };
+  });
+
+  app.post('/api/catalog/validate', { preHandler: requireAuth }, async (req) => {
+    const body = req.body as { yaml?: string } | undefined;
+    return catalog.validateYaml(body?.yaml ?? '');
+  });
+
+  app.post('/api/catalog/import', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { yaml?: string } | undefined;
+    if (!body?.yaml) {
+      return reply.status(400).send({ error: 'YAML content is required.' });
+    }
+    try {
+      const template = catalog.importCustomTemplate(body.yaml);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'catalog.import',
+        instanceId: null,
+        details: `Imported custom game template "${template.name}" (${template.id})`,
+      });
+      return reply.status(201).send(template);
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Import failed' });
+    }
+  });
+
+  app.delete('/api/catalog/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const deleted = catalog.deleteCustomTemplate(id);
+    if (!deleted) {
+      return reply.status(400).send({ error: 'Only custom imported templates can be deleted.' });
+    }
+    return { ok: true };
+  });
+
+  // --- Server Instances ---
+
+  app.get('/api/instances', { preHandler: requireAuth }, async () => {
+    const settings = db.getSettings(config.publicHost);
+    return orchestrator.listInstances().map((inst) => ({
+      ...inst,
+      joinAddress: orchestrator.getJoinAddress(inst),
+      publicHost: settings.publicHost,
+    }));
+  });
+
+  app.get('/api/instances/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    return {
+      ...inst,
+      joinAddress: orchestrator.getJoinAddress(inst),
+      logs: orchestrator.logs.getLines(inst.id),
+      backups: db.listBackups(inst.id),
+    };
+  });
+
+  app.post('/api/instances', { preHandler: requireAuth }, async (req, reply) => {
+    const parsed = CreateInstanceInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid instance configuration', issues: parsed.error.issues });
+    }
+
+    try {
+      let inst = orchestrator.createInstance(parsed.data, req.authUser?.username || 'admin', 'web');
+      if (parsed.data.startImmediately) {
+        inst = await orchestrator.startInstance(inst.id, {
+          temporary: false,
+          requestedBy: req.authUser?.username || 'admin',
+          source: 'web',
+        });
+      }
+      return reply.status(201).send({
+        ...inst,
+        joinAddress: orchestrator.getJoinAddress(inst),
+      });
+    } catch (err) {
+      const status = err instanceof GuardrailError ? 409 : 400;
+      return reply.status(status).send({ error: err instanceof Error ? err.message : 'Failed to create instance' });
+    }
+  });
+
+  app.patch('/api/instances/:id/config', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = UpdateInstanceConfigInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid config update', issues: parsed.error.issues });
+    }
+    try {
+      const updated = orchestrator.updateInstanceConfig(id, parsed.data, req.authUser?.username || 'admin');
+      return { ...updated, joinAddress: orchestrator.getJoinAddress(updated) };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Update failed' });
+    }
+  });
+
+  app.post('/api/instances/:id/start', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = StartInstanceInputSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid start options', issues: parsed.error.issues });
+    }
+    try {
+      const started = await orchestrator.startInstance(id, {
+        ...parsed.data,
+        requestedBy: parsed.data.requestedBy || req.authUser?.username || 'admin',
+        source: 'web',
+      });
+      return { ...started, joinAddress: orchestrator.getJoinAddress(started) };
+    } catch (err) {
+      const status = err instanceof GuardrailError ? 409 : 400;
+      return reply.status(status).send({ error: err instanceof Error ? err.message : 'Failed to start server' });
+    }
+  });
+
+  app.post('/api/instances/:id/stop', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      const stopped = await orchestrator.stopInstance(id, req.authUser?.username || 'admin', 'web');
+      return { ...stopped, joinAddress: orchestrator.getJoinAddress(stopped) };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Failed to stop server' });
+    }
+  });
+
+  app.post('/api/instances/:id/restart', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      const restarted = await orchestrator.restartInstance(id, req.authUser?.username || 'admin');
+      return { ...restarted, joinAddress: orchestrator.getJoinAddress(restarted) };
+    } catch (err) {
+      const status = err instanceof GuardrailError ? 409 : 400;
+      return reply.status(status).send({ error: err instanceof Error ? err.message : 'Failed to restart server' });
+    }
+  });
+
+  app.post('/api/instances/:id/command', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { command?: string } | undefined;
+    if (!body?.command?.trim()) {
+      return reply.status(400).send({ error: 'Command cannot be empty.' });
+    }
+    try {
+      const response = await orchestrator.sendCommand(id, body.command.trim(), req.authUser?.username || 'admin');
+      return { ok: true, response };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Command failed' });
+    }
+  });
+
+  app.post('/api/instances/:id/lease/extend', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { minutes?: number } | undefined;
+    const minutes = Math.min(Math.max(Number(body?.minutes) || 60, 15), 480);
+    try {
+      return orchestrator.extendLease(id, minutes, req.authUser?.username || 'admin', 'web');
+    } catch (err) {
+      const status = err instanceof GuardrailError ? 409 : 400;
+      return reply.status(status).send({ error: err instanceof Error ? err.message : 'Failed to extend lease' });
+    }
+  });
+
+  app.post('/api/instances/:id/lease/promote', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      return orchestrator.promoteToPermanent(id, req.authUser?.username || 'admin');
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Failed to promote lease' });
+    }
+  });
+
+  app.post('/api/instances/:id/backups', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { note?: string } | undefined;
+    try {
+      const backup = await orchestrator.createBackup(id, body?.note, req.authUser?.username || 'admin');
+      return reply.status(201).send(backup);
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Backup failed' });
+    }
+  });
+
+  app.delete('/api/instances/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      await orchestrator.deleteInstance(id, req.authUser?.username || 'admin');
+      return { ok: true };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Delete failed' });
+    }
+  });
+
+  // --- WebSocket Live Console & Telemetry Stream ---
+
+  const wsClients = new Set<WsClient>();
+
+  const broadcast = (event: WsServerEvent) => {
+    const payload = JSON.stringify(event);
+    for (const sock of wsClients) {
+      if (sock.readyState === 1) {
+        sock.send(payload);
+      }
+    }
+  };
+
+  orchestrator.on('console:line', (data) => {
+    broadcast({ type: 'console:line', ...data });
+  });
+  orchestrator.on('instance:update', (instance) => {
+    broadcast({ type: 'instance:update', instance });
+  });
+  orchestrator.on('instance:deleted', (instanceId) => {
+    broadcast({ type: 'instance:deleted', instanceId });
+  });
+  orchestrator.on('lease:warning', ({ lease, instance, reason, minutesRemaining }) => {
+    broadcast({
+      type: 'lease:warning',
+      lease,
+      instanceName: instance.name,
+      reason,
+      minutesRemaining,
+    });
+  });
+
+  const metricsTimer = setInterval(async () => {
+    if (wsClients.size === 0) return;
+    try {
+      const metrics = await telemetry.getHostMetrics(orchestrator.getRunningCount());
+      broadcast({ type: 'host:metrics', metrics });
+    } catch {
+      // ignore transient telemetry error
+    }
+  }, 5000);
+  metricsTimer.unref?.();
+
+  app.get('/ws', { websocket: true }, (socket, req) => {
+    const token = extractToken(req);
+    if (!token || !auth.verifyToken(token)) {
+      socket.close(4001, 'Unauthorized');
+      return;
+    }
+    wsClients.add(socket);
+    socket.on('close', () => {
+      wsClients.delete(socket);
+    });
+  });
+
+  // --- Serve Compiled React Web UI in Production ---
+
+  if (fs.existsSync(path.join(config.webDistDir, 'index.html'))) {
+    await app.register(fastifyStatic, {
+      root: config.webDistDir,
+      prefix: '/',
+    });
+
+    app.setNotFoundHandler((req, reply) => {
+      if (req.url.startsWith('/api/') || req.url.startsWith('/ws')) {
+        return reply.status(404).send({ error: 'Route not found' });
+      }
+      return reply.sendFile('index.html');
+    });
+  }
+
+  const close = async () => {
+    clearInterval(metricsTimer);
+    leaseReaper.stop();
+    await discord.stop();
+    for (const sock of wsClients) {
+      sock.close();
+    }
+    wsClients.clear();
+    await app.close();
+    db.close();
+  };
+
+  return {
+    app,
+    config,
+    db,
+    auth,
+    catalog,
+    runtimeManager,
+    telemetry,
+    orchestrator,
+    leaseReaper,
+    discord,
+    close,
+  };
+}

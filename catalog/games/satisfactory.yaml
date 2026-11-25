@@ -1,0 +1,72 @@
+id: satisfactory
+name: "Satisfactory"
+shortName: "Satisfactory"
+category: factory
+description: "First-person open-world factory building dedicated server (Satisfactory 1.0+)."
+accentColor: "#f59e0b"
+joinHint: "Server Manager -> Add Server -> {{HOST}}:{{PORT_GAME}}"
+resources:
+  minRamGb: 6
+  recommendedRamGb: 12
+  minDiskGb: 15
+ports:
+  - key: game
+    label: "Game & API Port"
+    defaultPort: 7777
+    protocol: both
+    primary: true
+runtimes:
+  preferred: docker
+  docker:
+    image: "wolveix/satisfactory-server:latest"
+    volumes:
+      - hostSubdir: "config"
+        containerPath: "/config"
+    envTemplate:
+      MAXPLAYERS: "{{MAX_PLAYERS}}"
+      SERVERGAMEPORT: "{{PORT_GAME}}"
+      AUTOPAUSE: "{{AUTO_PAUSE}}"
+      AUTOSAVEONDISCONNECT: "{{AUTOSAVE_ON_DISCONNECT}}"
+      AUTOSAVENUM: "{{AUTOSAVE_COUNT}}"
+      STEAMBETA: "{{EXPERIMENTAL}}"
+      SKIPUPDATE: "false"
+  native:
+    installer: steamcmd
+    steamAppId: 1690800
+    executableWindows: "FactoryServer.exe"
+    executableLinux: "FactoryServer.sh"
+    argsTemplate: "-Port={{PORT_GAME}} -unattended"
+    saveSubdir: "FactoryGame/Saved"
+    envTemplate: {}
+query:
+  protocol: satisfactory-api
+  portKey: game
+lifecycle:
+  bootGraceSeconds: 240
+  gracefulStopTimeoutSeconds: 60
+  saveMethod: none
+configFields:
+  - key: MAX_PLAYERS
+    label: "Max Players"
+    type: number
+    default: 8
+    min: 1
+    max: 32
+  - key: AUTO_PAUSE
+    label: "Pause Simulation When Empty"
+    type: boolean
+    default: true
+  - key: AUTOSAVE_ON_DISCONNECT
+    label: "Autosave on Last Player Disconnect"
+    type: boolean
+    default: true
+  - key: AUTOSAVE_COUNT
+    label: "Rolling Autosave Slots"
+    type: number
+    default: 5
+    min: 1
+    max: 20
+  - key: EXPERIMENTAL
+    label: "Use Experimental Branch"
+    type: boolean
+    default: false

@@ -1,0 +1,100 @@
+id: ark-survival-ascended
+name: "Ark: Survival Ascended"
+shortName: "Ark: ASA"
+category: survival
+description: "Unreal Engine 5 Ark: Survival Ascended dedicated server. Prefers Native Windows SteamCMD on Windows 11 for lowest RAM overhead."
+accentColor: "#14b8a6"
+joinHint: "In-Game Console (~) -> open {{HOST}}:{{PORT_GAME}} (or search '{{SESSION_NAME}}')"
+resources:
+  minRamGb: 12
+  recommendedRamGb: 16
+  minDiskGb: 30
+ports:
+  - key: game
+    label: "Game Port"
+    defaultPort: 7777
+    protocol: udp
+    primary: true
+  - key: peer
+    label: "Peer Port"
+    defaultPort: 7778
+    protocol: udp
+  - key: rcon
+    label: "RCON Port"
+    defaultPort: 27020
+    protocol: tcp
+    internalOnly: true
+runtimes:
+  preferred: native
+  native:
+    installer: steamcmd
+    steamAppId: 2430930
+    executableWindows: "ShooterGame/Binaries/Win64/ArkAscendedServer.exe"
+    executableLinux: "ShooterGame/Binaries/Win64/ArkAscendedServer.exe"
+    argsTemplate: "{{MAP}}?listen?SessionName=\"{{SESSION_NAME}}\"?Port={{PORT_GAME}}?RCONEnabled=True?RCONPort={{PORT_RCON}}?ServerAdminPassword={{RCON_PASSWORD}}?ServerPassword={{SERVER_PASSWORD}} -WinLiveMaxPlayers={{MAX_PLAYERS}} -NoBattlEye -mods={{MOD_IDS}}"
+    saveSubdir: "ShooterGame/Saved"
+    envTemplate: {}
+  docker:
+    image: "acekorneya/asa_server:latest"
+    volumes:
+      - hostSubdir: "asa"
+        containerPath: "/home/pok/arkserver"
+    envTemplate:
+      SESSION_NAME: "{{SESSION_NAME}}"
+      MAP_NAME: "{{MAP}}"
+      MAX_PLAYERS: "{{MAX_PLAYERS}}"
+      SERVER_ADMIN_PASSWORD: "{{RCON_PASSWORD}}"
+      SERVER_PASSWORD: "{{SERVER_PASSWORD}}"
+      ASA_PORT: "{{PORT_GAME}}"
+      RCON_PORT: "{{PORT_RCON}}"
+      MOD_IDS: "{{MOD_IDS}}"
+query:
+  protocol: rcon
+  portKey: rcon
+  rconPortKey: rcon
+  passwordField: RCON_PASSWORD
+  listPlayersCommand: "ListPlayers"
+  listPlayersPattern: "^\\d+\\.\\s+.+,"
+lifecycle:
+  bootGraceSeconds: 360
+  gracefulStopTimeoutSeconds: 90
+  saveMethod: rcon
+  saveCommand: "SaveWorld"
+  stopCommand: "DoExit"
+configFields:
+  - key: SESSION_NAME
+    label: "Session Name"
+    type: string
+    default: "ServerForge ASA"
+    required: true
+  - key: MAP
+    label: "Map"
+    type: select
+    default: "TheIsland_WP"
+    options:
+      - "TheIsland_WP"
+      - "ScorchedEarth_WP"
+      - "TheCenter_WP"
+      - "Aberration_WP"
+      - "Extinction_WP"
+      - "Astraeos_WP"
+    required: true
+  - key: MAX_PLAYERS
+    label: "Max Players"
+    type: number
+    default: 10
+    min: 2
+    max: 70
+  - key: MOD_IDS
+    label: "CurseForge Mod IDs (comma-separated)"
+    type: string
+    default: ""
+  - key: SERVER_PASSWORD
+    label: "Join Password (optional)"
+    type: secret
+    default: ""
+  - key: RCON_PASSWORD
+    label: "Admin / RCON Password"
+    type: secret
+    autoGenerate: true
+    required: true
