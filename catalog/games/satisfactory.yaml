@@ -16,7 +16,7 @@ ports:
     protocol: both
     primary: true
 runtimes:
-  preferred: docker
+  preferred: native
   docker:
     image: "wolveix/satisfactory-server:latest"
     volumes:

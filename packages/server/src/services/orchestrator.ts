@@ -162,7 +162,15 @@ export class ServerOrchestrator extends EventEmitter {
       throw new Error(`Unknown game template: "${input.gameId}"`);
     }
 
-    const runtime: RuntimeKind = input.runtime ?? template.runtimes.preferred;
+    const defaultRuntime: RuntimeKind =
+      this.config.runtimeMode === 'docker'
+        ? template.runtimes.docker
+          ? 'docker'
+          : template.runtimes.preferred
+        : template.runtimes.native
+          ? 'native'
+          : template.runtimes.preferred;
+    const runtime: RuntimeKind = input.runtime ?? defaultRuntime;
     if (runtime === 'docker' && !template.runtimes.docker) {
       throw new Error(`Template "${template.name}" does not support Docker runtime.`);
     }
@@ -300,13 +308,30 @@ export class ServerOrchestrator extends EventEmitter {
       throw new Error('Stop the server before modifying its configuration.');
     }
 
+    let nextRuntime = existing.runtime;
+    if (patch.runtime && patch.runtime !== existing.runtime) {
+      const template = this.catalog.getTemplate(existing.gameId);
+      if (template) {
+        if (patch.runtime === 'docker' && !template.runtimes.docker) {
+          throw new Error(`Template "${template.name}" does not support Docker runtime.`);
+        }
+        if (patch.runtime === 'native' && !template.runtimes.native) {
+          throw new Error(`Template "${template.name}" does not support Native runtime.`);
+        }
+      }
+      nextRuntime = patch.runtime;
+    }
+
     const updated = this.db.updateInstance(id, {
       name: patch.name?.trim() || existing.name,
+      runtime: nextRuntime,
       memoryLimitMb: patch.memoryLimitMb ?? existing.memoryLimitMb,
       autoStart: patch.autoStart ?? existing.autoStart,
       discordEnabled: patch.discordEnabled ?? existing.discordEnabled,
       launchScript: patch.launchScript !== undefined ? patch.launchScript : existing.launchScript,
       config: patch.config ? { ...existing.config, ...patch.config } : existing.config,
+      lastError: nextRuntime !== existing.runtime ? null : existing.lastError,
+      status: nextRuntime !== existing.runtime && existing.status === 'error' ? 'stopped' : existing.status,
     });
     if (!updated) throw new Error('Failed to update instance.');
 
@@ -315,7 +340,10 @@ export class ServerOrchestrator extends EventEmitter {
       source: 'web',
       action: 'instance.config',
       instanceId: id,
-      details: `Updated configuration for ${updated.name}`,
+      details:
+        nextRuntime !== existing.runtime
+          ? `Switched ${updated.name} runtime from ${existing.runtime} to ${nextRuntime}`
+          : `Updated configuration for ${updated.name}`,
     });
 
     const enriched = this.enrichInstance(updated);

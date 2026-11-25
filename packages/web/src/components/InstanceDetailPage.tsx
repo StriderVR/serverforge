@@ -13,13 +13,14 @@ import {
   Timer,
   Trash2,
 } from 'lucide-react';
-import type { GameTemplate } from '@serverforge/shared';
+import type { GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
 import { api, formatRemaining, type InstanceDetail, type InstanceWithJoin } from '../api';
 
 interface InstanceDetailPageProps {
   instanceId: string;
   instanceSummary?: InstanceWithJoin | null;
   catalog: GameTemplate[];
+  metrics: HostMetrics | null;
   liveLogs: Array<{ timestamp: string; line: string }>;
   autoBoot?: boolean;
   onAutoBootConsumed?: () => void;
@@ -32,6 +33,7 @@ export function InstanceDetailPage({
   instanceId,
   instanceSummary,
   catalog,
+  metrics,
   liveLogs,
   autoBoot = false,
   onAutoBootConsumed,
@@ -45,6 +47,7 @@ export function InstanceDetailPage({
   const [backupNote, setBackupNote] = useState('');
   const [editConfig, setEditConfig] = useState<Record<string, string | number | boolean>>({});
   const [editMemoryGb, setEditMemoryGb] = useState(4);
+  const [editRuntime, setEditRuntime] = useState<RuntimeKind>('native');
   const [editAutoStart, setEditAutoStart] = useState(false);
   const [editDiscord, setEditDiscord] = useState(true);
   const [editLaunchScript, setEditLaunchScript] = useState('');
@@ -60,6 +63,7 @@ export function InstanceDetailPage({
       setDetail(data);
       setEditConfig(data.config);
       setEditMemoryGb(Math.round(data.memoryLimitMb / 1024));
+      setEditRuntime(data.runtime);
       setEditAutoStart(data.autoStart);
       setEditDiscord(data.discordEnabled);
       setEditLaunchScript(data.launchScript ?? '');
@@ -302,6 +306,38 @@ export function InstanceDetailPage({
         )}
       </div>
 
+      {detail.runtime === 'docker' && template?.runtimes.native && (
+        <div
+          className="alert alert-info"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            flexWrap: 'wrap',
+          }}
+        >
+          <span>
+            This server is currently set to <strong>Docker</strong>
+            {metrics && !metrics.runtimesAvailable.docker ? ' (Docker is not running on this PC)' : ''}. Switch it to{' '}
+            <strong>Local Native</strong> to run directly on this server machine without Docker.
+          </span>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={!isStopped || busy}
+            onClick={() =>
+              runAction(
+                () => api.updateInstanceConfig(detail.id, { runtime: 'native' }),
+                'Switched server to Local Native runtime.'
+              )
+            }
+          >
+            Switch to Local Native
+          </button>
+        </div>
+      )}
+
       {message && (
         <div className={`alert ${message.kind === 'error' ? 'alert-error' : 'alert-success'}`}>{message.text}</div>
       )}
@@ -368,6 +404,24 @@ export function InstanceDetailPage({
 
           <div className="form-grid">
             <div className="field">
+              <label htmlFor="edit-runtime">Execution Runtime</label>
+              <select
+                id="edit-runtime"
+                className="select"
+                disabled={!isStopped}
+                value={editRuntime}
+                onChange={(e) => setEditRuntime(e.target.value as RuntimeKind)}
+              >
+                {template?.runtimes.native && (
+                  <option value="native">Local Native Process (runs directly on this PC)</option>
+                )}
+                {template?.runtimes.docker && (metrics?.runtimesAvailable.docker || editRuntime === 'docker') && (
+                  <option value="docker">Docker Container</option>
+                )}
+              </select>
+            </div>
+
+            <div className="field">
               <label htmlFor="edit-ram">RAM Cap (GB)</label>
               <input
                 id="edit-ram"
@@ -381,14 +435,14 @@ export function InstanceDetailPage({
               />
             </div>
 
-            {detail.runtime === 'native' && (
+            {editRuntime === 'native' && (
               <div className="field">
                 <label htmlFor="edit-launch-script">Custom Startup Script (optional)</label>
                 <input
                   id="edit-launch-script"
                   className="input mono"
                   disabled={!isStopped}
-                  placeholder="e.g., run.bat or startserver.bat"
+                  placeholder="e.g., startserver.bat or run.bat"
                   value={editLaunchScript}
                   onChange={(e) => setEditLaunchScript(e.target.value)}
                 />
@@ -478,6 +532,7 @@ export function InstanceDetailPage({
                 runAction(
                   () =>
                     api.updateInstanceConfig(detail.id, {
+                      runtime: editRuntime,
                       memoryLimitMb: editMemoryGb * 1024,
                       autoStart: editAutoStart,
                       discordEnabled: editDiscord,

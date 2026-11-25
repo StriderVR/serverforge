@@ -1,21 +1,25 @@
 import React, { useEffect, useState } from 'react';
 import { Play, Rocket } from 'lucide-react';
-import type { GameTemplate, RuntimeKind } from '@serverforge/shared';
+import type { GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
 import { api } from '../api';
 import { CurseForgeBrowser, type SelectedCurseForgePack } from './CurseForgeBrowser';
 
 interface DeployPageProps {
   catalog: GameTemplate[];
+  metrics: HostMetrics | null;
   onDeployed: (instanceId: string, autoBoot?: boolean) => void;
   onGoToSettings: () => void;
 }
 
-export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPageProps) {
+const DOCKER_ONLY_FIELDS = new Set(['CF_FORCE_SYNCHRONIZE']);
+
+export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: DeployPageProps) {
   const [selectedId, setSelectedId] = useState<string>(catalog[0]?.id ?? '');
   const selected = catalog.find((t) => t.id === selectedId) ?? catalog[0] ?? null;
+  const dockerAvailable = Boolean(metrics?.runtimesAvailable?.docker);
 
   const [name, setName] = useState('');
-  const [runtime, setRuntime] = useState<RuntimeKind>('docker');
+  const [runtime, setRuntime] = useState<RuntimeKind>('native');
   const [memoryGb, setMemoryGb] = useState<number>(4);
   const [autoStart, setAutoStart] = useState(false);
   const [discordEnabled, setDiscordEnabled] = useState(true);
@@ -26,7 +30,7 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
   useEffect(() => {
     if (!selected) return;
     setName(`${selected.shortName} Server`);
-    setRuntime(selected.runtimes.preferred);
+    setRuntime(selected.runtimes.native ? 'native' : 'docker');
     setMemoryGb(selected.resources.recommendedRamGb);
     setAutoStart(false);
     const defaults: Record<string, string | number | boolean> = {};
@@ -83,13 +87,22 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
     }
   };
 
+  const visibleConfigFields = (selected?.configFields ?? []).filter((field) => {
+    if (runtime === 'native' && DOCKER_ONLY_FIELDS.has(field.key)) {
+      return false;
+    }
+    return true;
+  });
+
+  const showDockerOption = Boolean(selected?.runtimes.docker && (dockerAvailable || !selected?.runtimes.native));
+
   return (
     <div>
       <header className="page-header">
         <div>
           <h1>One-Click Deploy</h1>
           <p className="page-subtitle">
-            Choose any game from your YAML catalog. Ports are automatically allocated without conflicts.
+            Choose any game from your catalog to run locally on this server PC. Ports are automatically allocated without conflicts.
           </p>
         </div>
       </header>
@@ -110,7 +123,7 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
             <div className="catalog-specs tabular">
               <span>Min {tpl.resources.minRamGb} GB RAM</span>
               <span>•</span>
-              <span>Prefers {tpl.runtimes.preferred}</span>
+              <span>{tpl.runtimes.native ? 'Local Native' : 'Docker Only'}</span>
             </div>
           </button>
         ))}
@@ -164,16 +177,14 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
                   value={runtime}
                   onChange={(e) => setRuntime(e.target.value as RuntimeKind)}
                 >
-                  {selected.runtimes.docker && (
-                    <option value="docker">
-                      Docker Container ({selected.runtimes.docker.image})
-                      {selected.runtimes.preferred === 'docker' ? ' — Recommended' : ''}
-                    </option>
-                  )}
                   {selected.runtimes.native && (
                     <option value="native">
-                      Native Process ({selected.runtimes.native.installer.toUpperCase()})
-                      {selected.runtimes.preferred === 'native' ? ' — Recommended for Windows 11' : ''}
+                      Local Native Process ({selected.runtimes.native.installer.toUpperCase()} — runs directly on this PC)
+                    </option>
+                  )}
+                  {showDockerOption && selected.runtimes.docker && (
+                    <option value="docker">
+                      Docker Container ({selected.runtimes.docker.image})
                     </option>
                   )}
                 </select>
@@ -217,7 +228,7 @@ export function DeployPage({ catalog, onDeployed, onGoToSettings }: DeployPagePr
                 </label>
               </div>
 
-              {selected.configFields.map((field) => (
+              {visibleConfigFields.map((field) => (
                 <div key={field.key} className="field">
                   <label htmlFor={`cfg-${field.key}`}>
                     {field.label} {field.autoGenerate ? '(auto-generated if blank)' : ''}

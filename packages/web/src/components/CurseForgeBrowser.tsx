@@ -135,7 +135,7 @@ export function CurseForgeBrowser({ onSelectPack, onGoToSettings }: CurseForgeBr
       onSelectPack({
         packName: mod.name,
         slug: mod.slug,
-        fileId: '',
+        fileId: latestWithPack ? String(latestWithPack.id) : '',
         pageUrl: mod.websiteUrl || '',
         javaTag: latestWithPack?.recommendedJavaTag ?? mod.recommendedJavaTag,
         serverPackZipUrl: resolved.url ?? '',

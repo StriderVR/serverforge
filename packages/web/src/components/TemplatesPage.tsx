@@ -28,7 +28,7 @@ ports:
     defaultPort: 2457
     protocol: udp
 runtimes:
-  preferred: docker
+  preferred: native
   docker:
     image: "lloesche/valheim-server:latest"
     volumes:

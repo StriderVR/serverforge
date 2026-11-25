@@ -21,7 +21,7 @@ ports:
     protocol: tcp
     internalOnly: true
 runtimes:
-  preferred: docker
+  preferred: native
   docker:
     image: "itzg/minecraft-server:latest"
     volumes:

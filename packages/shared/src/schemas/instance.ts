@@ -78,6 +78,7 @@ export type CreateInstanceInput = z.input<typeof CreateInstanceInputSchema>;
 export const UpdateInstanceConfigInputSchema = z.object({
   name: z.string().min(2).max(60).optional(),
   memoryLimitMb: z.number().int().min(512).max(131072).optional(),
+  runtime: RuntimeKindSchema.optional(),
   autoStart: z.boolean().optional(),
   discordEnabled: z.boolean().optional(),
   launchScript: z.string().nullable().optional(),

@@ -249,6 +249,7 @@ export function App() {
         {view === 'deploy' && (
           <DeployPage
             catalog={catalog}
+            metrics={metrics}
             onDeployed={(id, autoBoot) => {
               void refreshData();
               openInstance(id, Boolean(autoBoot));
@@ -272,6 +273,7 @@ export function App() {
             instanceId={selectedInstanceId}
             instanceSummary={instances.find((i) => i.id === selectedInstanceId) ?? null}
             catalog={catalog}
+            metrics={metrics}
             liveLogs={liveLogsByInstance[selectedInstanceId] ?? []}
             autoBoot={autoBootInstanceId === selectedInstanceId}
             onAutoBootConsumed={() => setAutoBootInstanceId(null)}
