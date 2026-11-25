@@ -16,6 +16,7 @@ export function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [view, setView] = useState<NavView>('overview');
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
+  const [autoBootInstanceId, setAutoBootInstanceId] = useState<string | null>(null);
 
   const [metrics, setMetrics] = useState<HostMetrics | null>(null);
   const [catalog, setCatalog] = useState<GameTemplate[]>([]);
@@ -140,9 +141,10 @@ export function App() {
     return <AuthView needsSetup={auth.needsSetup} onAuthenticated={() => void checkAuth()} />;
   }
 
-  const openInstance = (id: string) => {
+  const openInstance = (id: string, autoBoot = false) => {
     setLiveLogsByInstance((prev) => ({ ...prev, [id]: [] }));
     setSelectedInstanceId(id);
+    setAutoBootInstanceId(autoBoot ? id : null);
     setView('detail');
   };
 
@@ -239,7 +241,7 @@ export function App() {
             instances={instances}
             catalog={catalog}
             onRefresh={() => void refreshData()}
-            onSelectInstance={openInstance}
+            onSelectInstance={(id) => openInstance(id, false)}
             onGoToDeploy={() => setView('deploy')}
           />
         )}
@@ -248,9 +250,9 @@ export function App() {
           <DeployPage
             catalog={catalog}
             metrics={metrics}
-            onDeployed={(id) => {
+            onDeployed={(id, autoBoot) => {
               void refreshData();
-              openInstance(id);
+              openInstance(id, Boolean(autoBoot));
             }}
             onGoToSettings={() => setView('settings')}
           />
@@ -261,7 +263,7 @@ export function App() {
             catalog={catalog}
             onImported={(id) => {
               void refreshData();
-              openInstance(id);
+              openInstance(id, false);
             }}
           />
         )}
@@ -269,12 +271,16 @@ export function App() {
         {view === 'detail' && selectedInstanceId && (
           <InstanceDetailPage
             instanceId={selectedInstanceId}
+            instanceSummary={instances.find((i) => i.id === selectedInstanceId) ?? null}
             catalog={catalog}
             metrics={metrics}
             liveLogs={liveLogsByInstance[selectedInstanceId] ?? []}
+            autoBoot={autoBootInstanceId === selectedInstanceId}
+            onAutoBootConsumed={() => setAutoBootInstanceId(null)}
             onBack={() => setView('overview')}
             onDeleted={() => {
               setSelectedInstanceId(null);
+              setAutoBootInstanceId(null);
               setView('overview');
             }}
             onGlobalRefresh={() => void refreshData()}

@@ -87,13 +87,13 @@ configFields:
     type: string
     default: ""
   - key: SERVER_PACK_ZIP
-    label: "Native Server Pack ZIP URL or Path (Native Runtime)"
-    description: "Optional direct download URL or local .zip path for running without Docker."
+    label: "Native Server Pack ZIP URL or Path (Optional Override)"
+    description: "Leave blank to auto-download the modpack's Server Pack ZIP from CurseForge, or paste a direct URL / local .zip path."
     type: string
     default: ""
   - key: JAVA_IMAGE_TAG
-    label: "Java Runtime Version (Docker)"
-    description: "Java 21 for MC 1.20.5+, Java 17 for MC 1.18-1.20.4, Java 8 for MC 1.16.5 and older."
+    label: "Java Runtime Version (Docker & Native)"
+    description: "Java 21 for MC 1.20.5+, Java 17 for MC 1.18-1.20.4, Java 8 for MC 1.16.5 and older. Auto-installed natively if missing."
     type: select
     default: "java21"
     options: ["java21", "java17", "java8", "latest"]

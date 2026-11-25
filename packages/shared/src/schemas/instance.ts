@@ -97,8 +97,37 @@ export const StartInstanceInputSchema = z.object({
 });
 export type StartInstanceInput = z.input<typeof StartInstanceInputSchema>;
 
+export const PublicHostModeSchema = z.enum(['auto', 'manual', 'duckdns']);
+export type PublicHostMode = z.infer<typeof PublicHostModeSchema>;
+
+export type PublicHostSource =
+  | 'duckdns'
+  | 'detected_duckdns'
+  | 'public_ip'
+  | 'manual'
+  | 'env'
+  | 'lan'
+  | 'fallback';
+
+export interface NetworkStatus {
+  effectiveHost: string;
+  effectiveHostSource: PublicHostSource;
+  publicIp: string | null;
+  lanIp: string | null;
+  detectedDuckDnsDomains: string[];
+  duckdnsDomain: string;
+  duckdnsConfigured: boolean;
+  duckdnsLastUpdateAt: string | null;
+  duckdnsLastStatus: string | null;
+  lastCheckedAt: string | null;
+}
+
 export const SystemSettingsSchema = z.object({
   publicHost: z.string().default('localhost'),
+  publicHostMode: PublicHostModeSchema.default('auto'),
+  duckdnsDomain: z.string().default(''),
+  duckdnsToken: z.string().default(''),
+  duckdnsAutoUpdate: z.boolean().default(false),
   maxConcurrentServers: z.number().int().min(1).max(32).default(2),
   hostRamReserveGb: z.number().min(1).max(64).default(4),
   defaultLeaseMinutes: z.number().int().min(15).max(1440).default(180),

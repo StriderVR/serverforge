@@ -315,4 +315,184 @@ export class CurseForgeService {
     const payload = (await res.json()) as { data?: string };
     return payload.data ?? null;
   }
+
+  /**
+   * Resolves a CurseForge modpack (by slug, page URL, and optional file ID) into a direct
+   * Server Pack ZIP download URL and recommended Java tag for Native deployments.
+   */
+  async resolveServerPackForNative(options: {
+    slug?: string;
+    fileId?: string;
+    pageUrl?: string;
+    apiKey: string;
+  }): Promise<ResolvedNativeServerPack> {
+    let slug = (options.slug ?? '').trim().toLowerCase();
+    let fileId = (options.fileId ?? '').trim();
+    const pageUrl = (options.pageUrl ?? '').trim();
+
+    if ((!slug || !fileId) && pageUrl) {
+      const parsed = parseCurseForgeUrl(pageUrl);
+      if (!slug && parsed.slug) slug = parsed.slug;
+      if (!fileId && parsed.fileId) fileId = parsed.fileId;
+    }
+
+    if (!slug) {
+      throw new Error(
+        'No CurseForge modpack slug, URL, or Server Pack ZIP was configured. Pick a modpack from the CurseForge browser or set SERVER_PACK_ZIP to a direct URL or local .zip path.'
+      );
+    }
+
+    const key = this.assertApiKey(options.apiKey);
+
+    // 1. Resolve modpack by exact slug
+    const slugParams = new URLSearchParams({
+      gameId: String(MINECRAFT_GAME_ID),
+      classId: String(MODPACKS_CLASS_ID),
+      slug,
+    });
+    const modRes = await this.fetchWithRetry(`${CURSEFORGE_API_BASE}/mods/search?${slugParams.toString()}`, key);
+    if (!modRes.ok) {
+      throw await this.buildHttpError(modRes, key);
+    }
+    const modPayload = (await modRes.json()) as CfSearchResponse;
+    let mod: NonNullable<CfSearchResponse['data']>[number] | undefined =
+      (modPayload.data ?? []).find((m) => m.slug.toLowerCase() === slug) ??
+      (modPayload.data ?? [])[0];
+
+    if (!mod) {
+      const fallbackParams = new URLSearchParams({
+        gameId: String(MINECRAFT_GAME_ID),
+        classId: String(MODPACKS_CLASS_ID),
+        searchFilter: slug,
+        pageSize: '10',
+      });
+      const fbRes = await this.fetchWithRetry(
+        `${CURSEFORGE_API_BASE}/mods/search?${fallbackParams.toString()}`,
+        key
+      );
+      if (fbRes.ok) {
+        const fbPayload = (await fbRes.json()) as CfSearchResponse;
+        mod = (fbPayload.data ?? []).find((m) => m.slug.toLowerCase() === slug);
+      }
+    }
+
+    if (!mod) {
+      throw new Error(
+        `Could not find CurseForge modpack "${slug}". Verify the modpack slug or provide a direct/local SERVER_PACK_ZIP.`
+      );
+    }
+
+    const websiteUrl = mod.links?.websiteUrl ?? `https://www.curseforge.com/minecraft/modpacks/${mod.slug}`;
+    const modDefaultVersions = (mod.latestFilesIndexes ?? [])
+      .map((i) => i.gameVersion)
+      .filter((v): v is string => Boolean(v));
+
+    // 2. Locate target file and its associated serverPackFileId
+    let chosenFile: CurseForgeModpackFile | null = null;
+    const requestedFileIdNum = fileId ? Number.parseInt(fileId, 10) : NaN;
+
+    if (Number.isFinite(requestedFileIdNum) && requestedFileIdNum > 0) {
+      const singleRes = await this.fetchWithRetry(
+        `${CURSEFORGE_API_BASE}/mods/${mod.id}/files/${requestedFileIdNum}`,
+        key
+      );
+      if (singleRes.ok) {
+        const singlePayload = (await singleRes.json()) as {
+          data?: NonNullable<CfFilesResponse['data']>[number];
+        };
+        if (singlePayload.data) {
+          const f = singlePayload.data;
+          const versions = f.gameVersions ?? [];
+          chosenFile = {
+            id: f.id,
+            displayName: f.displayName,
+            fileName: f.fileName,
+            fileDate: f.fileDate,
+            gameVersions: versions,
+            isServerPack: Boolean(f.isServerPack),
+            serverPackFileId: f.serverPackFileId ?? null,
+            downloadUrl: f.downloadUrl ?? null,
+            recommendedJavaTag: recommendJavaTag(versions.length > 0 ? versions : modDefaultVersions),
+          };
+        }
+      }
+    }
+
+    if (!chosenFile) {
+      const files = await this.getModpackFiles(mod.id, key, 25);
+      if (Number.isFinite(requestedFileIdNum) && requestedFileIdNum > 0) {
+        chosenFile = files.find((f) => f.id === requestedFileIdNum) ?? null;
+      } else {
+        chosenFile =
+          files.find((f) => Boolean(f.serverPackFileId) || f.isServerPack) ??
+          files[0] ??
+          null;
+      }
+    }
+
+    if (!chosenFile) {
+      throw new Error(
+        `No downloadable files found on CurseForge for "${mod.name}". Check ${websiteUrl}/files or provide SERVER_PACK_ZIP manually.`
+      );
+    }
+
+    const serverPackFileId = chosenFile.isServerPack ? chosenFile.id : chosenFile.serverPackFileId;
+    if (!serverPackFileId) {
+      throw new Error(
+        `"${mod.name}" (${chosenFile.displayName}) does not publish a separate CurseForge Server Pack ZIP for native installs. Download a server pack from ${websiteUrl}/files and paste the local .zip path into SERVER_PACK_ZIP, or deploy this modpack with the Docker runtime (AUTO_CURSEFORGE).`
+      );
+    }
+
+    // 3. Resolve direct Server Pack CDN download URL
+    let downloadUrl = await this.getServerPackDownloadUrl(mod.id, serverPackFileId, key);
+    let packFileName = chosenFile.fileName;
+
+    if (!downloadUrl) {
+      const packMetaRes = await this.fetchWithRetry(
+        `${CURSEFORGE_API_BASE}/mods/${mod.id}/files/${serverPackFileId}`,
+        key
+      );
+      if (packMetaRes.ok) {
+        const packMeta = (await packMetaRes.json()) as {
+          data?: { downloadUrl?: string | null; fileName?: string };
+        };
+        if (packMeta.data?.downloadUrl) {
+          downloadUrl = packMeta.data.downloadUrl;
+        }
+        if (packMeta.data?.fileName) {
+          packFileName = packMeta.data.fileName;
+        }
+      }
+    }
+
+    if (!downloadUrl) {
+      throw new Error(
+        `CurseForge did not provide a direct download URL for "${mod.name}" Server Pack (file #${serverPackFileId}) — the modpack author may have disabled third-party API downloads. Download the Server Pack ZIP manually from ${websiteUrl}/files/${serverPackFileId} and paste the local .zip path into "Native Server Pack ZIP URL or Path".`
+      );
+    }
+
+    return {
+      modId: mod.id,
+      modName: mod.name,
+      slug: mod.slug,
+      fileId: chosenFile.id,
+      serverPackFileId,
+      downloadUrl,
+      fileName: packFileName,
+      recommendedJavaTag: chosenFile.recommendedJavaTag,
+      websiteUrl,
+    };
+  }
+}
+
+export interface ResolvedNativeServerPack {
+  modId: number;
+  modName: string;
+  slug: string;
+  fileId: number;
+  serverPackFileId: number;
+  downloadUrl: string;
+  fileName: string;
+  recommendedJavaTag: JavaImageTag;
+  websiteUrl: string;
 }

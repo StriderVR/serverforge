@@ -14,13 +14,16 @@ import {
   Trash2,
 } from 'lucide-react';
 import type { GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
-import { api, formatRemaining, type InstanceDetail } from '../api';
+import { api, formatHostSourceLabel, formatRemaining, type InstanceDetail, type InstanceWithJoin } from '../api';
 
 interface InstanceDetailPageProps {
   instanceId: string;
+  instanceSummary?: InstanceWithJoin | null;
   catalog: GameTemplate[];
   metrics: HostMetrics | null;
   liveLogs: Array<{ timestamp: string; line: string }>;
+  autoBoot?: boolean;
+  onAutoBootConsumed?: () => void;
   onBack: () => void;
   onDeleted: () => void;
   onGlobalRefresh: () => void;
@@ -28,9 +31,12 @@ interface InstanceDetailPageProps {
 
 export function InstanceDetailPage({
   instanceId,
+  instanceSummary,
   catalog,
   metrics,
   liveLogs,
+  autoBoot = false,
+  onAutoBootConsumed,
   onBack,
   onDeleted,
   onGlobalRefresh,
@@ -47,8 +53,10 @@ export function InstanceDetailPage({
   const [editLaunchScript, setEditLaunchScript] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedLan, setCopiedLan] = useState(false);
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
+  const autoBootTriggeredRef = useRef(false);
 
   const loadDetail = async () => {
     try {
@@ -66,8 +74,36 @@ export function InstanceDetailPage({
   };
 
   useEffect(() => {
+    autoBootTriggeredRef.current = false;
     void loadDetail();
   }, [instanceId]);
+
+  // Keep status, lastError, activeLease, and stats live as WebSocket broadcasts instance updates
+  useEffect(() => {
+    if (!instanceSummary) return;
+    setDetail((prev) =>
+      prev && prev.id === instanceSummary.id
+        ? {
+            ...prev,
+            status: instanceSummary.status,
+            lastError: instanceSummary.lastError,
+            activeLease: instanceSummary.activeLease,
+            stats: instanceSummary.stats,
+            joinAddress: instanceSummary.joinAddress,
+            localJoinAddress: instanceSummary.localJoinAddress,
+            publicHostSource: instanceSummary.publicHostSource,
+          }
+        : prev
+    );
+  }, [
+    instanceSummary?.id,
+    instanceSummary?.status,
+    instanceSummary?.lastError,
+    instanceSummary?.activeLease?.expiresAt,
+    instanceSummary?.joinAddress,
+    instanceSummary?.localJoinAddress,
+    instanceSummary?.publicHostSource,
+  ]);
 
   const combinedLogs = detail ? [...detail.logs, ...liveLogs] : liveLogs;
 
@@ -76,6 +112,31 @@ export function InstanceDetailPage({
       logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [combinedLogs.length, tab]);
+
+  const runAction = async (fn: () => Promise<unknown>, successMsg?: string) => {
+    setMessage(null);
+    setBusy(true);
+    try {
+      await fn();
+      if (successMsg) setMessage({ kind: 'success', text: successMsg });
+      await loadDetail();
+      onGlobalRefresh();
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Operation failed' });
+      await loadDetail();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!autoBoot || autoBootTriggeredRef.current || !detail) return;
+    if (detail.status === 'stopped') {
+      autoBootTriggeredRef.current = true;
+      onAutoBootConsumed?.();
+      void runAction(() => api.startInstance(detail.id, { temporary: false }), 'Server started.');
+    }
+  }, [autoBoot, detail?.id, detail?.status]);
 
   if (!detail) {
     return (
@@ -91,21 +152,6 @@ export function InstanceDetailPage({
   const template = catalog.find((t) => t.id === detail.gameId);
   const isRunning = detail.status === 'running';
   const isStopped = detail.status === 'stopped' || detail.status === 'error';
-
-  const runAction = async (fn: () => Promise<unknown>, successMsg?: string) => {
-    setMessage(null);
-    setBusy(true);
-    try {
-      await fn();
-      if (successMsg) setMessage({ kind: 'success', text: successMsg });
-      await loadDetail();
-      onGlobalRefresh();
-    } catch (err) {
-      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Operation failed' });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const handleSendCommand = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -222,7 +268,7 @@ export function InstanceDetailPage({
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <button
             type="button"
             className="copy-address"
@@ -232,9 +278,27 @@ export function InstanceDetailPage({
               setTimeout(() => setCopied(false), 1800);
             }}
           >
-            <span>Join: {detail.joinAddress}</span>
+            <span>
+              Join ({formatHostSourceLabel(detail.publicHostSource)}): {detail.joinAddress}
+            </span>
             {copied ? <Check size={13} color="var(--status-online)" /> : <Copy size={13} />}
           </button>
+          {detail.localJoinAddress && (
+            <button
+              type="button"
+              className="copy-address"
+              style={{ fontSize: 12, opacity: 0.85 }}
+              title="Copy local LAN address for computers on the same home network"
+              onClick={() => {
+                navigator.clipboard?.writeText(detail.localJoinAddress!).catch(() => {});
+                setCopiedLan(true);
+                setTimeout(() => setCopiedLan(false), 1800);
+              }}
+            >
+              <span>LAN: {detail.localJoinAddress}</span>
+              {copiedLan ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+            </button>
+          )}
           <span style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
             Ports:{' '}
             <span className="mono">
@@ -299,6 +363,12 @@ export function InstanceDetailPage({
 
       {message && (
         <div className={`alert ${message.kind === 'error' ? 'alert-error' : 'alert-success'}`}>{message.text}</div>
+      )}
+
+      {detail.lastError && (!message || message.text !== detail.lastError) && (
+        <div className="alert alert-error">
+          <strong>Last Error:</strong> {detail.lastError}
+        </div>
       )}
 
       <div className="tabs">
