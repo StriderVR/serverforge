@@ -4,6 +4,7 @@
   "private": true,
   "description": "One-click game server manager & Discord temporary boot orchestrator for Windows 11 and Linux",
   "type": "module",
+  "packageManager": "pnpm@12.21.0",
   "scripts": {
     "dev": "pnpm --parallel --filter @serverforge/server --filter @serverforge/web dev",
     "dev:mock": "RUNTIME_MODE=mock pnpm --parallel --filter @serverforge/server --filter @serverforge/web dev",
