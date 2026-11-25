@@ -38,26 +38,70 @@ jobs:
         shell: pwsh
         run: .\scripts\build-windows-exe.ps1
 
-      - name: Smoke-test compiled ServerForge.exe
+      - name: Smoke-test compiled ServerForge.exe & live self-update
         shell: pwsh
         run: |
-          $TestDir = Join-Path $env:TEMP "sf-exe-smoke"
+          $TestDir = Join-Path $env:TEMP "sf exe smoke"
+          if (Test-Path $TestDir) { Remove-Item -Path $TestDir -Recurse -Force -ErrorAction SilentlyContinue }
           New-Item -ItemType Directory -Force -Path $TestDir | Out-Null
-          Copy-Item "dist-exe\ServerForge.exe" (Join-Path $TestDir "ServerForge.exe")
+          $SourceExe = (Resolve-Path "dist-exe\ServerForge.exe").Path
+          Copy-Item $SourceExe (Join-Path $TestDir "ServerForge.exe")
+
+          # Spin up a tiny local mock GitHub Releases API server serving ServerForge.exe as v9.9.9
+          $MockScriptPath = Join-Path $env:TEMP "sf-mock-gh.mjs"
+          @'
+          import http from 'node:http';
+          import fs from 'node:fs';
+          const exePath = process.argv[2];
+          const exeSize = fs.statSync(exePath).size;
+          const server = http.createServer((req, res) => {
+            if (req.url && req.url.includes('/releases/latest')) {
+              const payload = JSON.stringify({
+                tag_name: 'v9.9.9',
+                name: 'ServerForge v9.9.9 (CI Self-Update Test)',
+                body: 'Automated end-to-end Windows self-updater verification',
+                html_url: 'http://127.0.0.1:3098/release/v9.9.9',
+                published_at: new Date().toISOString(),
+                assets: [{
+                  name: 'ServerForge.exe',
+                  browser_download_url: 'http://127.0.0.1:3098/download/ServerForge.exe',
+                  size: exeSize,
+                }],
+              });
+              res.writeHead(200, { 'content-type': 'application/json' });
+              res.end(payload);
+              return;
+            }
+            if (req.url === '/download/ServerForge.exe') {
+              res.writeHead(200, {
+                'content-type': 'application/octet-stream',
+                'content-length': String(exeSize),
+              });
+              fs.createReadStream(exePath).pipe(res);
+              return;
+            }
+            res.writeHead(404);
+            res.end('not found');
+          });
+          server.listen(3098, '127.0.0.1', () => console.log('Mock GitHub API ready on 3098'));
+          '@ | Set-Content -Path $MockScriptPath -Encoding UTF8
+
+          $mockProc = Start-Process -FilePath "node" -ArgumentList @($MockScriptPath, $SourceExe) -PassThru -NoNewWindow
 
           $env:RUNTIME_MODE = "mock"
           $env:PORT = "3099"
           $env:NO_OPEN_BROWSER = "1"
+          $env:UPDATER_API_BASE_URL = "http://127.0.0.1:3098"
 
-          $proc = Start-Process -FilePath (Join-Path $TestDir "ServerForge.exe") -WorkingDirectory $TestDir -PassThru -NoNewWindow
+          $proc = Start-Process -FilePath (Join-Path $TestDir "ServerForge.exe") -WorkingDirectory $TestDir -PassThru
           try {
             $ok = $false
-            for ($i = 0; $i -lt 20; $i++) {
+            for ($i = 0; $i -lt 30; $i++) {
               Start-Sleep -Milliseconds 500
               try {
                 $health = Invoke-RestMethod -Uri "http://127.0.0.1:3099/api/health" -TimeoutSec 2
                 if ($health.status -eq "ok") {
-                  Write-Host "Health check passed: $($health | ConvertTo-Json -Compress)"
+                  Write-Host "Initial health check passed (PID=$($proc.Id)): $($health | ConvertTo-Json -Compress)"
                   $ok = $true
                   break
                 }
@@ -74,53 +118,75 @@ jobs:
             }
             Write-Host "Standalone ServerForge.exe boot smoke test PASSED!"
 
-            # Live Windows self-update swap verification: stage a copy as ServerForge.new.exe, run swap script, confirm relaunch!
-            Write-Host "Testing live Windows ServerForge.exe atomic swap & relaunch..."
-            $UpdatesDir = Join-Path $TestDir "data\updates"
-            New-Item -ItemType Directory -Force -Path $UpdatesDir | Out-Null
-            $CurrentExe = Join-Path $TestDir "ServerForge.exe"
-            $NewExe = Join-Path $UpdatesDir "ServerForge.new.exe"
-            $BackupExe = "$CurrentExe.bak"
-            $LogFile = Join-Path $UpdatesDir "last-update.log"
-            $SwapScript = Join-Path $UpdatesDir "apply-update.ps1"
-            Copy-Item $CurrentExe $NewExe -Force
+            # Real end-to-end Windows self-update test via POST /api/updater/apply inside ServerForge.exe!
+            Write-Host "Running REAL end-to-end POST /api/updater/apply self-update inside ServerForge.exe..."
+            $setupRes = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:3099/api/auth/setup" -ContentType "application/json" -Body '{"username":"admin","password":"testpassword123"}'
+            $headers = @{ Authorization = "Bearer $($setupRes.token)" }
 
-            $genCmd = "import { buildWindowsSwapScript } from './packages/server/dist/services/updater-service.js'; import fs from 'node:fs'; fs.writeFileSync(process.argv[1], buildWindowsSwapScript({ currentPid: Number(process.argv[2]), currentExePath: process.argv[3], newExePath: process.argv[4], backupExePath: process.argv[5], workingDir: process.argv[6], logPath: process.argv[7] }));"
-            node --input-type=module -e $genCmd $SwapScript $proc.Id $CurrentExe $NewExe $BackupExe $TestDir $LogFile
-
-            $swapProc = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $SwapScript) -PassThru -WindowStyle Hidden
-            Start-Sleep -Milliseconds 500
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            $swapProc.WaitForExit(30000) | Out-Null
-
-            if (-not (Test-Path $BackupExe)) {
-              Write-Host (Get-Content $LogFile -Raw -ErrorAction SilentlyContinue)
-              throw "Self-update swap did not create ServerForge.exe.bak"
+            $updStatus = Invoke-RestMethod -Uri "http://127.0.0.1:3099/api/updater/status?refresh=true" -Headers $headers
+            Write-Host "Updater status: $($updStatus | ConvertTo-Json -Compress)"
+            if (-not $updStatus.updateAvailable -or $updStatus.installMode -ne "exe" -or $updStatus.latestVersion -ne "9.9.9") {
+              throw "Expected updateAvailable=true, installMode=exe, latestVersion=9.9.9"
             }
+
+            $applyRes = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:3099/api/updater/apply" -Headers $headers -ContentType "application/json" -Body '{"resumeRunningServers":true}'
+            Write-Host "Apply response: $($applyRes | ConvertTo-Json -Compress)"
+
+            $LogFile = Join-Path $TestDir "data\updates\last-update.log"
+            $BackupExe = Join-Path $TestDir "ServerForge.exe.bak"
+
+            Write-Host "Waiting for old ServerForge.exe (PID=$($proc.Id)) to download, spawn updater, and exit..."
+            $exited = $proc.WaitForExit(30000)
+            if (-not $exited) {
+              Write-Host "--- last-update.log ---"
+              Get-Content $LogFile -ErrorAction SilentlyContinue
+              throw "Old ServerForge.exe (PID=$($proc.Id)) did not exit within 30s after POST /api/updater/apply"
+            }
+            Write-Host "Old ServerForge.exe (PID=$($proc.Id)) exited cleanly!"
 
             $restartedOk = $false
-            for ($i = 0; $i -lt 25; $i++) {
+            $newPid = $null
+            for ($i = 0; $i -lt 60; $i++) {
               Start-Sleep -Milliseconds 500
-              try {
-                $h2 = Invoke-RestMethod -Uri "http://127.0.0.1:3099/api/health" -TimeoutSec 2
-                if ($h2.status -eq "ok") {
-                  Write-Host "Post-swap health check PASSED: $($h2 | ConvertTo-Json -Compress)"
-                  $restartedOk = $true
-                  break
-                }
-              } catch {}
+              if (Test-Path $BackupExe) {
+                try {
+                  $h2 = Invoke-RestMethod -Uri "http://127.0.0.1:3099/api/health" -TimeoutSec 2
+                  $runningProcs = Get-Process -Name "ServerForge" -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $proc.Id }
+                  if ($h2.status -eq "ok" -and $runningProcs) {
+                    $newPid = $runningProcs[0].Id
+                    Write-Host "Post-update health check PASSED (new PID=$newPid): $($h2 | ConvertTo-Json -Compress)"
+                    $restartedOk = $true
+                    break
+                  }
+                } catch {}
+              }
             }
+
             Write-Host "--- last-update.log ---"
-            Get-Content $LogFile -ErrorAction SilentlyContinue
-            if (-not $restartedOk) { throw "Relaunched ServerForge.exe did not respond to /api/health after swap" }
-            Write-Host "Live Windows self-update swap & relaunch PASSED!"
+            $logContent = Get-Content $LogFile -Raw -ErrorAction SilentlyContinue
+            Write-Host $logContent
+
+            if (-not (Test-Path $BackupExe)) {
+              throw "Self-update swap did not create ServerForge.exe.bak"
+            }
+            if (-not $restartedOk) {
+              throw "Relaunched ServerForge.exe did not respond to /api/health after real POST /api/updater/apply"
+            }
+            if ($logContent -notmatch "\[swap\] Installed new ServerForge\.exe successfully\.") {
+              throw "Expected [swap] Installed new ServerForge.exe successfully. in last-update.log"
+            }
+            Write-Host "END-TO-END Windows ServerForge.exe self-update (old PID=$($proc.Id) -> new PID=$newPid) PASSED!"
           } finally {
             Get-Process -Name "ServerForge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             if ($proc -and -not $proc.HasExited) {
               Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
             }
+            if ($mockProc -and -not $mockProc.HasExited) {
+              Stop-Process -Id $mockProc.Id -Force -ErrorAction SilentlyContinue
+            }
             Start-Sleep -Milliseconds 500
             Remove-Item -Path $TestDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $MockScriptPath -Force -ErrorAction SilentlyContinue
           }
 
       - name: Upload ServerForge.exe artifact

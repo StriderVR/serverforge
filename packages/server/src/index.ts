@@ -77,8 +77,13 @@ async function main() {
             resumeRunningServers: true,
             actor: 'AutoUpdateOnBoot',
             onShutdownRequested: async () => {
-              await sf.close();
-              process.exit(0);
+              const forceExit = setTimeout(() => process.exit(0), 2500);
+              forceExit.unref?.();
+              try {
+                await sf.close();
+              } finally {
+                process.exit(0);
+              }
             },
           });
         }

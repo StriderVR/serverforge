@@ -57,7 +57,7 @@ describe('UpdaterService — One-Click GitHub Self-Updater & Auto-Resume', () =>
     expect(compareSemver('2.0.0', '1.9.9')).toBe(1);
   });
 
-  it('generates a hardened Windows PowerShell atomic EXE swap script with retries, rollback, logging, and Unblock-File', () => {
+  it('generates a hardened Windows CMD atomic EXE swap script with retries, rollback, logging, and Unblock-File', () => {
     const script = buildWindowsSwapScript({
       currentPid: 4321,
       currentExePath: 'C:\\ServerForge\\ServerForge.exe',
@@ -65,14 +65,17 @@ describe('UpdaterService — One-Click GitHub Self-Updater & Auto-Resume', () =>
       backupExePath: 'C:\\ServerForge\\ServerForge.exe.bak',
       workingDir: 'C:\\ServerForge',
     });
-    expect(script).toContain('$targetPid = 4321');
+    expect(script).toContain('set "TARGET_PID=4321"');
     expect(script).toContain('ServerForge.exe.bak');
-    expect(script).toContain('Move-WithRetry');
-    expect(script).toContain('Stop-Process -Id $targetPid -Force');
-    expect(script).toContain('Unblock-File -Path $currentExe');
-    expect(script).toContain('$env:NO_OPEN_BROWSER = "1"');
+    expect(script).toContain(':backup_retry');
+    expect(script).toContain(':swap_retry');
+    expect(script).toContain('move /Y "%CURRENT_EXE%" "%BACKUP_EXE%"');
+    expect(script).toContain('move /Y "%NEW_EXE%" "%CURRENT_EXE%"');
+    expect(script).toContain('taskkill /F /PID %TARGET_PID%');
+    expect(script).toContain('Unblock-File');
+    expect(script).toContain('set "NO_OPEN_BROWSER=1"');
     expect(script).toContain('last-update.log');
-    expect(script).toContain('Start-Process -FilePath $currentExe');
+    expect(script).toContain('start "ServerForge" /D "%WORK_DIR%" "%CURRENT_EXE%"');
   });
 
   it('detects available GitHub release, saves & stops running servers before updating, and auto-resumes them with leases on startup', async () => {

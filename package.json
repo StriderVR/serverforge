@@ -1,6 +1,6 @@
 {
   "name": "serverforge",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "private": true,
   "description": "One-click game server manager & Discord temporary boot orchestrator for Windows 11 and Linux",
   "type": "module",
