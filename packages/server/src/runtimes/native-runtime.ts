@@ -466,30 +466,36 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
   }
 
   private async extractZip(zipPath: string, destDir: string): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const isWin = process.platform === 'win32';
-      const proc = isWin
-        ? spawn(
-            'powershell.exe',
-            [
-              '-NoProfile',
-              '-Command',
-              `Expand-Archive -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
-            ],
-            { windowsHide: true }
-          )
-        : spawn('unzip', ['-o', zipPath, '-d', destDir]);
+    const runExtractor = (cmd: string, args: string[]) =>
+      new Promise<void>((resolve, reject) => {
+        const proc = spawn(cmd, args, { windowsHide: true });
+        let errOut = '';
+        proc.stderr?.on('data', (d: Buffer) => {
+          errOut += d.toString('utf8');
+        });
+        proc.on('error', (err) => reject(err));
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`${cmd} exited with code ${code}${errOut ? `: ${errOut.slice(0, 200)}` : ''}`));
+        });
+      });
 
-      let errOut = '';
-      proc.stderr?.on('data', (d: Buffer) => {
-        errOut += d.toString('utf8');
-      });
-      proc.on('error', (err) => reject(err));
-      proc.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Server Pack ZIP extraction exited with code ${code}${errOut ? `: ${errOut.slice(0, 200)}` : ''}`));
-      });
-    });
+    if (process.platform === 'win32') {
+      // Windows 10/11 includes native bsdtar (`tar.exe`), which extracts ZIPs ~10x faster than PowerShell Expand-Archive
+      try {
+        await runExtractor('tar', ['-xf', zipPath, '-C', destDir]);
+        return;
+      } catch {
+        await runExtractor('powershell.exe', [
+          '-NoProfile',
+          '-Command',
+          `Expand-Archive -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
+        ]);
+        return;
+      }
+    }
+
+    await runExtractor('unzip', ['-o', zipPath, '-d', destDir]);
   }
 
   private async runModloaderInstaller(

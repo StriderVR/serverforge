@@ -205,32 +205,39 @@ async function extractArchive(
   platform: NodeJS.Platform
 ): Promise<void> {
   fs.mkdirSync(destDir, { recursive: true });
-  await new Promise<void>((resolve, reject) => {
-    const proc =
-      platform === 'win32'
-        ? spawn(
-            'powershell.exe',
-            [
-              '-NoProfile',
-              '-Command',
-              `Expand-Archive -Path '${archivePath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
-            ],
-            { windowsHide: true }
-          )
-        : archivePath.endsWith('.zip')
-          ? spawn('unzip', ['-o', archivePath, '-d', destDir])
-          : spawn('tar', ['-xzf', archivePath, '-C', destDir]);
+  const runExtractor = (cmd: string, args: string[]) =>
+    new Promise<void>((resolve, reject) => {
+      const proc = spawn(cmd, args, { windowsHide: true });
+      let errOut = '';
+      proc.stderr?.on('data', (d: Buffer) => {
+        errOut += d.toString('utf8');
+      });
+      proc.on('error', (err) => reject(err));
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Archive extraction failed (${cmd} code ${code})${errOut ? `: ${errOut.slice(0, 200)}` : ''}`));
+      });
+    });
 
-    let errOut = '';
-    proc.stderr?.on('data', (d: Buffer) => {
-      errOut += d.toString('utf8');
-    });
-    proc.on('error', (err) => reject(err));
-    proc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Archive extraction failed (code ${code})${errOut ? `: ${errOut.slice(0, 200)}` : ''}`));
-    });
-  });
+  if (platform === 'win32') {
+    try {
+      await runExtractor('tar', ['-xf', archivePath, '-C', destDir]);
+      return;
+    } catch {
+      await runExtractor('powershell.exe', [
+        '-NoProfile',
+        '-Command',
+        `Expand-Archive -Path '${archivePath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
+      ]);
+      return;
+    }
+  }
+
+  if (archivePath.endsWith('.zip')) {
+    await runExtractor('unzip', ['-o', archivePath, '-d', destDir]);
+  } else {
+    await runExtractor('tar', ['-xzf', archivePath, '-C', destDir]);
+  }
 }
 
 /**
