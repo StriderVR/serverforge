@@ -2,14 +2,16 @@ import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import type {
   AuditLogEntry,
+  BackupPolicy,
   BackupRecord,
+  CrashSummary,
   InstanceStatus,
   RuntimeKind,
   ServerInstance,
   ServerLease,
   SystemSettings,
 } from '@serverforge/shared';
-import { SystemSettingsSchema } from '@serverforge/shared';
+import { BackupPolicySchema, SystemSettingsSchema } from '@serverforge/shared';
 
 export interface UserRecord {
   id: string;
@@ -50,11 +52,14 @@ export class AppDatabase {
         config_json TEXT NOT NULL,
         memory_limit_mb INTEGER NOT NULL,
         auto_start INTEGER NOT NULL DEFAULT 0,
+        auto_restart_on_crash INTEGER NOT NULL DEFAULT 1,
         discord_enabled INTEGER NOT NULL DEFAULT 1,
         container_id TEXT,
         external_dir TEXT,
         launch_script TEXT,
         last_error TEXT,
+        last_crash_json TEXT,
+        backup_policy_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         last_started_at TEXT
@@ -113,6 +118,15 @@ export class AppDatabase {
     }
     if (!colNames.has('launch_script')) {
       this.db.exec('ALTER TABLE instances ADD COLUMN launch_script TEXT;');
+    }
+    if (!colNames.has('auto_restart_on_crash')) {
+      this.db.exec('ALTER TABLE instances ADD COLUMN auto_restart_on_crash INTEGER NOT NULL DEFAULT 1;');
+    }
+    if (!colNames.has('last_crash_json')) {
+      this.db.exec('ALTER TABLE instances ADD COLUMN last_crash_json TEXT;');
+    }
+    if (!colNames.has('backup_policy_json')) {
+      this.db.exec('ALTER TABLE instances ADD COLUMN backup_policy_json TEXT;');
     }
   }
 
@@ -208,6 +222,23 @@ export class AppDatabase {
   // --- Instances ---
 
   private mapInstanceRow(row: Record<string, unknown>): ServerInstance {
+    let lastCrash: CrashSummary | null = null;
+    if (row.last_crash_json) {
+      try {
+        lastCrash = JSON.parse(String(row.last_crash_json)) as CrashSummary;
+      } catch {
+        lastCrash = null;
+      }
+    }
+    let backupPolicy: BackupPolicy = BackupPolicySchema.parse({});
+    if (row.backup_policy_json) {
+      try {
+        backupPolicy = BackupPolicySchema.parse(JSON.parse(String(row.backup_policy_json)));
+      } catch {
+        backupPolicy = BackupPolicySchema.parse({});
+      }
+    }
+
     return {
       id: String(row.id),
       slug: String(row.slug),
@@ -219,11 +250,14 @@ export class AppDatabase {
       config: JSON.parse(String(row.config_json)),
       memoryLimitMb: Number(row.memory_limit_mb),
       autoStart: Boolean(row.auto_start),
+      autoRestartOnCrash: row.auto_restart_on_crash === undefined ? true : Boolean(row.auto_restart_on_crash),
       discordEnabled: Boolean(row.discord_enabled),
       containerId: row.container_id ? String(row.container_id) : null,
       externalDir: row.external_dir ? String(row.external_dir) : null,
       launchScript: row.launch_script ? String(row.launch_script) : null,
       lastError: row.last_error ? String(row.last_error) : null,
+      lastCrash,
+      backupPolicy,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
       lastStartedAt: row.last_started_at ? String(row.last_started_at) : null,
@@ -252,13 +286,15 @@ export class AppDatabase {
   }
 
   createInstance(instance: ServerInstance): ServerInstance {
+    const policy = BackupPolicySchema.parse(instance.backupPolicy ?? {});
     this.db
       .prepare(
         `INSERT INTO instances (
           id, slug, name, game_id, runtime, status, ports_json, config_json,
-          memory_limit_mb, auto_start, discord_enabled, container_id, external_dir,
-          launch_script, last_error, created_at, updated_at, last_started_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          memory_limit_mb, auto_start, auto_restart_on_crash, discord_enabled,
+          container_id, external_dir, launch_script, last_error, last_crash_json,
+          backup_policy_json, created_at, updated_at, last_started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         instance.id,
@@ -271,16 +307,24 @@ export class AppDatabase {
         JSON.stringify(instance.config),
         instance.memoryLimitMb,
         instance.autoStart ? 1 : 0,
+        instance.autoRestartOnCrash === false ? 0 : 1,
         instance.discordEnabled ? 1 : 0,
         instance.containerId,
         instance.externalDir ?? null,
         instance.launchScript ?? null,
         instance.lastError,
+        instance.lastCrash ? JSON.stringify(instance.lastCrash) : null,
+        JSON.stringify(policy),
         instance.createdAt,
         instance.updatedAt,
         instance.lastStartedAt
       );
-    return instance;
+    return {
+      ...instance,
+      autoRestartOnCrash: instance.autoRestartOnCrash === false ? false : true,
+      lastCrash: instance.lastCrash ?? null,
+      backupPolicy: policy,
+    };
   }
 
   updateInstance(
@@ -293,11 +337,14 @@ export class AppDatabase {
       config: Record<string, string | number | boolean>;
       memoryLimitMb: number;
       autoStart: boolean;
+      autoRestartOnCrash: boolean;
       discordEnabled: boolean;
       containerId: string | null;
       externalDir: string | null;
       launchScript: string | null;
       lastError: string | null;
+      lastCrash: CrashSummary | null;
+      backupPolicy: BackupPolicy;
       lastStartedAt: string | null;
     }>
   ): ServerInstance | null {
@@ -310,13 +357,17 @@ export class AppDatabase {
       updatedAt: new Date().toISOString(),
     };
 
+    const policy = BackupPolicySchema.parse(updated.backupPolicy ?? {});
+    updated.backupPolicy = policy;
+
     this.db
       .prepare(
         `UPDATE instances SET
           name = ?, runtime = ?, status = ?, ports_json = ?, config_json = ?,
-          memory_limit_mb = ?, auto_start = ?, discord_enabled = ?,
+          memory_limit_mb = ?, auto_start = ?, auto_restart_on_crash = ?, discord_enabled = ?,
           container_id = ?, external_dir = ?, launch_script = ?,
-          last_error = ?, updated_at = ?, last_started_at = ?
+          last_error = ?, last_crash_json = ?, backup_policy_json = ?,
+          updated_at = ?, last_started_at = ?
          WHERE id = ?`
       )
       .run(
@@ -327,11 +378,14 @@ export class AppDatabase {
         JSON.stringify(updated.config),
         updated.memoryLimitMb,
         updated.autoStart ? 1 : 0,
+        updated.autoRestartOnCrash === false ? 0 : 1,
         updated.discordEnabled ? 1 : 0,
         updated.containerId,
         updated.externalDir ?? null,
         updated.launchScript ?? null,
         updated.lastError,
+        updated.lastCrash ? JSON.stringify(updated.lastCrash) : null,
+        JSON.stringify(policy),
         updated.updatedAt,
         updated.lastStartedAt,
         id
@@ -468,6 +522,19 @@ export class AppDatabase {
       createdAt: String(r.created_at),
       note: r.note ? String(r.note) : null,
     }));
+  }
+
+  getBackupById(id: string): BackupRecord | null {
+    const r = this.db.prepare('SELECT * FROM backups WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!r) return null;
+    return {
+      id: String(r.id),
+      instanceId: String(r.instance_id),
+      filename: String(r.filename),
+      sizeBytes: Number(r.size_bytes),
+      createdAt: String(r.created_at),
+      note: r.note ? String(r.note) : null,
+    };
   }
 
   deleteBackupRecord(id: string): boolean {

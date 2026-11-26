@@ -1,7 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   Bot,
+  Bug,
+  Check,
   CheckCircle2,
+  Copy,
   Download,
   Eye,
   EyeOff,
@@ -13,9 +17,12 @@ import {
   Search,
   Shield,
   Slash,
+  Trash2,
 } from 'lucide-react';
 import type {
+  AppDiagnosticEvent,
   AuditLogEntry,
+  DiagnosticLevel,
   HostMetrics,
   MaintenanceStatus,
   NetworkStatus,
@@ -25,6 +32,7 @@ import type {
   WindowsRebootInspection,
 } from '@serverforge/shared';
 import { api, formatHostSourceLabel } from '../api';
+import { copyTextToClipboard } from '../utils/clipboard';
 
 interface SettingsPageProps {
   metrics: HostMetrics | null;
@@ -50,6 +58,12 @@ export function SettingsPage({
   const [adminRolesText, setAdminRolesText] = useState('');
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
 
+  const [diagLogs, setDiagLogs] = useState<AppDiagnosticEvent[]>([]);
+  const [diagFilter, setDiagFilter] = useState<'all' | DiagnosticLevel>('all');
+  const [loadingDiag, setLoadingDiag] = useState(false);
+  const [copiedDiagReport, setCopiedDiagReport] = useState(false);
+  const [copiedDiagId, setCopiedDiagId] = useState<string | null>(null);
+
   const [saving, setSaving] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [applyingUpdate, setApplyingUpdate] = useState(false);
@@ -73,12 +87,25 @@ export function SettingsPage({
 
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
+  const loadDiagnostics = async (level: 'all' | DiagnosticLevel = diagFilter) => {
+    setLoadingDiag(true);
+    try {
+      const items = await api.getDiagnosticLogs(level === 'all' ? undefined : level, 120);
+      setDiagLogs(items);
+    } catch {
+      // non-fatal
+    } finally {
+      setLoadingDiag(false);
+    }
+  };
+
   const loadAll = async () => {
-    const [s, logs, maint, net] = await Promise.all([
+    const [s, logs, maint, net, diag] = await Promise.all([
       api.getSettings(),
       api.getAuditLogs(40),
       api.getMaintenanceStatus(),
       api.getNetworkStatus().catch(() => null),
+      api.getDiagnosticLogs(undefined, 120).catch(() => []),
     ]);
     setSettings(s);
     setMaintenance(maint);
@@ -86,6 +113,7 @@ export function SettingsPage({
     setAllowedRolesText(s.discordAllowedRoleIds.join(', '));
     setAdminRolesText(s.discordAdminRoleIds.join(', '));
     setAuditLogs(logs);
+    setDiagLogs(diag);
   };
 
   useEffect(() => {
@@ -1044,6 +1072,165 @@ export function SettingsPage({
           </section>
         </div>
       </div>
+
+      {/* Diagnostics & App Logs (Issue #24) */}
+      <section className="panel" style={{ marginTop: 18 }}>
+        <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Bug size={16} /> Diagnostics &amp; App Logs
+          </h2>
+          <div className="btn-row">
+            <button
+              type="button"
+              className={`btn btn-sm ${diagFilter === 'all' ? 'btn-primary' : ''}`}
+              onClick={() => {
+                setDiagFilter('all');
+                void loadDiagnostics('all');
+              }}
+            >
+              All ({diagLogs.length})
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm ${diagFilter === 'error' ? 'btn-danger' : ''}`}
+              onClick={() => {
+                setDiagFilter('error');
+                void loadDiagnostics('error');
+              }}
+            >
+              Errors
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm ${diagFilter === 'warn' ? 'btn-primary' : ''}`}
+              onClick={() => {
+                setDiagFilter('warn');
+                void loadDiagnostics('warn');
+              }}
+            >
+              Warnings
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={loadingDiag}
+              onClick={() => void loadDiagnostics(diagFilter)}
+            >
+              <RefreshCw size={13} /> Refresh
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={async () => {
+                try {
+                  const report = await api.getSystemDiagnosticsReport();
+                  const ok = await copyTextToClipboard(report.markdown);
+                  if (ok) {
+                    setCopiedDiagReport(true);
+                    setTimeout(() => setCopiedDiagReport(false), 2000);
+                  }
+                } catch (err) {
+                  setNotice({
+                    kind: 'error',
+                    text: err instanceof Error ? err.message : 'Failed to build diagnostics report',
+                  });
+                }
+              }}
+            >
+              {copiedDiagReport ? <Check size={13} /> : <Copy size={13} />}
+              {copiedDiagReport ? 'Copied Report!' : 'Copy System Diagnostics'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              disabled={diagLogs.length === 0}
+              onClick={async () => {
+                if (!window.confirm('Clear all captured backend diagnostic logs?')) return;
+                try {
+                  await api.clearDiagnosticLogs();
+                  setDiagLogs([]);
+                } catch (err) {
+                  setNotice({ kind: 'error', text: err instanceof Error ? err.message : 'Clear failed' });
+                }
+              }}
+            >
+              <Trash2 size={13} /> Clear
+            </button>
+          </div>
+        </div>
+        <div className="panel-body" style={{ padding: 0, maxHeight: 340, overflowY: 'auto' }}>
+          {diagLogs.length === 0 ? (
+            <div style={{ padding: 18, color: 'var(--text-muted)', fontSize: 13 }}>
+              No backend errors or warnings captured. API 4xx/5xx failures, crash watchdog alerts, and backup errors
+              appear here automatically with secrets redacted.
+            </div>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Level</th>
+                  <th>Source</th>
+                  <th>Details</th>
+                  <th style={{ width: 70 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {diagLogs.map((ev) => (
+                  <tr key={ev.id}>
+                    <td className="mono tabular" style={{ whiteSpace: 'nowrap', fontSize: 11.5 }}>
+                      {new Date(ev.timestamp).toLocaleTimeString()}
+                    </td>
+                    <td>
+                      <span
+                        className={`badge ${
+                          ev.level === 'error'
+                            ? 'badge-error'
+                            : ev.level === 'warn'
+                              ? 'badge-starting'
+                              : 'badge-stopped'
+                        }`}
+                      >
+                        {ev.level === 'error' && <AlertTriangle size={10} />}
+                        {ev.level.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="mono" style={{ fontSize: 12 }}>
+                      {ev.source}
+                      {ev.statusCode ? ` (${ev.statusCode})` : ''}
+                    </td>
+                    <td style={{ fontSize: 12.5 }}>
+                      <div style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{ev.message}</div>
+                      {(ev.method || ev.path) && (
+                        <div className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          {ev.method} {ev.path}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        title="Copy error entry"
+                        onClick={async () => {
+                          const text = `[${ev.timestamp}] [${ev.level.toUpperCase()}] [${ev.source}] ${ev.method ?? ''} ${ev.path ?? ''} ${ev.statusCode ?? ''} ${ev.message}${ev.details ? `\n${ev.details}` : ''}`.trim();
+                          const ok = await copyTextToClipboard(text);
+                          if (ok) {
+                            setCopiedDiagId(ev.id);
+                            setTimeout(() => setCopiedDiagId((cur) => (cur === ev.id ? null : cur)), 1800);
+                          }
+                        }}
+                      >
+                        {copiedDiagId === ev.id ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
     </div>
   );
 }

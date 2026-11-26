@@ -95,6 +95,7 @@ export interface AppConfig {
   backupsDir: string;
   toolsDir: string;
   updatesDir: string;
+  logsDir: string;
   webDistDir: string;
   dbPath: string;
   jwtSecret: string;
@@ -134,8 +135,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const backupsDir = path.join(dataDir, 'backups');
   const toolsDir = path.join(dataDir, 'tools');
   const updatesDir = path.join(dataDir, 'updates');
+  const logsDir = path.join(dataDir, 'logs');
 
-  for (const dir of [dataDir, customCatalogDir, instancesDir, backupsDir, toolsDir, updatesDir]) {
+  for (const dir of [dataDir, customCatalogDir, instancesDir, backupsDir, toolsDir, updatesDir, logsDir]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
@@ -152,6 +154,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     backupsDir,
     toolsDir,
     updatesDir,
+    logsDir,
     webDistDir: overrides.webDistDir ?? path.join(WORKSPACE_ROOT, 'packages', 'web', 'dist'),
     dbPath: overrides.dbPath ?? path.join(dataDir, 'serverforge.sqlite'),
     jwtSecret: overrides.jwtSecret ?? loadOrCreateJwtSecret(dataDir),

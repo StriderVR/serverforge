@@ -360,6 +360,103 @@ pre,
   text-overflow: ellipsis;
 }
 
+/* Console Toolbar & Log Severity Highlights */
+.console-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+
+.console-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.console-search {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 5px 9px;
+  min-width: 170px;
+}
+
+.console-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.terminal-line-error {
+  background: hsla(0, 74%, 58%, 0.12);
+  border-left: 2px solid var(--status-danger);
+  padding-left: 6px;
+  margin-left: -8px;
+  color: hsl(0, 88%, 78%);
+}
+
+.terminal-line-warn {
+  background: hsla(38, 92%, 56%, 0.1);
+  border-left: 2px solid var(--status-warn);
+  padding-left: 6px;
+  margin-left: -8px;
+  color: hsl(38, 95%, 76%);
+}
+
+/* Crash Watchdog Banner */
+.crash-banner {
+  background: var(--status-danger-soft);
+  border: 1px solid hsla(0, 74%, 58%, 0.4);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.crash-banner.recovered {
+  background: var(--status-warn-soft);
+  border-color: hsla(38, 92%, 56%, 0.4);
+}
+
+.crash-tail-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+}
+
+.alert-with-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.backup-policy-card {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;

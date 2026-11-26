@@ -22,6 +22,7 @@ async function main() {
   await sf.orchestrator.reconcileOnStartup();
   await sf.network.start(3000);
   sf.leaseReaper.start(30_000);
+  sf.backupScheduler.start(60_000);
   sf.maintenance.start(60_000);
   await sf.discord.start();
 

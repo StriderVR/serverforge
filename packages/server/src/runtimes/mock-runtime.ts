@@ -9,6 +9,7 @@ interface MockServerState {
   saveCount: number;
   heartbeatTimer?: NodeJS.Timeout;
   onLog: (line: string) => void;
+  onExit?: (code: number | null) => void;
 }
 
 /**
@@ -32,6 +33,20 @@ export class MockRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
+  /** Test helper to simulate an unexpected process crash on a running mock server. */
+  simulateCrash(instanceId: string, exitCode: number | null = 1, crashLines: string[] = []): boolean {
+    const state = this.running.get(instanceId);
+    if (!state) return false;
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+    for (const line of crashLines) {
+      state.onLog(line);
+    }
+    state.onLog(`[Mock] Process terminated unexpectedly with exit code ${exitCode ?? 'SIGKILL'}`);
+    this.running.delete(instanceId);
+    state.onExit?.(exitCode);
+    return true;
+  }
+
   getSaveCount(instanceId: string): number {
     return this.running.get(instanceId)?.saveCount ?? 0;
   }
@@ -40,7 +55,8 @@ export class MockRuntimeAdapter implements RuntimeAdapter {
     instance: ServerInstance,
     template: GameTemplate,
     instanceDir: string,
-    onLog: (line: string) => void
+    onLog: (line: string) => void,
+    onExit?: (code: number | null) => void
   ): Promise<RuntimeStartResult> {
     fs.mkdirSync(path.join(instanceDir, 'data'), { recursive: true });
     // Seed a dummy world file so backups have realistic content
@@ -66,6 +82,7 @@ export class MockRuntimeAdapter implements RuntimeAdapter {
       players: [],
       saveCount: 0,
       onLog,
+      onExit,
     };
 
     state.heartbeatTimer = setInterval(() => {

@@ -13,15 +13,66 @@ import {
   type Interaction,
   type TextBasedChannel,
 } from 'discord.js';
+import type { CrashSummary, ServerInstance } from '@serverforge/shared';
 import type { CatalogService } from '../catalog/catalog-service.js';
 import type { AppConfig } from '../config.js';
 import type { AppDatabase } from '../db/database.js';
+import { redactSecrets } from '../services/diagnostics-service.js';
 import type { ServerOrchestrator } from '../services/orchestrator.js';
 import {
   DiscordCommandHandler,
   type CommandOutcome,
   type DiscordActorContext,
 } from './discord-handlers.js';
+
+export interface CrashAlertEmbedPayload {
+  title: string;
+  description: string;
+  color: number;
+  fields: Array<{ name: string; value: string; inline?: boolean }>;
+}
+
+/**
+ * Formats a sanitized Discord embed for unexpected server crashes and crash-loop halts.
+ */
+export function buildCrashAlertEmbedData(
+  instance: Pick<ServerInstance, 'name' | 'slug' | 'runtime' | 'autoRestartOnCrash'>,
+  crash: CrashSummary
+): CrashAlertEmbedPayload {
+  const title = crash.halted
+    ? `Server Crash-Loop Halted — ${instance.name}`
+    : `Server Crash Detected — ${instance.name}`;
+
+  const description = crash.halted
+    ? instance.autoRestartOnCrash === false
+      ? `**${instance.name}** crashed unexpectedly and auto-restart is disabled. Manual review is required.`
+      : `**${instance.name}** crashed repeatedly (**${crash.attemptCount}/${crash.maxAttempts}** attempts). ServerForge halted automatic restarts to prevent a crash loop.`
+    : `**${instance.name}** exited unexpectedly. ServerForge is automatically restarting it (attempt **${crash.attemptCount}/${crash.maxAttempts}**).`;
+
+  const tailLines = crash.logTail.slice(-12).map((line) => redactSecrets(line));
+  let tailBlock = tailLines.length > 0 ? tailLines.join('\n') : '(no recent console lines captured)';
+  if (tailBlock.length > 950) {
+    tailBlock = '...\n' + tailBlock.slice(-940);
+  }
+
+  const nextAction = crash.halted
+    ? 'Halted (status: ERROR)'
+    : crash.nextRestartAt
+      ? `Restart scheduled at ${crash.nextRestartAt.slice(11, 19)} UTC`
+      : 'Restarting shortly';
+
+  return {
+    title,
+    description,
+    color: crash.halted ? 0xef4444 : 0xf59e0b,
+    fields: [
+      { name: 'Exit Code', value: `\`${crash.exitCode ?? 'unknown'}\``, inline: true },
+      { name: 'Attempts', value: `${crash.attemptCount}/${crash.maxAttempts}`, inline: true },
+      { name: 'Watchdog Status', value: nextAction, inline: true },
+      { name: 'Recent Console Tail', value: `\`\`\`text\n${tailBlock}\n\`\`\`` },
+    ],
+  };
+}
 
 export class DiscordBotService {
   private client: Client | null = null;
@@ -167,6 +218,30 @@ export class DiscordBotService {
         await ch.send({ embeds: [embed] });
       } catch (err) {
         console.error('[DiscordBot] Failed to send shutdown confirmation:', err);
+      }
+    });
+
+    this.orchestrator.on('instance:crash', async ({ instance, crash, channelId }) => {
+      if (!this.client || !this.connected) return;
+      const settings = this.db.getSettings(this.config.publicHost);
+      const targetChannelId = channelId || settings.discordNotifyChannelId;
+      if (!targetChannelId) return;
+
+      try {
+        const ch = (await this.client.channels.fetch(targetChannelId)) as TextBasedChannel | null;
+        if (!ch || !('send' in ch)) return;
+
+        const payload = buildCrashAlertEmbedData(instance, crash);
+        const embed = new EmbedBuilder()
+          .setTitle(payload.title)
+          .setDescription(payload.description)
+          .setColor(payload.color)
+          .addFields(payload.fields)
+          .setTimestamp();
+
+        await ch.send({ embeds: [embed] });
+      } catch (err) {
+        console.error('[DiscordBot] Failed to send crash alert:', err);
       }
     });
   }

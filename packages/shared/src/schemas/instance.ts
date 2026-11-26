@@ -38,6 +38,33 @@ export const InstanceRuntimeStatsSchema = z.object({
 });
 export type InstanceRuntimeStats = z.infer<typeof InstanceRuntimeStatsSchema>;
 
+export const BackupPolicySchema = z.object({
+  enabled: z.boolean().default(false),
+  scheduleMode: z.enum(['interval', 'daily']).default('daily'),
+  intervalHours: z.number().int().min(1).max(168).default(6),
+  dailyTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Time must be HH:MM (24-hour)')
+    .default('03:00'),
+  onlyWhenRunning: z.boolean().default(true),
+  maxCount: z.number().int().min(1).max(200).default(10),
+  maxTotalGb: z.number().min(0).max(500).default(0),
+  lastAutoBackupAt: z.string().nullable().default(null),
+});
+export type BackupPolicy = z.infer<typeof BackupPolicySchema>;
+
+export const CrashSummarySchema = z.object({
+  crashedAt: z.string(),
+  exitCode: z.number().int().nullable(),
+  attemptCount: z.number().int().min(0),
+  maxAttempts: z.number().int().min(1),
+  nextRestartAt: z.string().nullable(),
+  halted: z.boolean().default(false),
+  reason: z.string(),
+  logTail: z.array(z.string()).default([]),
+});
+export type CrashSummary = z.infer<typeof CrashSummarySchema>;
+
 export const ServerInstanceSchema = z.object({
   id: z.string(),
   slug: z.string(),
@@ -49,11 +76,14 @@ export const ServerInstanceSchema = z.object({
   config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
   memoryLimitMb: z.number().int().positive(),
   autoStart: z.boolean().default(false),
+  autoRestartOnCrash: z.boolean().optional().default(true),
   discordEnabled: z.boolean().default(true),
   containerId: z.string().nullable(),
   externalDir: z.string().nullable().optional().default(null),
   launchScript: z.string().nullable().optional().default(null),
   lastError: z.string().nullable(),
+  lastCrash: CrashSummarySchema.nullable().optional().default(null),
+  backupPolicy: BackupPolicySchema.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   lastStartedAt: z.string().nullable(),
@@ -70,6 +100,7 @@ export const CreateInstanceInputSchema = z.object({
   ports: z.record(z.string(), z.number().int().min(1024).max(65535)).optional(),
   config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
   autoStart: z.boolean().optional().default(false),
+  autoRestartOnCrash: z.boolean().optional().default(true),
   discordEnabled: z.boolean().optional().default(true),
   startImmediately: z.boolean().optional().default(false),
 });
@@ -80,9 +111,11 @@ export const UpdateInstanceConfigInputSchema = z.object({
   memoryLimitMb: z.number().int().min(512).max(131072).optional(),
   runtime: RuntimeKindSchema.optional(),
   autoStart: z.boolean().optional(),
+  autoRestartOnCrash: z.boolean().optional(),
   discordEnabled: z.boolean().optional(),
   launchScript: z.string().nullable().optional(),
   config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+  backupPolicy: BackupPolicySchema.partial().optional(),
 });
 export type UpdateInstanceConfigInput = z.infer<typeof UpdateInstanceConfigInputSchema>;
 
@@ -345,14 +378,45 @@ export const ImportServerInputSchema = z.object({
   config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
   enableRcon: z.boolean().optional().default(true),
   autoStart: z.boolean().optional().default(false),
+  autoRestartOnCrash: z.boolean().optional().default(true),
   discordEnabled: z.boolean().optional().default(true),
 });
 export type ImportServerInput = z.input<typeof ImportServerInputSchema>;
+
+export type DiagnosticLevel = 'info' | 'warn' | 'error';
+export type DiagnosticSource = 'api' | 'orchestrator' | 'runtime' | 'discord' | 'updater' | 'backup' | 'system';
+
+export interface AppDiagnosticEvent {
+  id: string;
+  timestamp: string;
+  level: DiagnosticLevel;
+  source: DiagnosticSource;
+  message: string;
+  statusCode?: number | null;
+  method?: string | null;
+  path?: string | null;
+  instanceId?: string | null;
+  details?: string | null;
+}
+
+export interface SystemDiagnosticsReport {
+  generatedAt: string;
+  markdown: string;
+  errorCount: number;
+  warnCount: number;
+}
+
+export interface InstanceDebugReport {
+  generatedAt: string;
+  filename: string;
+  markdown: string;
+}
 
 export type WsServerEvent =
   | { type: 'console:line'; instanceId: string; line: string; timestamp: string }
   | { type: 'instance:update'; instance: ServerInstance }
   | { type: 'instance:deleted'; instanceId: string }
+  | { type: 'instance:crash'; instanceId: string; instanceName: string; crash: CrashSummary }
   | { type: 'host:metrics'; metrics: HostMetrics }
   | { type: 'lease:warning'; lease: ServerLease; instanceName: string; reason: 'ttl' | 'idle'; minutesRemaining: number }
   | { type: 'updater:progress'; stage: 'downloading' | 'stopping_servers' | 'installing' | 'restarting' | 'error'; percent: number; message: string }

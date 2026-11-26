@@ -1,9 +1,12 @@
 import type {
+  AppDiagnosticEvent,
   AuditLogEntry,
+  BackupPolicy,
   BackupRecord,
   CreateInstanceInput,
   CurseForgeModpackFile,
   CurseForgeModpackSummary,
+  DiagnosticLevel,
   DiscoveredProcess,
   FolderBrowseResult,
   FolderPickResult,
@@ -11,12 +14,14 @@ import type {
   HostMetrics,
   ImportInspectionResult,
   ImportServerInput,
+  InstanceDebugReport,
   MaintenanceStatus,
   NetworkStatus,
   PublicHostSource,
   ServerInstance,
   ServerLease,
   StartInstanceInput,
+  SystemDiagnosticsReport,
   SystemSettings,
   UpdateInstanceConfigInput,
   UpdaterStatus,
@@ -57,7 +62,17 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
+    const parsed = data as { error?: string; message?: string; issues?: Array<{ path?: (string | number)[]; message?: string }> };
+    let msg = parsed.error || parsed.message || `Request failed (${res.status})`;
+    if (Array.isArray(parsed.issues) && parsed.issues.length > 0 && !msg.includes(':')) {
+      const details = parsed.issues
+        .slice(0, 3)
+        .map((i) => (i.path && i.path.length > 0 ? `${i.path.join('.')}: ${i.message}` : i.message))
+        .filter(Boolean)
+        .join('; ');
+      if (details) msg = `${msg}: ${details}`;
+    }
+    throw new Error(msg);
   }
   return data as T;
 }
@@ -227,6 +242,39 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ note }),
     }),
+  getBackupDownloadUrl: (id: string, backupId: string) =>
+    `/api/instances/${encodeURIComponent(id)}/backups/${encodeURIComponent(backupId)}/download`,
+  restoreBackup: (id: string, backupId: string) =>
+    request<{ ok: boolean; restoredBackup: BackupRecord; safetyBackup: BackupRecord; extractedFiles: number }>(
+      `/api/instances/${encodeURIComponent(id)}/backups/${encodeURIComponent(backupId)}/restore`,
+      { method: 'POST', body: '{}' }
+    ),
+  deleteBackup: (id: string, backupId: string) =>
+    request<{ ok: boolean; deleted: BackupRecord }>(
+      `/api/instances/${encodeURIComponent(id)}/backups/${encodeURIComponent(backupId)}`,
+      { method: 'DELETE' }
+    ),
+  updateBackupPolicy: (id: string, policy: Partial<BackupPolicy>) =>
+    request<{ policy: BackupPolicy; instance: InstanceWithJoin }>(
+      `/api/instances/${encodeURIComponent(id)}/backups/policy`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(policy),
+      }
+    ),
+
+  // Diagnostics & Logs
+  getInstanceLogDownloadUrl: (id: string) => `/api/instances/${encodeURIComponent(id)}/logs/download`,
+  getInstanceDebugReport: (id: string) =>
+    request<InstanceDebugReport>(`/api/instances/${encodeURIComponent(id)}/debug-report`),
+  getDiagnosticLogs: (level?: DiagnosticLevel, limit = 100) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (level) params.set('level', level);
+    return request<AppDiagnosticEvent[]>(`/api/diagnostics/logs?${params.toString()}`);
+  },
+  clearDiagnosticLogs: () => request<{ ok: boolean }>('/api/diagnostics/logs', { method: 'DELETE' }),
+  getSystemDiagnosticsReport: () => request<SystemDiagnosticsReport>('/api/diagnostics/report'),
+
   deleteInstance: (id: string) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),
 };

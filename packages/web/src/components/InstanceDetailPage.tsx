@@ -1,12 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Archive,
   ArrowLeft,
+  Bug,
   Check,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Copy,
+  Download,
+  Filter,
   Loader2,
+  Pause,
   Play,
+  RotateCcw,
   RotateCw,
   Save,
   Send,
@@ -14,8 +22,9 @@ import {
   Timer,
   Trash2,
 } from 'lucide-react';
-import type { GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
+import type { BackupPolicy, GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
 import { api, formatHostSourceLabel, formatRemaining, type InstanceDetail, type InstanceWithJoin } from '../api';
+import { copyTextToClipboard } from '../utils/clipboard';
 
 interface InstanceDetailPageProps {
   instanceId: string;
@@ -32,6 +41,15 @@ interface InstanceDetailPageProps {
 
 const PROGRESS_LINE_RE = /\[(?:Download|Java)\][^\n]*?(\d{1,3})%/;
 const PHASE_AFTER_DOWNLOAD_RE = /Extracting|Launching|Starting|Prepared|installed successfully/i;
+const CONSOLE_ERROR_RE =
+  /(\[error\]|\/error\]|fatal|exception|unrecognized vm option|could not create the java virtual machine|crash|failed to |err_|segfault|outofmemoryerror|exited unexpectedly)/i;
+const CONSOLE_WARN_RE = /(\[warn(?:ing)?\]|\/warn\]|warning:|deprecated|retrying|watchdog)/i;
+
+function classifyConsoleLine(line: string): 'error' | 'warn' | 'normal' {
+  if (CONSOLE_ERROR_RE.test(line)) return 'error';
+  if (CONSOLE_WARN_RE.test(line)) return 'warn';
+  return 'normal';
+}
 
 function extractActiveDownloadPercent(logs: Array<{ timestamp: string; line: string }>): number | null {
   for (let i = logs.length - 1; i >= 0; i--) {
@@ -50,6 +68,17 @@ function extractActiveDownloadPercent(logs: Array<{ timestamp: string; line: str
   }
   return null;
 }
+
+const DEFAULT_BACKUP_POLICY: BackupPolicy = {
+  enabled: false,
+  scheduleMode: 'daily',
+  intervalHours: 6,
+  dailyTime: '03:00',
+  onlyWhenRunning: true,
+  maxCount: 10,
+  maxTotalGb: 0,
+  lastAutoBackupAt: null,
+};
 
 export function InstanceDetailPage({
   instanceId,
@@ -71,11 +100,20 @@ export function InstanceDetailPage({
   const [editMemoryGb, setEditMemoryGb] = useState(4);
   const [editRuntime, setEditRuntime] = useState<RuntimeKind>('native');
   const [editAutoStart, setEditAutoStart] = useState(false);
+  const [editAutoRestartOnCrash, setEditAutoRestartOnCrash] = useState(true);
   const [editDiscord, setEditDiscord] = useState(true);
   const [editLaunchScript, setEditLaunchScript] = useState('');
+  const [editBackupPolicy, setEditBackupPolicy] = useState<BackupPolicy>(DEFAULT_BACKUP_POLICY);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copiedLan, setCopiedLan] = useState(false);
+  const [copiedConsole, setCopiedConsole] = useState(false);
+  const [copiedDebugReport, setCopiedDebugReport] = useState(false);
+  const [copiedErrorText, setCopiedErrorText] = useState(false);
+  const [consoleSearch, setConsoleSearch] = useState('');
+  const [consoleErrorsOnly, setConsoleErrorsOnly] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [showCrashTail, setShowCrashTail] = useState(false);
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const autoBootTriggeredRef = useRef(false);
@@ -89,8 +127,10 @@ export function InstanceDetailPage({
         setEditMemoryGb(Math.round(data.memoryLimitMb / 1024));
         setEditRuntime(data.runtime);
         setEditAutoStart(data.autoStart);
+        setEditAutoRestartOnCrash(data.autoRestartOnCrash !== false);
         setEditDiscord(data.discordEnabled);
         setEditLaunchScript(data.launchScript ?? '');
+        setEditBackupPolicy(data.backupPolicy ?? DEFAULT_BACKUP_POLICY);
       }
     } catch (err) {
       if (syncForm) {
@@ -101,10 +141,11 @@ export function InstanceDetailPage({
 
   useEffect(() => {
     autoBootTriggeredRef.current = false;
+    setShowCrashTail(false);
     void loadDetail(true);
   }, [instanceId]);
 
-  // Keep status, lastError, activeLease, and stats live as WebSocket broadcasts instance updates
+  // Keep status, lastError, lastCrash, activeLease, and stats live as WebSocket broadcasts instance updates
   useEffect(() => {
     if (!instanceSummary) return;
     setDetail((prev) =>
@@ -113,6 +154,7 @@ export function InstanceDetailPage({
             ...prev,
             status: instanceSummary.status,
             lastError: instanceSummary.lastError,
+            lastCrash: instanceSummary.lastCrash ?? null,
             activeLease: instanceSummary.activeLease,
             stats: instanceSummary.stats,
             joinAddress: instanceSummary.joinAddress,
@@ -125,6 +167,10 @@ export function InstanceDetailPage({
     instanceSummary?.id,
     instanceSummary?.status,
     instanceSummary?.lastError,
+    instanceSummary?.lastCrash?.crashedAt,
+    instanceSummary?.lastCrash?.attemptCount,
+    instanceSummary?.lastCrash?.halted,
+    instanceSummary?.lastCrash?.nextRestartAt,
     instanceSummary?.activeLease?.expiresAt,
     instanceSummary?.joinAddress,
     instanceSummary?.localJoinAddress,
@@ -165,6 +211,20 @@ export function InstanceDetailPage({
     return merged;
   }, [detail?.logs, liveLogs]);
 
+  const errorWarnCount = useMemo(
+    () => combinedLogs.filter((entry) => classifyConsoleLine(entry.line) !== 'normal').length,
+    [combinedLogs]
+  );
+
+  const visibleLogs = useMemo(() => {
+    const q = consoleSearch.trim().toLowerCase();
+    return combinedLogs.filter((entry) => {
+      if (consoleErrorsOnly && classifyConsoleLine(entry.line) === 'normal') return false;
+      if (q && !entry.line.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [combinedLogs, consoleErrorsOnly, consoleSearch]);
+
   const activeDownloadPercent = useMemo(
     () => (isActiveTransition ? extractActiveDownloadPercent(combinedLogs) : null),
     [isActiveTransition, combinedLogs]
@@ -173,10 +233,43 @@ export function InstanceDetailPage({
   const latestLogLine = combinedLogs.length > 0 ? combinedLogs[combinedLogs.length - 1].line : null;
 
   useEffect(() => {
-    if (tab === 'console') {
+    if (tab === 'console' && autoScroll) {
       logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [combinedLogs.length, tab]);
+  }, [visibleLogs.length, tab, autoScroll]);
+
+  const handleCopyDebugReport = async () => {
+    if (!detail) return;
+    try {
+      const report = await api.getInstanceDebugReport(detail.id);
+      const ok = await copyTextToClipboard(report.markdown);
+      if (ok) {
+        setCopiedDebugReport(true);
+        setTimeout(() => setCopiedDebugReport(false), 2000);
+      }
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Failed to generate debug report' });
+    }
+  };
+
+  const handleCopyConsole = async () => {
+    const source = visibleLogs.length > 0 ? visibleLogs : combinedLogs;
+    const text = source.map((e) => `[${e.timestamp}] ${e.line}`).join('\n');
+    if (!text) return;
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedConsole(true);
+      setTimeout(() => setCopiedConsole(false), 2000);
+    }
+  };
+
+  const handleCopyErrorText = async (text: string) => {
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedErrorText(true);
+      setTimeout(() => setCopiedErrorText(false), 1800);
+    }
+  };
 
   const runAction = async (fn: () => Promise<unknown>, successMsg?: string) => {
     setMessage(null);
@@ -356,10 +449,12 @@ export function InstanceDetailPage({
           <button
             type="button"
             className="copy-address"
-            onClick={() => {
-              navigator.clipboard?.writeText(detail.joinAddress).catch(() => {});
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1800);
+            onClick={async () => {
+              const ok = await copyTextToClipboard(detail.joinAddress);
+              if (ok) {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1800);
+              }
             }}
           >
             <span>
@@ -373,10 +468,12 @@ export function InstanceDetailPage({
               className="copy-address"
               style={{ fontSize: 12, opacity: 0.85 }}
               title="Copy local LAN address for computers on the same home network"
-              onClick={() => {
-                navigator.clipboard?.writeText(detail.localJoinAddress!).catch(() => {});
-                setCopiedLan(true);
-                setTimeout(() => setCopiedLan(false), 1800);
+              onClick={async () => {
+                const ok = await copyTextToClipboard(detail.localJoinAddress!);
+                if (ok) {
+                  setCopiedLan(true);
+                  setTimeout(() => setCopiedLan(false), 1800);
+                }
               }}
             >
               <span>LAN: {detail.localJoinAddress}</span>
@@ -472,15 +569,108 @@ export function InstanceDetailPage({
         </div>
       )}
 
-      {message && (
-        <div className={`alert ${message.kind === 'error' ? 'alert-error' : 'alert-success'}`}>{message.text}</div>
-      )}
-
-      {detail.lastError && (!message || message.text !== detail.lastError) && (
-        <div className="alert alert-error">
-          <strong>Last Error:</strong> {detail.lastError}
+      {/* Crash Watchdog Banner (Issue #11) */}
+      {detail.lastCrash && (
+        <div className={`crash-banner ${isRunning ? 'recovered' : ''}`} role="alert">
+          <div className="alert-with-actions">
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 13.5 }}>
+                <AlertTriangle size={15} />
+                {detail.lastCrash.halted
+                  ? `Crash-Loop Watchdog Halted (Attempt ${detail.lastCrash.attemptCount}/${detail.lastCrash.maxAttempts})`
+                  : isRunning
+                    ? `Recovered from Unexpected Crash (Attempt ${detail.lastCrash.attemptCount}/${detail.lastCrash.maxAttempts})`
+                    : `Unexpected Crash Detected — Auto-Restart Scheduled (Attempt ${detail.lastCrash.attemptCount}/${detail.lastCrash.maxAttempts})`}
+              </div>
+              <div style={{ fontSize: 12.5, marginTop: 4, color: 'var(--text-primary)' }}>
+                {detail.lastCrash.reason}
+              </div>
+              <div style={{ fontSize: 11.5, marginTop: 4, color: 'var(--text-secondary)' }}>
+                Exit code: <span className="mono">{detail.lastCrash.exitCode ?? 'unknown'}</span> •{' '}
+                {new Date(detail.lastCrash.crashedAt).toLocaleString()}
+                {detail.lastCrash.nextRestartAt && !detail.lastCrash.halted && !isRunning && (
+                  <> • Next restart at {new Date(detail.lastCrash.nextRestartAt).toLocaleTimeString()}</>
+                )}
+              </div>
+            </div>
+            <div className="btn-row">
+              {detail.lastCrash.logTail.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => setShowCrashTail((v) => !v)}
+                >
+                  {showCrashTail ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                  {showCrashTail ? 'Hide Crash Tail' : `Crash Tail (${detail.lastCrash.logTail.length} lines)`}
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void handleCopyErrorText(detail.lastCrash!.reason)}
+              >
+                {copiedErrorText ? <Check size={13} color="var(--status-online)" /> : <Copy size={13} />}
+                Copy Error
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => void handleCopyDebugReport()}>
+                {copiedDebugReport ? <Check size={13} color="var(--status-online)" /> : <Bug size={13} />}
+                {copiedDebugReport ? 'Copied!' : 'Copy Debug Report'}
+              </button>
+            </div>
+          </div>
+          {showCrashTail && detail.lastCrash.logTail.length > 0 && (
+            <pre className="crash-tail-pre">{detail.lastCrash.logTail.join('\n')}</pre>
+          )}
         </div>
       )}
+
+      {message && (
+        <div
+          className={`alert ${message.kind === 'error' ? 'alert-error alert-with-actions' : 'alert-success'}`}
+        >
+          <span>{message.text}</span>
+          {message.kind === 'error' && (
+            <div className="btn-row">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void handleCopyErrorText(message.text)}
+              >
+                {copiedErrorText ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+                Copy Error
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => void handleCopyDebugReport()}>
+                {copiedDebugReport ? <Check size={12} color="var(--status-online)" /> : <Bug size={12} />}
+                Copy Debug Report
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {detail.lastError &&
+        (!message || message.text !== detail.lastError) &&
+        (!detail.lastCrash || detail.lastCrash.reason !== detail.lastError) && (
+          <div className="alert alert-error alert-with-actions">
+            <span>
+              <strong>Last Error:</strong> {detail.lastError}
+            </span>
+            <div className="btn-row">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void handleCopyErrorText(detail.lastError!)}
+              >
+                {copiedErrorText ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+                Copy Error
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => void handleCopyDebugReport()}>
+                {copiedDebugReport ? <Check size={12} color="var(--status-online)" /> : <Bug size={12} />}
+                Copy Debug Report
+              </button>
+            </div>
+          </div>
+        )}
 
       <div className="tabs">
         <button className={`tab-btn ${tab === 'console' ? 'active' : ''}`} onClick={() => setTab('console')}>
@@ -496,6 +686,61 @@ export function InstanceDetailPage({
 
       {tab === 'console' && (
         <div className="terminal-box">
+          {/* Console Toolbar (Issue #24) */}
+          <div className="console-toolbar">
+            <div className="console-toolbar-group">
+              <input
+                type="search"
+                className="console-search"
+                placeholder="Filter console logs..."
+                aria-label="Filter console logs"
+                value={consoleSearch}
+                onChange={(e) => setConsoleSearch(e.target.value)}
+              />
+              <button
+                type="button"
+                className={`btn btn-sm ${consoleErrorsOnly ? 'btn-danger' : ''}`}
+                onClick={() => setConsoleErrorsOnly((v) => !v)}
+                title="Show only error and warning lines"
+              >
+                <Filter size={12} />
+                Errors &amp; Warnings ({errorWarnCount})
+              </button>
+              <button
+                type="button"
+                className={`btn btn-sm ${!autoScroll ? 'btn-primary' : ''}`}
+                onClick={() => setAutoScroll((v) => !v)}
+                title={autoScroll ? 'Pause auto-scroll while reading or selecting text' : 'Resume auto-scroll'}
+              >
+                {autoScroll ? <Pause size={12} /> : <Play size={12} />}
+                {autoScroll ? 'Auto-scroll' : 'Paused'}
+              </button>
+            </div>
+            <div className="console-toolbar-group">
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={combinedLogs.length === 0}
+                onClick={() => void handleCopyConsole()}
+              >
+                {copiedConsole ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+                {copiedConsole ? 'Copied!' : 'Copy Console'}
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => void handleCopyDebugReport()}>
+                {copiedDebugReport ? <Check size={12} color="var(--status-online)" /> : <Bug size={12} />}
+                {copiedDebugReport ? 'Copied Report!' : 'Copy Debug Report'}
+              </button>
+              <a
+                className="btn btn-sm"
+                href={api.getInstanceLogDownloadUrl(detail.id)}
+                download={`${detail.slug}-console.log`}
+                style={{ textDecoration: 'none' }}
+              >
+                <Download size={12} /> Download .log
+              </a>
+            </div>
+          </div>
+
           <div className="terminal-output" aria-live="polite">
             {combinedLogs.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -510,13 +755,26 @@ export function InstanceDetailPage({
                   <span>No console output yet. Start the server to stream real-time logs.</span>
                 )}
               </div>
+            ) : visibleLogs.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)' }}>
+                No console lines match the current filter ({combinedLogs.length} total line(s)).
+              </div>
             ) : (
-              combinedLogs.map((entry, idx) => (
-                <div key={`${entry.timestamp}-${idx}`} className="terminal-line">
-                  <span className="terminal-ts tabular">{entry.timestamp.slice(11, 19)}</span>
-                  <span>{entry.line}</span>
-                </div>
-              ))
+              visibleLogs.map((entry, idx) => {
+                const severity = classifyConsoleLine(entry.line);
+                const severityClass =
+                  severity === 'error'
+                    ? ' terminal-line-error'
+                    : severity === 'warn'
+                      ? ' terminal-line-warn'
+                      : '';
+                return (
+                  <div key={`${entry.timestamp}-${idx}`} className={`terminal-line${severityClass}`}>
+                    <span className="terminal-ts tabular">{entry.timestamp.slice(11, 19)}</span>
+                    <span>{entry.line}</span>
+                  </div>
+                );
+              })
             )}
             <div ref={logEndRef} />
           </div>
@@ -611,6 +869,15 @@ export function InstanceDetailPage({
                 />
                 <span>Auto-start when server PC boots</span>
               </label>
+              <label className="checkbox-row" style={{ paddingTop: 2 }}>
+                <input
+                  type="checkbox"
+                  disabled={!isStopped}
+                  checked={editAutoRestartOnCrash}
+                  onChange={(e) => setEditAutoRestartOnCrash(e.target.checked)}
+                />
+                <span>Auto-restart on unexpected crash (backoff + 3x/15m loop protection)</span>
+              </label>
             </div>
 
             {(template?.configFields ?? []).map((field) => (
@@ -678,6 +945,7 @@ export function InstanceDetailPage({
                       runtime: editRuntime,
                       memoryLimitMb: editMemoryGb * 1024,
                       autoStart: editAutoStart,
+                      autoRestartOnCrash: editAutoRestartOnCrash,
                       discordEnabled: editDiscord,
                       launchScript: editLaunchScript.trim() || null,
                       config: editConfig,
@@ -731,6 +999,7 @@ export function InstanceDetailPage({
                   <th>Note</th>
                   <th>Size</th>
                   <th>Created</th>
+                  <th style={{ textAlign: 'right' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -738,13 +1007,180 @@ export function InstanceDetailPage({
                   <tr key={b.id}>
                     <td className="mono">{b.filename}</td>
                     <td>{b.note || '—'}</td>
-                    <td className="tabular">{(b.sizeBytes / 1024).toFixed(1)} KB</td>
+                    <td className="tabular">
+                      {b.sizeBytes >= 1024 * 1024
+                        ? `${(b.sizeBytes / (1024 * 1024)).toFixed(2)} MB`
+                        : `${(b.sizeBytes / 1024).toFixed(1)} KB`}
+                    </td>
                     <td className="tabular">{new Date(b.createdAt).toLocaleString()}</td>
+                    <td>
+                      <div className="btn-row" style={{ justifyContent: 'flex-end' }}>
+                        <a
+                          className="btn btn-sm"
+                          href={api.getBackupDownloadUrl(detail.id, b.id)}
+                          download={b.filename}
+                          style={{ textDecoration: 'none' }}
+                          title="Download backup ZIP to your PC"
+                        >
+                          <Download size={12} /> Download
+                        </a>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          disabled={busy}
+                          title="Restore this snapshot (auto-creates a safety backup first)"
+                          onClick={() => {
+                            const confirmMsg = `Restore "${detail.name}" from backup "${b.filename}"?\n\n${
+                              !isStopped ? 'The running server will be saved & stopped first. ' : ''
+                            }ServerForge will automatically create a pre-restore safety snapshot before replacing world files.`;
+                            if (!window.confirm(confirmMsg)) return;
+                            void runAction(
+                              () => api.restoreBackup(detail.id, b.id),
+                              `Restored "${b.filename}" (safety snapshot created before restore).`
+                            );
+                          }}
+                        >
+                          <RotateCcw size={12} /> Restore
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-danger"
+                          disabled={busy}
+                          title="Delete backup from disk"
+                          onClick={() => {
+                            if (!window.confirm(`Permanently delete backup "${b.filename}"?`)) return;
+                            void runAction(() => api.deleteBackup(detail.id, b.id), `Deleted backup "${b.filename}".`);
+                          }}
+                        >
+                          <Trash2 size={12} /> Delete
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
+
+          {/* Scheduled Backups & Retention Policy (Issue #10) */}
+          <div className="backup-policy-card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 15 }}>Scheduled Auto-Backups &amp; Retention</h3>
+                <p style={{ margin: '4px 0 0', fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                  Automatically snapshot this server on a schedule and prune older archives to keep disk usage bounded.
+                  {editBackupPolicy.lastAutoBackupAt && (
+                    <> Last auto-backup: {new Date(editBackupPolicy.lastAutoBackupAt).toLocaleString()}</>
+                  )}
+                </p>
+              </div>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={editBackupPolicy.enabled}
+                  onChange={(e) => setEditBackupPolicy((p) => ({ ...p, enabled: e.target.checked }))}
+                />
+                <strong>Enable Scheduled Backups</strong>
+              </label>
+            </div>
+
+            <div className="form-grid">
+              <div className="field">
+                <label htmlFor="bp-mode">Schedule Cadence</label>
+                <select
+                  id="bp-mode"
+                  className="select"
+                  value={editBackupPolicy.scheduleMode}
+                  onChange={(e) =>
+                    setEditBackupPolicy((p) => ({ ...p, scheduleMode: e.target.value as 'daily' | 'interval' }))
+                  }
+                >
+                  <option value="daily">Daily at specific time</option>
+                  <option value="interval">Every N hours</option>
+                </select>
+              </div>
+
+              {editBackupPolicy.scheduleMode === 'daily' ? (
+                <div className="field">
+                  <label htmlFor="bp-time">Daily Backup Time (24h HH:MM)</label>
+                  <input
+                    id="bp-time"
+                    type="time"
+                    className="input mono"
+                    value={editBackupPolicy.dailyTime}
+                    onChange={(e) => setEditBackupPolicy((p) => ({ ...p, dailyTime: e.target.value }))}
+                  />
+                </div>
+              ) : (
+                <div className="field">
+                  <label htmlFor="bp-hours">Interval (Hours)</label>
+                  <input
+                    id="bp-hours"
+                    type="number"
+                    className="input tabular"
+                    min={1}
+                    max={168}
+                    value={editBackupPolicy.intervalHours}
+                    onChange={(e) => setEditBackupPolicy((p) => ({ ...p, intervalHours: Number(e.target.value) || 1 }))}
+                  />
+                </div>
+              )}
+
+              <div className="field">
+                <label htmlFor="bp-max-count">Retention: Keep Last N Backups</label>
+                <input
+                  id="bp-max-count"
+                  type="number"
+                  className="input tabular"
+                  min={1}
+                  max={200}
+                  value={editBackupPolicy.maxCount}
+                  onChange={(e) => setEditBackupPolicy((p) => ({ ...p, maxCount: Number(e.target.value) || 1 }))}
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="bp-max-gb">Retention: Max Total Size (GB, 0 = unlimited)</label>
+                <input
+                  id="bp-max-gb"
+                  type="number"
+                  className="input tabular"
+                  min={0}
+                  max={500}
+                  step={0.5}
+                  value={editBackupPolicy.maxTotalGb}
+                  onChange={(e) => setEditBackupPolicy((p) => ({ ...p, maxTotalGb: Number(e.target.value) || 0 }))}
+                />
+              </div>
+
+              <div className="field" style={{ justifyContent: 'center' }}>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={editBackupPolicy.onlyWhenRunning}
+                    onChange={(e) => setEditBackupPolicy((p) => ({ ...p, onlyWhenRunning: e.target.checked }))}
+                  />
+                  <span>Only run scheduled backups while server is online</span>
+                </label>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 14 }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy}
+                onClick={() =>
+                  runAction(
+                    () => api.updateBackupPolicy(detail.id, editBackupPolicy),
+                    'Backup schedule & retention policy saved.'
+                  )
+                }
+              >
+                <Save size={14} /> Save Backup Policy
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

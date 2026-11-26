@@ -100,7 +100,11 @@ export function App() {
               const next = [...existing, { timestamp: msg.timestamp, line: msg.line }].slice(-250);
               return { ...prev, [msg.instanceId]: next };
             });
-          } else if (msg.type === 'instance:update' || msg.type === 'instance:deleted') {
+          } else if (
+            msg.type === 'instance:update' ||
+            msg.type === 'instance:deleted' ||
+            msg.type === 'instance:crash'
+          ) {
             void refreshData();
           } else if (msg.type === 'updater:progress') {
             setUpdaterProgress({ stage: msg.stage, percent: msg.percent, message: msg.message });
