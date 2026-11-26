@@ -455,6 +455,146 @@ export interface InstanceDebugReport {
   markdown: string;
 }
 
+export interface InstanceFileEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  updatedAt: string;
+  editable: boolean;
+}
+
+export interface InstanceQuickFile {
+  label: string;
+  path: string;
+  exists: boolean;
+}
+
+export interface InstanceFileListing {
+  currentPath: string;
+  parentPath: string | null;
+  entries: InstanceFileEntry[];
+  quickFiles: InstanceQuickFile[];
+}
+
+export interface InstanceFileContent {
+  path: string;
+  name: string;
+  content: string;
+  sizeBytes: number;
+  updatedAt: string;
+}
+
+export interface MinecraftPropertiesResponse {
+  exists: boolean;
+  path: string;
+  properties: Record<string, string>;
+  rawContent: string;
+  managedKeys: string[];
+  restartRequired: boolean;
+}
+
+export interface ModrinthProjectSummary {
+  projectId: string;
+  slug: string;
+  title: string;
+  description: string;
+  projectType: 'modpack' | 'mod' | 'plugin';
+  iconUrl: string | null;
+  downloads: number;
+  categories: string[];
+  loaders: string[];
+  gameVersions: string[];
+  websiteUrl: string;
+  recommendedJavaTag: 'java25' | 'java21' | 'java17' | 'java8' | 'latest';
+}
+
+export interface ModrinthVersionDependency {
+  projectId: string | null;
+  versionId: string | null;
+  dependencyType: 'required' | 'optional' | 'incompatible' | 'embedded';
+}
+
+export interface ModrinthVersionSummary {
+  id: string;
+  projectId: string;
+  name: string;
+  versionNumber: string;
+  datePublished: string;
+  gameVersions: string[];
+  loaders: string[];
+  primaryFile: {
+    url: string;
+    filename: string;
+    size: number;
+  } | null;
+  dependencies: ModrinthVersionDependency[];
+  recommendedJavaTag: 'java25' | 'java21' | 'java17' | 'java8' | 'latest';
+}
+
+export interface InstalledAddonEntry {
+  filename: string;
+  baseName: string;
+  folder: 'mods' | 'plugins';
+  enabled: boolean;
+  sizeBytes: number;
+  updatedAt: string;
+  modrinthProjectId?: string | null;
+  modrinthVersionId?: string | null;
+  modrinthTitle?: string | null;
+  modrinthVersionNumber?: string | null;
+}
+
+export interface InstalledAddonsResponse {
+  defaultFolder: 'mods' | 'plugins';
+  availableFolders: Array<'mods' | 'plugins'>;
+  detectedLoader: string | null;
+  detectedMcVersion: string | null;
+  addons: InstalledAddonEntry[];
+}
+
+export interface AddonUpdateCandidate {
+  filename: string;
+  folder: 'mods' | 'plugins';
+  projectId: string;
+  title: string;
+  currentVersionId: string;
+  currentVersionNumber: string;
+  latestVersionId: string;
+  latestVersionNumber: string;
+  latestVersionName: string;
+}
+
+export interface InstanceUpdateOption {
+  id: string;
+  label: string;
+  date: string;
+  gameVersions: string[];
+  recommendedJavaTag?: string;
+}
+
+export interface InstanceUpdateCheckResult {
+  supported: boolean;
+  kind: 'steamcmd' | 'curseforge' | 'modrinth' | 'unsupported';
+  message: string;
+  updateAvailable: boolean;
+  currentVersionId: string | null;
+  latestVersionId: string | null;
+  latestVersionLabel: string | null;
+  availableVersions: InstanceUpdateOption[];
+  appId?: number | null;
+  branch?: string | null;
+}
+
+export interface InstanceUpdateResult {
+  ok: boolean;
+  kind: 'steamcmd' | 'curseforge' | 'modrinth';
+  summary: string;
+  backupCreated: string | null;
+  restarted: boolean;
+  newVersionId?: string | null;
+}
+
 export type WsServerEvent =
   | { type: 'console:line'; instanceId: string; line: string; timestamp: string }
   | { type: 'instance:update'; instance: ServerInstance }

@@ -31,9 +31,20 @@ import { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { BackupSchedulerService } from '../services/backup-scheduler.js';
 import { CurseForgeService, normalizeCurseForgeApiKey } from '../services/curseforge-service.js';
 import { DiagnosticsService } from '../services/diagnostics-service.js';
+import {
+  FileSecurityError,
+  FileService,
+  FileValidationError,
+  MAX_UPLOAD_FILE_BYTES,
+} from '../services/file-service.js';
 import { SmartImportService } from '../services/import-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
 import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
+import {
+  isMinecraftInstance,
+  MinecraftPropertiesService,
+} from '../services/minecraft-properties-service.js';
+import { ModrinthService } from '../services/modrinth-service.js';
 import { NetworkAddressService, normalizeDuckDnsDomain } from '../services/network-service.js';
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
 import { TelemetryService } from '../services/telemetry-service.js';
@@ -78,6 +89,9 @@ export interface ServerForgeApp {
   leaseReaper: LeaseReaper;
   discord: DiscordBotService;
   curseforge: CurseForgeService;
+  modrinth: ModrinthService;
+  fileService: FileService;
+  minecraftProps: MinecraftPropertiesService;
   smartImport: SmartImportService;
   updater: UpdaterService;
   maintenance: MaintenanceService;
@@ -98,6 +112,9 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   };
 
   const curseforge = new CurseForgeService(fetchImpl);
+  const modrinth = new ModrinthService(fetchImpl, config.appVersion);
+  const fileService = new FileService();
+  const minecraftProps = new MinecraftPropertiesService();
   const runtimeManager = new RuntimeManager(
     config.runtimeMode,
     config.toolsDir,
@@ -106,7 +123,8 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       CF_API_KEY: getEffectiveCurseForgeKey(),
     }),
     curseforge,
-    fetchImpl
+    fetchImpl,
+    modrinth
   );
 
   let discordStatusFn = () => ({ connected: false, botTag: null as string | null });
@@ -117,7 +135,18 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     detectLanIpImpl,
   });
   const diagnostics = new DiagnosticsService(config, db, telemetry);
-  const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry, network, diagnostics);
+  const orchestrator = new ServerOrchestrator(
+    config,
+    db,
+    catalog,
+    runtimeManager,
+    telemetry,
+    network,
+    diagnostics,
+    undefined,
+    curseforge,
+    modrinth
+  );
   diagnostics.attachOrchestrator(orchestrator);
   const backupScheduler = new BackupSchedulerService(db, orchestrator);
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
@@ -127,7 +156,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   const maintenance = new MaintenanceService(config, db, orchestrator, updater, osRebootExecutor);
   discordStatusFn = () => discord.getStatus();
 
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, bodyLimit: MAX_UPLOAD_FILE_BYTES });
 
   // Gracefully allow empty bodies even if a client sends Content-Type: application/json (e.g., DELETE requests)
   app.removeContentTypeParser('application/json');
@@ -143,6 +172,15 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       done(err instanceof Error ? err : new Error('Invalid JSON payload'), undefined);
     }
   });
+
+  // Binary file upload parser for in-browser drag-and-drop mod/config uploads (#12)
+  app.addContentTypeParser(
+    'application/octet-stream',
+    { parseAs: 'buffer', bodyLimit: MAX_UPLOAD_FILE_BYTES },
+    (_req, body, done) => {
+      done(null, body);
+    }
+  );
 
   // Capture unhandled Fastify errors and 4xx/5xx API responses into DiagnosticsService
   app.addHook('onError', async (req, reply, err) => {
@@ -729,6 +767,388 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
   });
 
+  // --- In-Browser File Manager & Config Editor Routes (Issue #12) ---
+
+  const mapFileErrorStatus = (err: unknown): number => {
+    if (err instanceof FileSecurityError) return 403;
+    if (err instanceof FileValidationError) return 400;
+    return 500;
+  };
+
+  app.get('/api/instances/:id/files', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: relPath = '' } = req.query as { path?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    try {
+      const rootDir = orchestrator.getServerContentDir(inst);
+      return fileService.listDirectory(rootDir, relPath);
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Failed to list files' });
+    }
+  });
+
+  app.get('/api/instances/:id/files/content', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: relPath = '' } = req.query as { path?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    try {
+      const rootDir = orchestrator.getServerContentDir(inst);
+      return fileService.readTextFile(rootDir, relPath);
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Failed to read file' });
+    }
+  });
+
+  app.put('/api/instances/:id/files/content', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { path?: string; content?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    if (typeof body.path !== 'string' || typeof body.content !== 'string') {
+      return reply.status(400).send({ error: 'Both "path" and "content" strings are required.' });
+    }
+    try {
+      const rootDir = orchestrator.getServerContentDir(inst);
+      const saved = fileService.writeTextFile(rootDir, body.path, body.content);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.file_edit',
+        instanceId: inst.id,
+        details: `Edited ${saved.path} (${saved.sizeBytes} bytes)`,
+      });
+      return saved;
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Failed to save file' });
+    }
+  });
+
+  app.post('/api/instances/:id/files/mkdir', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { path?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    try {
+      const rootDir = orchestrator.getServerContentDir(inst);
+      const created = fileService.createDirectory(rootDir, body.path ?? '');
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.file_mkdir',
+        instanceId: inst.id,
+        details: `Created folder ${created.path}`,
+      });
+      return created;
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Failed to create directory' });
+    }
+  });
+
+  app.post('/api/instances/:id/files/upload', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { dir = '', filename = '' } = req.query as { dir?: string; filename?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const rawBody = req.body;
+    const buffer = Buffer.isBuffer(rawBody)
+      ? rawBody
+      : typeof rawBody === 'string'
+        ? Buffer.from(rawBody, 'utf8')
+        : null;
+    if (!buffer) {
+      return reply.status(400).send({ error: 'Binary upload body (application/octet-stream) is required.' });
+    }
+    try {
+      const rootDir = orchestrator.getServerContentDir(inst);
+      const entry = fileService.uploadFile(rootDir, dir, filename, buffer);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.file_upload',
+        instanceId: inst.id,
+        details: `Uploaded ${entry.path} (${entry.sizeBytes} bytes)`,
+      });
+      return reply.status(201).send(entry);
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Upload failed' });
+    }
+  });
+
+  app.get('/api/instances/:id/files/download', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: relPath = '' } = req.query as { path?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    try {
+      const rootDir = orchestrator.getServerContentDir(inst);
+      const info = fileService.getDownloadInfo(rootDir, relPath);
+      const safeName = info.filename.replace(/["\r\n]/g, '');
+      reply.header('Content-Type', 'application/octet-stream');
+      reply.header('Content-Disposition', `attachment; filename="${safeName}"`);
+      reply.header('Content-Length', String(info.sizeBytes));
+      return reply.send(fs.createReadStream(info.filePath));
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Download failed' });
+    }
+  });
+
+  app.post('/api/instances/:id/files/rename', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { path?: string; newName?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    try {
+      const rootDir = orchestrator.getServerContentDir(inst);
+      const result = fileService.renameEntry(rootDir, body.path ?? '', body.newName ?? '');
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.file_rename',
+        instanceId: inst.id,
+        details: `Renamed ${result.fromPath} -> ${result.toPath}`,
+      });
+      return result;
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Rename failed' });
+    }
+  });
+
+  app.delete('/api/instances/:id/files', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: relPath = '' } = req.query as { path?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    try {
+      const rootDir = orchestrator.getServerContentDir(inst);
+      const result = fileService.deleteEntry(rootDir, relPath);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.file_delete',
+        instanceId: inst.id,
+        details: `Deleted ${result.deletedPath}`,
+      });
+      return { ok: true, ...result };
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Delete failed' });
+    }
+  });
+
+  // --- Minecraft server.properties Editor Routes (Issue #36) ---
+
+  app.get('/api/instances/:id/minecraft/properties', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    if (!isMinecraftInstance(inst)) {
+      return reply.status(400).send({ error: 'server.properties editor is only available for Minecraft instances.' });
+    }
+    const serverDir = orchestrator.getServerContentDir(inst);
+    return minecraftProps.read(serverDir, inst);
+  });
+
+  app.put('/api/instances/:id/minecraft/properties', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    if (!isMinecraftInstance(inst)) {
+      return reply.status(400).send({ error: 'server.properties editor is only available for Minecraft instances.' });
+    }
+    const body = (req.body ?? {}) as {
+      properties?: Record<string, string>;
+      rawContent?: string;
+      createIfMissing?: boolean;
+      allowManagedOverride?: boolean;
+      restartAfterSave?: boolean;
+    };
+    try {
+      const serverDir = orchestrator.getServerContentDir(inst);
+      const updated = minecraftProps.write(serverDir, inst, body);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.minecraft_properties',
+        instanceId: inst.id,
+        details: `Updated server.properties${body.restartAfterSave ? ' (with restart)' : ''}`,
+      });
+      if (body.restartAfterSave && inst.status === 'running') {
+        await orchestrator.restartInstance(inst.id, req.authUser?.username || 'admin');
+        const refreshed = orchestrator.getInstance(inst.id) ?? inst;
+        return { ...minecraftProps.read(serverDir, refreshed), restarted: true };
+      }
+      return { ...updated, restarted: false };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Failed to save server.properties' });
+    }
+  });
+
+  // --- Modrinth & Minecraft Mods / Plugins Manager Routes (Issue #14) ---
+
+  app.get('/api/modrinth/search', { preHandler: requireAuth }, async (req, reply) => {
+    const q = req.query as {
+      q?: string;
+      type?: 'modpack' | 'mod' | 'plugin';
+      loader?: string;
+      version?: string;
+      limit?: string;
+    };
+    const projectType = q.type === 'modpack' || q.type === 'plugin' ? q.type : 'mod';
+    try {
+      const results = await modrinth.searchProjects({
+        query: q.q ?? '',
+        projectType,
+        loader: q.loader,
+        gameVersion: q.version,
+        limit: q.limit ? Number(q.limit) : 15,
+      });
+      return { results };
+    } catch (err) {
+      return reply.status(502).send({ error: err instanceof Error ? err.message : 'Modrinth search failed' });
+    }
+  });
+
+  app.get('/api/modrinth/projects/:projectId/versions', { preHandler: requireAuth }, async (req, reply) => {
+    const { projectId } = req.params as { projectId: string };
+    const q = req.query as { loader?: string; version?: string };
+    try {
+      const versions = await modrinth.getProjectVersions(projectId, {
+        loader: q.loader,
+        gameVersion: q.version,
+      });
+      return { versions };
+    } catch (err) {
+      return reply.status(502).send({ error: err instanceof Error ? err.message : 'Failed to load Modrinth versions' });
+    }
+  });
+
+  app.get('/api/instances/:id/addons', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const serverDir = orchestrator.getServerContentDir(inst);
+    return modrinth.listInstalledAddons(serverDir, inst);
+  });
+
+  app.post('/api/instances/:id/addons/install', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const body = (req.body ?? {}) as {
+      projectId?: string;
+      versionId?: string;
+      folder?: 'mods' | 'plugins';
+      loader?: string;
+      gameVersion?: string;
+    };
+    if (!body.projectId?.trim()) {
+      return reply.status(400).send({ error: 'projectId is required.' });
+    }
+    try {
+      const serverDir = orchestrator.getServerContentDir(inst);
+      const result = await modrinth.installAddonWithDependencies(serverDir, inst, {
+        projectId: body.projectId.trim(),
+        versionId: body.versionId?.trim() || undefined,
+        folder: body.folder,
+        loader: body.loader,
+        gameVersion: body.gameVersion,
+      });
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.addon_install',
+        instanceId: inst.id,
+        details: `Installed ${result.installed.map((i) => i.filename).join(', ')}`,
+      });
+      return { ok: true, ...result };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Addon install failed' });
+    }
+  });
+
+  app.post('/api/instances/:id/addons/toggle', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const body = (req.body ?? {}) as { filename?: string; folder?: 'mods' | 'plugins' };
+    if (!body.filename || (body.folder !== 'mods' && body.folder !== 'plugins')) {
+      return reply.status(400).send({ error: 'filename and folder ("mods" | "plugins") are required.' });
+    }
+    try {
+      const serverDir = orchestrator.getServerContentDir(inst);
+      const res = modrinth.toggleAddon(serverDir, body.folder, body.filename);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.addon_toggle',
+        instanceId: inst.id,
+        details: `${res.enabled ? 'Enabled' : 'Disabled'} ${body.folder}/${res.filename}`,
+      });
+      return { ok: true, ...res };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Toggle failed' });
+    }
+  });
+
+  app.delete('/api/instances/:id/addons', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const q = req.query as { filename?: string; folder?: 'mods' | 'plugins' };
+    if (!q.filename || (q.folder !== 'mods' && q.folder !== 'plugins')) {
+      return reply.status(400).send({ error: 'filename and folder query params are required.' });
+    }
+    try {
+      const serverDir = orchestrator.getServerContentDir(inst);
+      modrinth.removeAddon(serverDir, q.folder, q.filename);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.addon_delete',
+        instanceId: inst.id,
+        details: `Removed ${q.folder}/${q.filename}`,
+      });
+      return { ok: true };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Remove failed' });
+    }
+  });
+
+  app.get('/api/instances/:id/addons/updates', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const serverDir = orchestrator.getServerContentDir(inst);
+    const updates = await modrinth.checkAddonUpdates(serverDir, inst);
+    return { updates };
+  });
+
+  // --- One-Click Game Server & Modpack Updater Routes (Issue #13) ---
+
+  app.get('/api/instances/:id/update-check', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      return await orchestrator.checkInstanceUpdate(id);
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Update check failed' });
+    }
+  });
+
+  app.post('/api/instances/:id/update', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as {
+      createBackup?: boolean;
+      targetVersionId?: string;
+      restartIfRunning?: boolean;
+    };
+    try {
+      return await orchestrator.updateInstance(id, body, req.authUser?.username || 'admin');
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Update failed' });
+    }
+  });
+
   // --- Diagnostics & Console Log Download Routes ---
 
   app.get('/api/instances/:id/logs/download', { preHandler: requireAuth }, async (req, reply) => {
@@ -1162,6 +1582,9 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     leaseReaper,
     discord,
     curseforge,
+    modrinth,
+    fileService,
+    minecraftProps,
     smartImport,
     updater,
     maintenance,

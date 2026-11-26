@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Archive,
   ArrowLeft,
+  ArrowUpCircle,
   Bug,
   Check,
   ChevronDown,
@@ -22,13 +23,22 @@ import {
   Timer,
   Trash2,
 } from 'lucide-react';
-import type { BackupPolicy, GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
+import type {
+  BackupPolicy,
+  GameTemplate,
+  HostMetrics,
+  InstanceUpdateCheckResult,
+  RuntimeKind,
+} from '@serverforge/shared';
 import { api, formatHostSourceLabel, formatRemaining, type InstanceDetail, type InstanceWithJoin } from '../api';
 import { copyTextToClipboard } from '../utils/clipboard';
 import type { ConfirmDialogOptions } from './ConfirmModal';
+import { FilesTab } from './instance/FilesTab';
+import { MinecraftPropertiesTab } from './instance/MinecraftPropertiesTab';
+import { ModsPluginsTab } from './instance/ModsPluginsTab';
 import type { PushToastFn } from './ToastStack';
 
-export type InstanceTabId = 'console' | 'config' | 'backups';
+export type InstanceTabId = 'console' | 'config' | 'files' | 'properties' | 'mods' | 'backups';
 
 interface InstanceDetailPageProps {
   instanceId: string;
@@ -132,6 +142,12 @@ export function InstanceDetailPage({
   const [autoScroll, setAutoScroll] = useState(true);
   const [showCrashTail, setShowCrashTail] = useState(false);
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<InstanceUpdateCheckResult | null>(null);
+  const [showUpdatePanel, setShowUpdatePanel] = useState(false);
+  const [updateBackup, setUpdateBackup] = useState(true);
+  const [updateRestart, setUpdateRestart] = useState(true);
+  const [updateTargetVersion, setUpdateTargetVersion] = useState('');
+  const [updatingServer, setUpdatingServer] = useState(false);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const autoBootTriggeredRef = useRef(false);
 
@@ -158,6 +174,15 @@ export function InstanceDetailPage({
 
   useEffect(() => {
     autoBootTriggeredRef.current = false;
+    setShowUpdatePanel(false);
+    setUpdateCheck(null);
+    void api
+      .checkInstanceUpdate(instanceId)
+      .then((res) => {
+        setUpdateCheck(res);
+        if (res.latestVersionId) setUpdateTargetVersion(res.latestVersionId);
+      })
+      .catch(() => {});
     setShowCrashTail(false);
     void loadDetail(true);
   }, [instanceId]);
@@ -457,8 +482,119 @@ export function InstanceDetailPage({
               </button>
             </>
           )}
+          {updateCheck?.supported && (
+            <button
+              type="button"
+              className={`btn ${updateCheck.updateAvailable ? 'btn-primary' : ''}`}
+              disabled={busy || updatingServer || isStatusTransition}
+              onClick={() => setShowUpdatePanel((v) => !v)}
+            >
+              <ArrowUpCircle size={14} />
+              {updatingServer
+                ? 'Updating...'
+                : updateCheck.updateAvailable
+                  ? 'Update Available'
+                  : 'Update Server'}
+            </button>
+          )}
         </div>
       </header>
+
+      {showUpdatePanel && updateCheck?.supported && (
+        <section className="panel" style={{ marginBottom: 18 }}>
+          <div className="panel-header">
+            <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <ArrowUpCircle size={16} />
+              {updateCheck.kind === 'steamcmd'
+                ? 'Update Game Server via SteamCMD'
+                : updateCheck.kind === 'curseforge'
+                  ? 'Upgrade CurseForge Modpack'
+                  : 'Upgrade Modrinth Modpack'}
+            </h2>
+            <button type="button" className="btn btn-sm" onClick={() => setShowUpdatePanel(false)}>
+              Close
+            </button>
+          </div>
+          <div className="panel-body">
+            <p style={{ marginTop: 0, fontSize: 13, color: 'var(--text-secondary)' }}>{updateCheck.message}</p>
+
+            {updateCheck.availableVersions.length > 0 && (
+              <div className="field" style={{ marginBottom: 12, maxWidth: 440 }}>
+                <label htmlFor="update-target-version">Target Version</label>
+                <select
+                  id="update-target-version"
+                  className="select"
+                  value={updateTargetVersion}
+                  onChange={(e) => setUpdateTargetVersion(e.target.value)}
+                >
+                  {updateCheck.availableVersions.map((ver) => (
+                    <option key={ver.id} value={ver.id}>
+                      {ver.label} {ver.gameVersions[0] ? `(${ver.gameVersions[0]})` : ''}
+                      {ver.id === updateCheck.currentVersionId ? ' — Current' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={updateBackup}
+                  onChange={(e) => setUpdateBackup(e.target.checked)}
+                />
+                <span>Create automatic pre-update safety backup before modifying server files (Recommended)</span>
+              </label>
+              {!isStopped && (
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={updateRestart}
+                    onChange={(e) => setUpdateRestart(e.target.checked)}
+                  />
+                  <span>Restart server automatically after update completes</span>
+                </label>
+              )}
+            </div>
+
+            <div className="btn-row">
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={updatingServer}
+                onClick={async () => {
+                  setUpdatingServer(true);
+                  setTab('console');
+                  setMessage(null);
+                  try {
+                    const res = await api.updateInstance(detail.id, {
+                      createBackup: updateBackup,
+                      targetVersionId: updateTargetVersion || undefined,
+                      restartIfRunning: updateRestart,
+                    });
+                    setShowUpdatePanel(false);
+                    setMessage({ kind: 'success', text: res.summary });
+                    onToast?.('success', res.summary);
+                    await loadDetail(true);
+                    onGlobalRefresh();
+                    const refreshedCheck = await api.checkInstanceUpdate(detail.id).catch(() => null);
+                    if (refreshedCheck) setUpdateCheck(refreshedCheck);
+                  } catch (err) {
+                    const msg = err instanceof Error ? err.message : 'Update failed';
+                    setMessage({ kind: 'error', text: msg });
+                    onToast?.('error', msg);
+                  } finally {
+                    setUpdatingServer(false);
+                  }
+                }}
+              >
+                <ArrowUpCircle size={14} /> {updatingServer ? 'Updating...' : 'Run Update Now'}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Connection + Lease Banner */}
       <div
@@ -706,6 +842,24 @@ export function InstanceDetailPage({
         <button className={`tab-btn ${tab === 'config' ? 'active' : ''}`} onClick={() => setTab('config')}>
           Configuration
         </button>
+        <button className={`tab-btn ${tab === 'files' ? 'active' : ''}`} onClick={() => setTab('files')}>
+          Files
+        </button>
+        {(detail.gameId === 'minecraft' ||
+          detail.gameId === 'minecraft-curseforge' ||
+          detail.gameId === 'minecraft-modrinth') && (
+          <>
+            <button
+              className={`tab-btn ${tab === 'properties' ? 'active' : ''}`}
+              onClick={() => setTab('properties')}
+            >
+              Server Properties
+            </button>
+            <button className={`tab-btn ${tab === 'mods' ? 'active' : ''}`} onClick={() => setTab('mods')}>
+              Mods / Plugins
+            </button>
+          </>
+        )}
         <button className={`tab-btn ${tab === 'backups' ? 'active' : ''}`} onClick={() => setTab('backups')}>
           World Backups ({detail.backups.length})
         </button>
@@ -1230,6 +1384,26 @@ export function InstanceDetailPage({
             </div>
           </div>
         </div>
+      )}
+
+      {tab === 'files' && (
+        <FilesTab instanceId={detail.id} onConfirm={onConfirm} onToast={onToast} />
+      )}
+
+      {tab === 'properties' && (
+        <MinecraftPropertiesTab
+          instanceId={detail.id}
+          isRunning={detail.status === 'running'}
+          onSaved={() => {
+            void loadDetail(false);
+            onGlobalRefresh();
+          }}
+          onToast={onToast}
+        />
+      )}
+
+      {tab === 'mods' && (
+        <ModsPluginsTab instanceId={detail.id} onConfirm={onConfirm} onToast={onToast} />
       )}
     </div>
   );

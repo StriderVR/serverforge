@@ -1,0 +1,131 @@
+id: minecraft-modrinth
+name: "Minecraft (Modrinth Modpack)"
+shortName: "MC Modrinth"
+group: minecraft
+groupName: "Minecraft"
+variantLabel: "Modrinth Modpack"
+variantDescription: "Zero-API-key Modrinth .mrpack modpacks (Fabric, NeoForge, Forge)"
+variantOrder: 3
+category: sandbox
+description: "Dedicated modded Minecraft server built directly from any Modrinth modpack (.mrpack) with zero API key required and automatic Java 8/17/21/25 runtime selection."
+accentColor: "#1bd96a"
+joinHint: "Launch matching Modrinth pack -> Multiplayer -> {{HOST}}:{{PORT_GAME}}"
+resources:
+  minRamGb: 4
+  recommendedRamGb: 6
+  minDiskGb: 10
+ports:
+  - key: game
+    label: "Game Port"
+    defaultPort: 25565
+    protocol: tcp
+    primary: true
+  - key: rcon
+    label: "RCON Port"
+    defaultPort: 25575
+    protocol: tcp
+    internalOnly: true
+runtimes:
+  preferred: native
+  docker:
+    image: "itzg/minecraft-server:{{JAVA_IMAGE_TAG}}"
+    volumes:
+      - hostSubdir: "data"
+        containerPath: "/data"
+    envTemplate:
+      EULA: "TRUE"
+      TYPE: "MODRINTH"
+      MODRINTH_MODPACK: "{{MR_PROJECT_ID}}"
+      MODRINTH_VERSION: "{{MR_VERSION_ID}}"
+      MEMORY: "{{MEMORY_MB}}M"
+      MOTD: "{{MOTD}}"
+      MAX_PLAYERS: "{{MAX_PLAYERS}}"
+      DIFFICULTY: "{{DIFFICULTY}}"
+      MODE: "{{GAMEMODE}}"
+      VIEW_DISTANCE: "{{VIEW_DISTANCE}}"
+      ONLINE_MODE: "{{ONLINE_MODE}}"
+      ENABLE_RCON: "true"
+      RCON_PORT: "{{PORT_RCON}}"
+      RCON_PASSWORD: "{{RCON_PASSWORD}}"
+      SERVER_PORT: "{{PORT_GAME}}"
+  native:
+    installer: custom
+    executableWindows: "java"
+    executableLinux: "java"
+    argsTemplate: "-Xms1024M -Xmx{{MEMORY_MB}}M -jar server.jar nogui"
+    saveSubdir: "server"
+    envTemplate:
+      SERVER_PORT: "{{PORT_GAME}}"
+      RCON_PORT: "{{PORT_RCON}}"
+      RCON_PASSWORD: "{{RCON_PASSWORD}}"
+query:
+  protocol: minecraft-slp
+  portKey: game
+  rconPortKey: rcon
+  passwordField: RCON_PASSWORD
+  listPlayersCommand: "list"
+  listPlayersCountRegex: "There are (\\d+) of a max"
+lifecycle:
+  bootGraceSeconds: 360
+  gracefulStopTimeoutSeconds: 60
+  saveMethod: rcon
+  saveCommand: "save-all"
+  stopCommand: "stop"
+configFields:
+  - key: MR_PROJECT_ID
+    label: "Modrinth Modpack Slug or ID"
+    description: "Auto-filled when picking from the Modrinth browser (e.g. fabulously-optimized, prominence-2-rpg)."
+    type: string
+    default: ""
+  - key: MR_VERSION_ID
+    label: "Modpack Version ID (optional)"
+    description: "Leave blank to automatically install the latest version of the modpack."
+    type: string
+    default: ""
+  - key: MR_PACK_URL
+    label: "Direct .mrpack URL or Local Path (Optional Override)"
+    description: "Optional direct link or local path to a .mrpack archive."
+    type: string
+    default: ""
+  - key: JAVA_IMAGE_TAG
+    label: "Java Runtime Version (Docker & Native)"
+    description: "Java 25 for MC 26.1+, Java 21 for MC 1.20.5-1.21.x, Java 17 for MC 1.18-1.20.4, Java 8 for MC 1.16.5 and older."
+    type: select
+    default: "java21"
+    options: ["java25", "java21", "java17", "java8", "latest"]
+    required: true
+  - key: MOTD
+    label: "Server MOTD"
+    type: string
+    default: "ServerForge Modrinth Modpack"
+  - key: MAX_PLAYERS
+    label: "Max Players"
+    type: number
+    default: 8
+    min: 1
+    max: 100
+  - key: DIFFICULTY
+    label: "Difficulty"
+    type: select
+    default: "normal"
+    options: ["peaceful", "easy", "normal", "hard"]
+  - key: GAMEMODE
+    label: "Game Mode"
+    type: select
+    default: "survival"
+    options: ["survival", "creative", "adventure"]
+  - key: VIEW_DISTANCE
+    label: "View Distance (chunks)"
+    type: number
+    default: 10
+    min: 4
+    max: 32
+  - key: ONLINE_MODE
+    label: "Verify Mojang Accounts"
+    type: boolean
+    default: true
+  - key: RCON_PASSWORD
+    label: "RCON Password"
+    type: secret
+    required: true
+    autoGenerate: true

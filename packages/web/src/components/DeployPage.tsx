@@ -8,6 +8,7 @@ import {
 } from '@serverforge/shared';
 import { api } from '../api';
 import { CurseForgeBrowser, type SelectedCurseForgePack } from './CurseForgeBrowser';
+import { ModrinthBrowser, type SelectedModrinthPack } from './ModrinthBrowser';
 
 interface DeployPageProps {
   catalog: GameTemplate[];
@@ -117,6 +118,18 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
       JAVA_IMAGE_TAG: pack.javaTag,
       MOTD: `${pack.packName} — ServerForge`,
       ...(pack.serverPackZipUrl !== undefined ? { SERVER_PACK_ZIP: pack.serverPackZipUrl } : {}),
+    }));
+  };
+
+  const handleSelectModrinthPack = (pack: SelectedModrinthPack) => {
+    setName(pack.packName.slice(0, 56));
+    setMemoryGb((prev) => Math.max(prev, 6));
+    setConfig((prev) => ({
+      ...prev,
+      MR_PROJECT_ID: pack.slug,
+      MR_VERSION_ID: pack.versionId,
+      JAVA_IMAGE_TAG: pack.javaTag,
+      MOTD: `${pack.packName} — ServerForge`,
     }));
   };
 
@@ -258,6 +271,18 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
                 <strong>Native Modpack Auto-Setup:</strong> ServerForge will automatically download &amp; extract the
                 CurseForge Server Pack ZIP, install the matching portable Java runtime (Java 8 / 17 / 21 / 25) if needed,
                 and stream setup progress to the Live Console. First boot may take 1–3 minutes depending on pack size.
+              </div>
+            )}
+
+            {selected.id === 'minecraft-modrinth' && (
+              <ModrinthBrowser onSelectPack={handleSelectModrinthPack} />
+            )}
+
+            {selected.id === 'minecraft-modrinth' && runtime === 'native' && (
+              <div className="alert alert-info" style={{ marginBottom: 16 }}>
+                <strong>Native Modrinth Auto-Setup:</strong> ServerForge downloads the <code>.mrpack</code> archive
+                directly from Modrinth (no API key needed), fetches server-side mods &amp; loader files, installs the
+                matching Java runtime automatically, and streams progress to the Live Console.
               </div>
             )}
 

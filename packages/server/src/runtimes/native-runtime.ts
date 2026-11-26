@@ -7,6 +7,8 @@ import type { GameTemplate, InstanceRuntimeStats, ServerInstance } from '@server
 import { buildTemplateVariables, renderTemplateString } from '../catalog/catalog-service.js';
 import type { QueryService } from '../query/query-service.js';
 import type { CurseForgeService } from '../services/curseforge-service.js';
+import { parsePropertiesFile } from '../services/import-service.js';
+import type { ModrinthService } from '../services/modrinth-service.js';
 import {
   buildFactorioWin64DownloadUrl,
   FACTORIO_LINUX_HEADLESS_URL,
@@ -603,6 +605,82 @@ function writeMinecraftBaseConfig(
   }
 }
 
+const PRESERVED_MODPACK_ROOT_ENTRIES = new Set([
+  'world',
+  'world_nether',
+  'world_the_end',
+  'server.properties',
+  'whitelist.json',
+  'ops.json',
+  'banned-players.json',
+  'banned-ips.json',
+  'eula.txt',
+  'user_jvm_args.txt',
+  'logs',
+  'crash-reports',
+  'backups',
+  '.serverforge-modrinth.json',
+]);
+
+const MODPACK_REPLACE_DIRS = new Set([
+  'mods',
+  'config',
+  'defaultconfigs',
+  'kubejs',
+  'scripts',
+  'libraries',
+  'packmenu',
+]);
+
+/**
+ * Safely upgrades a modpack server directory from a staged extraction folder while
+ * preserving worlds (including custom `level-name`), `server.properties`, `whitelist.json`,
+ * `ops.json`, `banned-*.json`, `eula.txt`, and `user_jvm_args.txt`.
+ */
+export function applySafeModpackUpgrade(
+  stagedDir: string,
+  serverDir: string,
+  onLog: (line: string) => void
+): { replacedCount: number; preservedEntries: string[] } {
+  fs.mkdirSync(serverDir, { recursive: true });
+  const preserved = new Set(PRESERVED_MODPACK_ROOT_ENTRIES);
+
+  // Also preserve custom `level-name` world folder configured in server.properties
+  const propsPath = path.join(serverDir, 'server.properties');
+  if (fs.existsSync(propsPath)) {
+    const props = parsePropertiesFile(fs.readFileSync(propsPath, 'utf8'));
+    const levelName = props['level-name']?.trim();
+    if (levelName) {
+      preserved.add(levelName.toLowerCase());
+    }
+  }
+
+  let replacedCount = 0;
+  const skippedPreserved: string[] = [];
+
+  for (const entry of fs.readdirSync(stagedDir, { withFileTypes: true })) {
+    const lower = entry.name.toLowerCase();
+    if (preserved.has(lower)) {
+      skippedPreserved.push(entry.name);
+      continue;
+    }
+
+    const src = path.join(stagedDir, entry.name);
+    const dst = path.join(serverDir, entry.name);
+
+    if (entry.isDirectory() && MODPACK_REPLACE_DIRS.has(lower) && fs.existsSync(dst)) {
+      fs.rmSync(dst, { recursive: true, force: true, maxRetries: 4, retryDelay: 150 });
+    }
+    fs.cpSync(src, dst, { recursive: true, force: true });
+    replacedCount += 1;
+  }
+
+  onLog(
+    `[Update] Applied ${replacedCount} modpack item(s) while preserving user worlds & configs${skippedPreserved.length > 0 ? ` (${skippedPreserved.join(', ')})` : ''}.`
+  );
+  return { replacedCount, preservedEntries: skippedPreserved };
+}
+
 export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
   public readonly kind = 'native' as const;
   private readonly processes = new Map<string, ManagedProcess>();
@@ -612,7 +690,8 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     private readonly queryService: QueryService,
     private readonly curseforge?: CurseForgeService,
     private readonly getGlobalVars: () => Record<string, string> = () => ({}),
-    private readonly fetchImpl: typeof fetch = fetch
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly modrinth?: ModrinthService
   ) {}
 
   async isAvailable(): Promise<boolean> {
@@ -972,6 +1051,225 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
         SERVER_RESTART: 'false',
       },
     };
+  }
+
+  public async prepareModrinthModpack(
+    instance: ServerInstance,
+    serverDir: string,
+    onLog: (line: string) => void,
+    onStatus?: (status: 'installing' | 'starting') => void,
+    javaOverride?: DetectedJava
+  ): Promise<NativeLaunchPlan> {
+    const markerPath = path.join(serverDir, '.serverforge-mrpack-installed');
+    let recommendedJavaTag = String(instance.config.JAVA_IMAGE_TAG ?? 'java21');
+    let mcVersion = '';
+    let fabricVersion = '';
+
+    const alreadyHasRunnable =
+      fs.existsSync(markerPath) ||
+      Boolean(findNativeMinecraftLauncher(serverDir, 'java', instance.memoryLimitMb));
+
+    if (!alreadyHasRunnable) {
+      if (!this.modrinth) {
+        throw new Error('Modrinth service is unavailable for native .mrpack installation.');
+      }
+      onStatus?.('installing');
+      const { index } = await this.modrinth.installMrpackArchive(
+        {
+          projectIdOrSlug: String(instance.config.MR_PROJECT_ID ?? ''),
+          versionId: String(instance.config.MR_VERSION_ID ?? ''),
+          packUrlOrPath: String(instance.config.MR_PACK_URL ?? ''),
+        },
+        serverDir,
+        onLog
+      );
+
+      mcVersion = index.dependencies?.minecraft ?? '';
+      fabricVersion = index.dependencies?.['fabric-loader'] ?? '';
+      if (mcVersion) {
+        const major = recommendJavaMajorForMcVersion(mcVersion);
+        recommendedJavaTag = `java${major}`;
+      }
+
+      // If no server launcher jar exists yet, auto-install the Fabric server jar when Fabric is declared
+      const jarPath = path.join(serverDir, 'server.jar');
+      if (!findNativeMinecraftLauncher(serverDir, 'java', instance.memoryLimitMb)) {
+        if (fabricVersion && mcVersion) {
+          onLog(`[Modrinth] Installing Fabric server launcher (MC ${mcVersion}, loader ${fabricVersion})...`);
+          const instRes = await this.fetchImpl('https://meta.fabricmc.net/v2/versions/installer', {
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (instRes.ok) {
+            const installers = (await instRes.json()) as Array<{ version: string; stable: boolean }>;
+            const installerVer = installers.find((i) => i.stable)?.version ?? installers[0]?.version ?? '1.0.1';
+            const fabricUrl = `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(mcVersion)}/${encodeURIComponent(fabricVersion)}/${encodeURIComponent(installerVer)}/server/jar`;
+            await this.streamDownloadToFile(fabricUrl, jarPath, onLog, `Fabric ${mcVersion}`);
+          }
+        } else if (mcVersion && !index.dependencies?.forge && !index.dependencies?.neoforge) {
+          // Vanilla fallback for pure resource/datapack .mrpack
+          const manifestRes = await this.fetchImpl('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json', {
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (manifestRes.ok) {
+            const manifest = (await manifestRes.json()) as { versions?: Array<{ id: string; url: string }> };
+            const entry = (manifest.versions ?? []).find((v) => v.id === mcVersion);
+            if (entry) {
+              const verRes = await this.fetchImpl(entry.url, { signal: AbortSignal.timeout(15_000) });
+              if (verRes.ok) {
+                const verMeta = (await verRes.json()) as { downloads?: { server?: { url?: string } } };
+                if (verMeta.downloads?.server?.url) {
+                  await this.streamDownloadToFile(verMeta.downloads.server.url, jarPath, onLog, `Vanilla ${mcVersion}`);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      fs.writeFileSync(markerPath, new Date().toISOString(), 'utf8');
+      onLog('[Modrinth] Modpack installed cleanly.');
+    }
+
+    let requiredMajor = javaTagToMajor(recommendedJavaTag);
+    const detectedFromDir = detectRequiredJavaMajorFromServerDir(serverDir);
+    if (detectedFromDir !== null && detectedFromDir > requiredMajor) {
+      requiredMajor = detectedFromDir;
+    }
+
+    const java =
+      javaOverride ??
+      (await ensureJavaRuntime(requiredMajor, this.toolsDir, onLog, {
+        fetchImpl: this.fetchImpl,
+      }));
+
+    writeMinecraftBaseConfig(serverDir, instance, 'ServerForge Modrinth Modpack', java.major, onLog);
+
+    let launcher = findNativeMinecraftLauncher(
+      serverDir,
+      java.javaBin,
+      instance.memoryLimitMb,
+      process.platform,
+      java.major
+    );
+    if (!launcher) {
+      const installerJar = findForgeOrNeoForgeInstallerJar(serverDir);
+      if (installerJar) {
+        onStatus?.('installing');
+        await this.runModloaderInstaller(installerJar, serverDir, java, onLog);
+        launcher = findNativeMinecraftLauncher(
+          serverDir,
+          java.javaBin,
+          instance.memoryLimitMb,
+          process.platform,
+          java.major
+        );
+      }
+    }
+
+    if (!launcher) {
+      throw new Error(
+        `No runnable Minecraft server JAR or startup script was found in ${serverDir} after installing the Modrinth pack.`
+      );
+    }
+
+    onStatus?.('starting');
+    return {
+      ...launcher,
+      extraEnv: buildJavaEnv(process.env, java),
+    };
+  }
+
+  public async updateSteamCmdServer(
+    template: GameTemplate,
+    instance: ServerInstance,
+    serverDir: string,
+    onLog: (line: string) => void
+  ): Promise<void> {
+    const appId = template.runtimes.native?.steamAppId;
+    if (!appId) {
+      throw new Error(`Template "${template.name}" does not have a SteamCMD AppID.`);
+    }
+    const steamBeta =
+      template.id === 'satisfactory' && Boolean(instance.config.EXPERIMENTAL)
+        ? 'experimental'
+        : template.runtimes.native?.steamBeta;
+    await this.ensureSteamCmdInstalled(appId, serverDir, steamBeta, onLog);
+  }
+
+  public async upgradeCurseForgeModpack(
+    instance: ServerInstance,
+    serverDir: string,
+    targetFileId: string | undefined,
+    onLog: (line: string) => void
+  ): Promise<{ newFileId: string; recommendedJavaTag: string }> {
+    if (!this.curseforge) {
+      throw new Error('CurseForge service is unavailable.');
+    }
+    const cfSlug = String(instance.config.CF_SLUG ?? '').trim();
+    const cfPageUrl = String(instance.config.CF_PAGE_URL ?? '').trim();
+    const apiKey = this.getGlobalVars().CF_API_KEY ?? '';
+
+    onLog(`[Update] Resolving CurseForge Server Pack for "${cfSlug || cfPageUrl || instance.name}"...`);
+    const resolved = await this.curseforge.resolveServerPackForNative({
+      slug: cfSlug,
+      fileId: targetFileId ?? '',
+      pageUrl: cfPageUrl,
+      apiKey,
+    });
+
+    const stageDir = path.join(path.dirname(serverDir), `.cf-upgrade-${instance.id}-${Date.now()}`);
+    const zipPath = path.join(stageDir, 'server-pack.zip');
+    const extractDir = path.join(stageDir, 'extracted');
+    fs.mkdirSync(extractDir, { recursive: true });
+
+    try {
+      onLog(
+        `[Update] Downloading "${resolved.modName}" Server Pack (file #${resolved.serverPackFileId})...`
+      );
+      await this.streamDownloadToFile(resolved.downloadUrl, zipPath, onLog, 'CurseForge Upgrade');
+      onLog('[Update] Extracting staged modpack upgrade...');
+      await this.extractZip(zipPath, extractDir);
+      flattenSingleRootSubdir(extractDir);
+      applySafeModpackUpgrade(extractDir, serverDir, onLog);
+      fs.writeFileSync(path.join(serverDir, '.serverforge-pack-installed'), new Date().toISOString(), 'utf8');
+      return {
+        newFileId: String(resolved.serverPackFileId),
+        recommendedJavaTag: resolved.recommendedJavaTag,
+      };
+    } finally {
+      fs.rmSync(stageDir, { recursive: true, force: true, maxRetries: 4, retryDelay: 150 });
+    }
+  }
+
+  public async upgradeModrinthModpack(
+    instance: ServerInstance,
+    serverDir: string,
+    targetVersionId: string | undefined,
+    onLog: (line: string) => void
+  ): Promise<{ newVersionId: string | null; recommendedJavaTag: string }> {
+    if (!this.modrinth) {
+      throw new Error('Modrinth service is unavailable.');
+    }
+    const stageDir = path.join(path.dirname(serverDir), `.mr-upgrade-${instance.id}-${Date.now()}`);
+    fs.mkdirSync(stageDir, { recursive: true });
+    try {
+      const { index, resolvedVersionId } = await this.modrinth.installMrpackArchive(
+        {
+          projectIdOrSlug: String(instance.config.MR_PROJECT_ID ?? ''),
+          versionId: targetVersionId ?? '',
+          packUrlOrPath: String(instance.config.MR_PACK_URL ?? ''),
+        },
+        stageDir,
+        onLog
+      );
+      applySafeModpackUpgrade(stageDir, serverDir, onLog);
+      fs.writeFileSync(path.join(serverDir, '.serverforge-mrpack-installed'), new Date().toISOString(), 'utf8');
+      const mcVer = index.dependencies?.minecraft ?? '';
+      const recommendedJavaTag = mcVer ? `java${recommendJavaMajorForMcVersion(mcVer)}` : String(instance.config.JAVA_IMAGE_TAG ?? 'java21');
+      return { newVersionId: resolvedVersionId, recommendedJavaTag };
+    } finally {
+      fs.rmSync(stageDir, { recursive: true, force: true, maxRetries: 4, retryDelay: 150 });
+    }
   }
 
   public async prepareJavaMinecraftServer(
@@ -1406,6 +1704,8 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     } else if (!instance.externalDir) {
       if (template.id === 'minecraft-curseforge') {
         customLaunch = await this.prepareCurseForgeServerPack(instance, serverDir, onLog, onStatus);
+      } else if (template.id === 'minecraft-modrinth') {
+        customLaunch = await this.prepareModrinthModpack(instance, serverDir, onLog, onStatus);
       } else if (nativeSpec.installer === 'java') {
         customLaunch = await this.prepareJavaMinecraftServer(instance, serverDir, onLog, onStatus);
       } else if (template.id === 'factorio' || nativeSpec.installer === 'download') {
