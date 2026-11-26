@@ -106,3 +106,9 @@ pnpm typecheck
 pnpm test
 pnpm dev:mock
 ```
+
+---
+
+## Versioning & Releases
+
+ServerForge uses **`vMAJOR.MINOR.PATCH`** (Major Release / Features & QoL / Bug Fixes & Hotfixes). See [VERSIONING.md](./VERSIONING.md) for the full policy and `pnpm bump:patch|minor|major` release workflow.
