@@ -1371,6 +1371,77 @@ pre,
   color: var(--text-primary);
 }
 
+/* What's New Splash Modal & Sidebar Version Trigger */
+.brand-version-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  margin-top: 2px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.brand-version-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  background: var(--accent-soft);
+}
+
+.whats-new-card {
+  max-width: 540px;
+}
+
+.whats-new-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.whats-new-pill {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 9px;
+  border-radius: 999px;
+}
+
+.whats-new-pill-added {
+  background: var(--status-online-soft);
+  color: var(--status-online);
+}
+
+.whats-new-pill-changed {
+  background: var(--status-warn-soft);
+  color: var(--status-warn);
+}
+
+.whats-new-pill-removed {
+  background: var(--status-danger-soft);
+  color: var(--status-danger);
+}
+
+.whats-new-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.45;
+}
+
 /* Responsive */
 @media (max-width: 980px) {
   .app-shell {
