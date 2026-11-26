@@ -12,6 +12,7 @@ import type {
 } from '@serverforge/shared';
 import type { AppConfig } from '../config.js';
 import type { AppDatabase } from '../db/database.js';
+import type { ConnectivityService } from './connectivity-service.js';
 import type { ServerOrchestrator } from './orchestrator.js';
 import type { TelemetryService } from './telemetry-service.js';
 
@@ -89,8 +90,14 @@ export class DiagnosticsService {
     this.hydrateFromDisk();
   }
 
+  private connectivity?: ConnectivityService;
+
   attachOrchestrator(orchestrator: ServerOrchestrator): void {
     this.orchestrator = orchestrator;
+  }
+
+  attachConnectivity(connectivity: ConnectivityService): void {
+    this.connectivity = connectivity;
   }
 
   private collectKnownSecrets(): string[] {
@@ -311,6 +318,26 @@ export class DiagnosticsService {
         `- **Exit Code:** ${instance.lastCrash.exitCode ?? 'unknown'}`,
         `- **Watchdog Attempts:** ${instance.lastCrash.attemptCount}/${instance.lastCrash.maxAttempts} (${instance.lastCrash.halted ? 'Auto-restart halted' : 'Recovery scheduled'})`,
         `- **Reason:** ${redactSecrets(instance.lastCrash.reason, secrets)}`
+      );
+    }
+
+    if (this.connectivity) {
+      const guide = this.connectivity.buildNetworkGuide(instance);
+      const externalSummary = guide.ports
+        .filter((p) => !p.internalOnly)
+        .map((p) => `${p.label}: ${p.port}/${p.protocol.toUpperCase()}`)
+        .join(', ');
+      const internalSummary = guide.ports
+        .filter((p) => p.internalOnly)
+        .map((p) => `${p.label}: ${p.port}/${p.protocol.toUpperCase()} (Local Only)`)
+        .join(', ');
+      lines.push(
+        ``,
+        `## Network & Port Exposure Summary`,
+        `- **Local LAN IP:** ${guide.lanIp ?? 'not detected'}`,
+        `- **Public Host Mode / Effective Host:** ${guide.effectiveHost}`,
+        `- **Required External Ports:** ${externalSummary || 'none'}`,
+        `- **Internal-Only Ports (Keep Local):** ${internalSummary || 'none'}`
       );
     }
 

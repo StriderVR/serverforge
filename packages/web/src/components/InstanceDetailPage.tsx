@@ -36,9 +36,10 @@ import type { ConfirmDialogOptions } from './ConfirmModal';
 import { FilesTab } from './instance/FilesTab';
 import { MinecraftPropertiesTab } from './instance/MinecraftPropertiesTab';
 import { ModsPluginsTab } from './instance/ModsPluginsTab';
+import { NetworkTab } from './instance/NetworkTab';
 import type { PushToastFn } from './ToastStack';
 
-export type InstanceTabId = 'console' | 'config' | 'files' | 'properties' | 'mods' | 'backups';
+export type InstanceTabId = 'console' | 'network' | 'config' | 'files' | 'properties' | 'mods' | 'backups';
 
 interface InstanceDetailPageProps {
   instanceId: string;
@@ -849,6 +850,9 @@ export function InstanceDetailPage({
         <button className={`tab-btn ${tab === 'console' ? 'active' : ''}`} onClick={() => setTab('console')}>
           Live Console
         </button>
+        <button className={`tab-btn ${tab === 'network' ? 'active' : ''}`} onClick={() => setTab('network')}>
+          Network &amp; Firewall
+        </button>
         <button className={`tab-btn ${tab === 'config' ? 'active' : ''}`} onClick={() => setTab('config')}>
           Configuration
         </button>
@@ -1436,6 +1440,18 @@ export function InstanceDetailPage({
             void loadDetail(false);
             onGlobalRefresh();
           }}
+          onToast={onToast}
+        />
+      )}
+
+      {tab === 'network' && (
+        <NetworkTab
+          instanceId={detail.id}
+          isRunning={detail.status === 'running'}
+          onStartServer={() =>
+            void runAction(() => api.startInstance(detail.id, { temporary: false }), 'Server started.')
+          }
+          onGoToConfig={() => setTab('config')}
           onToast={onToast}
         />
       )}

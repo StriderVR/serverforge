@@ -4,11 +4,15 @@ import type {
   AuditLogEntry,
   BackupPolicy,
   BackupRecord,
+  ConsolidatedPortMapEntry,
   CreateInstanceInput,
   CurseForgeModpackFile,
   CurseForgeModpackSummary,
   DiagnosticLevel,
   DiscoveredProcess,
+  FirewallApplyResult,
+  FirewallRemoveResult,
+  FirewallStatus,
   FolderBrowseResult,
   FolderPickResult,
   GameTemplate,
@@ -17,10 +21,12 @@ import type {
   ImportServerInput,
   InstalledAddonEntry,
   InstalledAddonsResponse,
+  InstanceConnectivityReport,
   InstanceDebugReport,
   InstanceFileContent,
   InstanceFileEntry,
   InstanceFileListing,
+  InstanceNetworkGuide,
   InstanceUpdateCheckResult,
   InstanceUpdateResult,
   MaintenanceStatus,
@@ -245,6 +251,26 @@ export const api = {
 
   getInstances: () => request<InstanceWithJoin[]>('/api/instances'),
   getInstance: (id: string) => request<InstanceDetail>(`/api/instances/${id}`),
+  getConsolidatedPortMap: () =>
+    request<{ lanIp: string | null; entries: ConsolidatedPortMapEntry[] }>('/api/network/port-map'),
+  getInstanceNetworkGuide: (id: string) =>
+    request<InstanceNetworkGuide>(`/api/instances/${id}/network-guide`),
+  getInstanceFirewall: (id: string) =>
+    request<FirewallStatus>(`/api/instances/${id}/firewall`),
+  applyInstanceFirewall: (id: string, switchProfileToPrivate = false) =>
+    request<FirewallApplyResult>(`/api/instances/${id}/firewall/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ switchProfileToPrivate }),
+    }),
+  removeInstanceFirewall: (id: string) =>
+    request<FirewallRemoveResult>(`/api/instances/${id}/firewall`, {
+      method: 'DELETE',
+    }),
+  runInstanceNetworkCheck: (id: string) =>
+    request<InstanceConnectivityReport>(`/api/instances/${id}/network-check`, {
+      method: 'POST',
+      body: '{}',
+    }),
   createInstance: (input: CreateInstanceInput) =>
     request<InstanceWithJoin>('/api/instances', {
       method: 'POST',

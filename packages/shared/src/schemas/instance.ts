@@ -187,6 +187,7 @@ export const SystemSettingsSchema = z.object({
   dailyRebootResumePolicy: z.enum(['resume_running', 'autostart_only']).default('autostart_only'),
   curseforgeApiKey: z.string().default(''),
   lastSeenReleaseVersion: z.string().default(''),
+  lastKnownLanIp: z.string().default(''),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
 

@@ -30,6 +30,7 @@ import type { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { extractZipSafely } from './backup-scheduler.js';
 import { parseCurseForgeUrl, type CurseForgeService } from './curseforge-service.js';
 import type { DiagnosticsService } from './diagnostics-service.js';
+import type { FirewallService } from './firewall-service.js';
 import { enableRconInServerProperties } from './import-service.js';
 import type { ModrinthService } from './modrinth-service.js';
 import type { NetworkAddressService } from './network-service.js';
@@ -100,6 +101,7 @@ export class ServerOrchestrator extends EventEmitter {
   private watchdogWindowMs = 15 * 60_000;
   private watchdogMaxRestarts = 3;
   private watchdogBaseBackoffMs = 10_000;
+  private firewall?: FirewallService;
 
   constructor(
     private readonly config: AppConfig,
@@ -120,6 +122,10 @@ export class ServerOrchestrator extends EventEmitter {
     if (watchdogOptions?.windowMs !== undefined) this.watchdogWindowMs = watchdogOptions.windowMs;
     if (watchdogOptions?.maxRestarts !== undefined) this.watchdogMaxRestarts = watchdogOptions.maxRestarts;
     if (watchdogOptions?.baseBackoffMs !== undefined) this.watchdogBaseBackoffMs = watchdogOptions.baseBackoffMs;
+  }
+
+  attachFirewallService(firewall: FirewallService): void {
+    this.firewall = firewall;
   }
 
   /** Allows tests to tune crash watchdog backoff & window timings deterministically. */
@@ -441,6 +447,10 @@ export class ServerOrchestrator extends EventEmitter {
       ? BackupPolicySchema.parse({ ...(existing.backupPolicy ?? {}), ...patch.backupPolicy })
       : existing.backupPolicy;
 
+    const portsChanged =
+      Boolean(patch.ports) &&
+      Object.entries(patch.ports ?? {}).some(([k, v]) => existing.ports[k] !== v);
+
     const updated = this.db.updateInstance(id, {
       name: patch.name?.trim() || existing.name,
       runtime: nextRuntime,
@@ -456,6 +466,10 @@ export class ServerOrchestrator extends EventEmitter {
       status: nextRuntime !== existing.runtime && existing.status === 'error' ? 'stopped' : existing.status,
     });
     if (!updated) throw new Error('Failed to update instance.');
+
+    if (portsChanged && this.firewall) {
+      void this.firewall.removeInstanceRules(existing, { allowUac: false }).catch(() => {});
+    }
 
     this.db.addAuditLog({
       actor,
@@ -1329,6 +1343,14 @@ export class ServerOrchestrator extends EventEmitter {
       await adapter.remove(instance);
     } catch {
       // Ignore runtime cleanup error if daemon unavailable
+    }
+
+    if (this.firewall) {
+      try {
+        await this.firewall.removeInstanceRules(instance, { allowUac: false });
+      } catch {
+        // Non-blocking best-effort firewall cleanup
+      }
     }
 
     // Only delete ServerForge-managed directory; NEVER touch a user's linked externalDir!

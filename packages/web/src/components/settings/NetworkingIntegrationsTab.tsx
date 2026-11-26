@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { CheckCircle2, Eye, EyeOff, Globe, Package, RefreshCw } from 'lucide-react';
-import type { NetworkStatus, PublicHostMode, SystemSettings } from '@serverforge/shared';
+import React, { useEffect, useState } from 'react';
+import { AlertTriangle, CheckCircle2, Eye, EyeOff, Globe, Lock, Network, Package, RefreshCw } from 'lucide-react';
+import type { ConsolidatedPortMapEntry, NetworkStatus, PublicHostMode, SystemSettings } from '@serverforge/shared';
 import { api, formatHostSourceLabel } from '../../api';
 import type { PushToastFn } from '../ToastStack';
 
@@ -29,6 +29,27 @@ export function NetworkingIntegrationsTab({
   const [showCfKey, setShowCfKey] = useState(false);
   const [testingCfKey, setTestingCfKey] = useState(false);
   const [cfTestResult, setCfTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const [portMap, setPortMap] = useState<ConsolidatedPortMapEntry[]>([]);
+  const [portMapLanIp, setPortMapLanIp] = useState<string | null>(null);
+  const [loadingPortMap, setLoadingPortMap] = useState(false);
+
+  const loadPortMap = async () => {
+    setLoadingPortMap(true);
+    try {
+      const res = await api.getConsolidatedPortMap();
+      setPortMap(res.entries);
+      setPortMapLanIp(res.lanIp);
+    } catch {
+      // ignore initial port map errors
+    } finally {
+      setLoadingPortMap(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadPortMap();
+  }, []);
 
   const handleDetectNetwork = async () => {
     setDetectingNetwork(true);
@@ -320,6 +341,82 @@ export function NetworkingIntegrationsTab({
               (API keys tab). Clicking <strong>Verify &amp; Save Key</strong> tests live modpack search and saves automatically.
             </span>
           </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Network size={16} /> Consolidated All-Server Port Map
+          </h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {portMapLanIp && (
+              <span className="badge badge-stopped">
+                Target LAN IP: <strong className="mono" style={{ marginLeft: 4 }}>{portMapLanIp}</strong>
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={loadingPortMap}
+              onClick={() => void loadPortMap()}
+            >
+              <RefreshCw size={12} className={loadingPortMap ? 'spin' : ''} /> Refresh
+            </button>
+          </div>
+        </div>
+        <div className="panel-body">
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-secondary)' }}>
+            Only forward ports marked <strong>Required External</strong> in your router. Ports marked{' '}
+            <strong>Local Only</strong> (RCON / REST) and ServerForge&apos;s dashboard port (<code className="mono">3000</code>) must remain locked down locally.
+          </p>
+
+          {portMap.length === 0 ? (
+            <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 13 }}>
+              No servers deployed yet. Deploy a game server to see its exact port-forwarding table here.
+            </p>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Server</th>
+                  <th>Purpose</th>
+                  <th>Port</th>
+                  <th>Protocol</th>
+                  <th>Exposure / Conflicts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {portMap.map((entry) => (
+                  <tr key={`${entry.instanceId}-${entry.portKey}`}>
+                    <td>
+                      <strong>{entry.instanceName}</strong>
+                      <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{entry.gameId}</div>
+                    </td>
+                    <td>{entry.label}</td>
+                    <td className="mono">{entry.port}</td>
+                    <td className="mono">{entry.protocol.toUpperCase()}</td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                        {entry.internalOnly ? (
+                          <span className="badge badge-stopped">
+                            <Lock size={11} /> Local Only — Do NOT Forward
+                          </span>
+                        ) : (
+                          <span className="badge badge-running">Required External</span>
+                        )}
+                        {entry.conflictWith.length > 0 && (
+                          <span className="badge badge-error" title={`Overlaps with: ${entry.conflictWith.join(', ')}`}>
+                            <AlertTriangle size={11} /> Conflict: {entry.conflictWith[0]}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </section>
     </div>

@@ -8,6 +8,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import {
   BackupPolicySchema,
   CreateInstanceInputSchema,
+  FirewallApplyInputSchema,
   ImportServerInputSchema,
   StartInstanceInputSchema,
   SystemSettingsSchema,
@@ -29,6 +30,7 @@ import { EMBEDDED_WEB_ASSETS } from '../embedded-assets.js';
 import { QueryService } from '../query/query-service.js';
 import { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { BackupSchedulerService } from '../services/backup-scheduler.js';
+import { ConnectivityService } from '../services/connectivity-service.js';
 import { CurseForgeService, normalizeCurseForgeApiKey } from '../services/curseforge-service.js';
 import { DiagnosticsService } from '../services/diagnostics-service.js';
 import {
@@ -37,6 +39,7 @@ import {
   FileValidationError,
   MAX_UPLOAD_FILE_BYTES,
 } from '../services/file-service.js';
+import { FirewallService, type FirewallExecFn } from '../services/firewall-service.js';
 import { SmartImportService } from '../services/import-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
 import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
@@ -72,6 +75,8 @@ export interface CreateAppOptions extends Partial<AppConfig> {
   osRebootExecutor?: OsRebootExecutor;
   detectDuckDnsDomainsImpl?: () => Promise<string[]>;
   detectLanIpImpl?: () => string | null;
+  firewallExecImpl?: FirewallExecFn;
+  platformOverride?: NodeJS.Platform;
 }
 
 export interface ServerForgeApp {
@@ -83,6 +88,8 @@ export interface ServerForgeApp {
   runtimeManager: RuntimeManager;
   telemetry: TelemetryService;
   network: NetworkAddressService;
+  firewall: FirewallService;
+  connectivity: ConnectivityService;
   diagnostics: DiagnosticsService;
   orchestrator: ServerOrchestrator;
   backupScheduler: BackupSchedulerService;
@@ -99,7 +106,15 @@ export interface ServerForgeApp {
 }
 
 export async function createServerForgeApp(overrides: CreateAppOptions = {}): Promise<ServerForgeApp> {
-  const { fetchImpl, osRebootExecutor, detectDuckDnsDomainsImpl, detectLanIpImpl, ...configOverrides } = overrides;
+  const {
+    fetchImpl,
+    osRebootExecutor,
+    detectDuckDnsDomainsImpl,
+    detectLanIpImpl,
+    firewallExecImpl,
+    platformOverride,
+    ...configOverrides
+  } = overrides;
   const config = loadConfig(configOverrides);
   const db = new AppDatabase(config.dbPath);
   const auth = new AuthService(db, config.jwtSecret);
@@ -134,6 +149,16 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     detectDuckDnsDomainsImpl,
     detectLanIpImpl,
   });
+  const firewall = new FirewallService({
+    platform: platformOverride,
+    tmpDir: path.join(config.dataDir, 'tmp'),
+    execImpl: firewallExecImpl,
+  });
+  const connectivity = new ConnectivityService(config, db, catalog, network, firewall, {
+    platform: platformOverride,
+    fetchImpl,
+    execImpl: firewallExecImpl,
+  });
   const diagnostics = new DiagnosticsService(config, db, telemetry);
   const orchestrator = new ServerOrchestrator(
     config,
@@ -147,7 +172,9 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     curseforge,
     modrinth
   );
+  orchestrator.attachFirewallService(firewall);
   diagnostics.attachOrchestrator(orchestrator);
+  diagnostics.attachConnectivity(connectivity);
   const backupScheduler = new BackupSchedulerService(db, orchestrator);
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
   const discord = new DiscordBotService(config, db, catalog, orchestrator, fetchImpl);
@@ -494,6 +521,76 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       saved,
       status: network.getStatusSync(),
     };
+  });
+
+  app.get('/api/network/port-map', { preHandler: requireAuth }, async () => {
+    return {
+      lanIp: network.getStatusSync().lanIp,
+      entries: connectivity.buildConsolidatedPortMap(orchestrator.listInstances()),
+    };
+  });
+
+  app.get('/api/instances/:id/network-guide', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    return connectivity.buildNetworkGuide(inst);
+  });
+
+  app.get('/api/instances/:id/firewall', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    const template = catalog.getTemplate(inst.gameId);
+    return firewall.inspectInstance(inst, template);
+  });
+
+  app.post('/api/instances/:id/firewall/apply', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    const parsed = FirewallApplyInputSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({ error: formatZodIssues('Invalid firewall request', parsed.error.issues) });
+    }
+    const template = catalog.getTemplate(inst.gameId);
+    const result = await firewall.applyInstanceRules(inst, template, {
+      switchProfileToPrivate: parsed.data.switchProfileToPrivate,
+    });
+    if (result.ok) {
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.firewall_applied',
+        instanceId: inst.id,
+        details: `Applied least-privilege Private-profile Windows Firewall rules for ${inst.name} (${result.method})`,
+      });
+    }
+    return result;
+  });
+
+  app.delete('/api/instances/:id/firewall', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    const result = await firewall.removeInstanceRules(inst, { allowUac: true });
+    if (result.ok) {
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.firewall_removed',
+        instanceId: inst.id,
+        details: result.message,
+      });
+    }
+    return result;
+  });
+
+  app.post('/api/instances/:id/network-check', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    return connectivity.runConnectivityCheck(inst);
   });
 
   app.get('/api/audit', { preHandler: requireAuth }, async (req) => {
@@ -1576,6 +1673,8 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     runtimeManager,
     telemetry,
     network,
+    firewall,
+    connectivity,
     diagnostics,
     orchestrator,
     backupScheduler,
