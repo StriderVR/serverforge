@@ -14,6 +14,17 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.4.0',
+    title: 'Security-First Network Guide, Firewall & External Reachability Tester',
+    summary: 'Pinpoint why remote friends cannot connect, open only the exact required game ports on your Private network profile, and keep internal management ports locked down locally.',
+    added: [
+      'Dedicated Network tab on every server with a live 5-hop External Connectivity Troubleshooter (Process Bind -> Windows Firewall & Exposure Audit -> LAN IP Drift -> NAT/CGNAT -> External WAN Probe).',
+      'Least-privilege Windows Firewall manager that inspects active rules, warns on Public network profiles or hidden Block rules, opens only required external ports on the Private profile, and auto-cleans old rules when ports change or a server is deleted.',
+      'Per-server Router Port Forwarding Guide with Local Only security badges (so RCON/REST never get forwarded) and 1-click Copy Router Rules.',
+      'Consolidated All-Server Port Map in Settings -> Network to spot port conflicts across all servers at a glance.',
+    ],
+  },
+  {
     version: '1.3.6',
     title: 'Automatic Satisfactory Port Upgrade',
     summary: 'Automatically adds the Satisfactory 1.1+ Reliable Messaging port to existing installations without requiring manual YAML cleanup.',
