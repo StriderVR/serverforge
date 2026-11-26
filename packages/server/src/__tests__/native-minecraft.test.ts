@@ -18,7 +18,9 @@ import {
   findForgeOrNeoForgeInstallerJar,
   findNativeMinecraftLauncher,
   flattenSingleRootSubdir,
+  isIncompatibleJvmFlag,
   NativeProcessRuntimeAdapter,
+  sanitizeUserJvmArgs,
 } from '../runtimes/native-runtime.js';
 import { CurseForgeService } from '../services/curseforge-service.js';
 
@@ -493,4 +495,150 @@ describe('Native Modded Minecraft & Java Auto-Provisioning (Issue #1)', () => {
       adapter.start(inst, fakeTemplate, instDir, () => {}, () => {})
     ).rejects.toThrow(/Failed to spawn native server binary/);
   });
+
+  it('sanitizes Java-version-incompatible JVM flags such as UseCompactObjectHeaders on Java 21 (Issue #9)', () => {
+    // Java 21 rejects Java 24+ UseCompactObjectHeaders and removed CMS/BiasedLocking flags
+    expect(isIncompatibleJvmFlag('-XX:+UseCompactObjectHeaders', 21)).toBe(true);
+    expect(isIncompatibleJvmFlag('-XX:-UseCompactObjectHeaders', 21)).toBe(true);
+    expect(isIncompatibleJvmFlag('-XX:+UseCompactObjectHeaders', 24)).toBe(false);
+    expect(isIncompatibleJvmFlag('-XX:+UseCompactObjectHeaders', 25)).toBe(false);
+
+    expect(isIncompatibleJvmFlag('-XX:+ZGenerational', 17)).toBe(true);
+    expect(isIncompatibleJvmFlag('-XX:+ZGenerational', 21)).toBe(false);
+
+    expect(isIncompatibleJvmFlag('-XX:+UseConcMarkSweepGC', 21)).toBe(true);
+    expect(isIncompatibleJvmFlag('-XX:+UseConcMarkSweepGC', 8)).toBe(false);
+
+    expect(isIncompatibleJvmFlag('-XX:+UseBiasedLocking', 21)).toBe(true);
+    expect(isIncompatibleJvmFlag('-XX:+UseBiasedLocking', 17)).toBe(false);
+
+    expect(isIncompatibleJvmFlag('-XX:+UseG1GC', 21)).toBe(false);
+    expect(isIncompatibleJvmFlag('-Xmx8G', 21)).toBe(false);
+
+    const rawArgs = [
+      '# ATM10 JVM flags',
+      '-XX:+UseG1GC',
+      '-XX:+UseCompactObjectHeaders',
+      '-XX:+UseBiasedLocking -XX:+UnlockExperimentalVMOptions',
+      '-Xmx8G',
+      '',
+    ].join('\n');
+
+    const sanitized21 = sanitizeUserJvmArgs(rawArgs, 21);
+    expect(sanitized21.removedFlags).toEqual(['-XX:+UseCompactObjectHeaders', '-XX:+UseBiasedLocking']);
+    expect(sanitized21.content).toContain('# ATM10 JVM flags');
+    expect(sanitized21.content).toContain('# [ServerForge] disabled for Java 21: -XX:+UseCompactObjectHeaders');
+    expect(sanitized21.content).toContain('-XX:+UseG1GC');
+    expect(sanitized21.content).toContain('-XX:+UnlockExperimentalVMOptions');
+    expect(sanitized21.content).toContain('-Xmx8G');
+    const activeLines21 = sanitized21.content
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'));
+    expect(activeLines21.join(' ')).not.toContain('UseCompactObjectHeaders');
+    expect(activeLines21.join(' ')).not.toContain('UseBiasedLocking');
+
+    // On Java 25, UseCompactObjectHeaders is preserved
+    const sanitized25 = sanitizeUserJvmArgs('-XX:+UseCompactObjectHeaders\n-XX:+UseG1GC\n', 25);
+    expect(sanitized25.removedFlags).toEqual([]);
+    expect(sanitized25.content).toContain('-XX:+UseCompactObjectHeaders');
+  });
+
+  it('neutralizes Windows batch auto-restart loops, timeout redirection hangs, pause, and inline incompatible JVM flags (Issue #9)', () => {
+    const dir = makeTempDir('sf-atm10-bat-');
+    const bat = [
+      '@echo off',
+      'set ATM_RESTART=true',
+      ':START',
+      'java @user_jvm_args.txt -XX:+UseCompactObjectHeaders @libraries/net/neoforged/neoforge/win_args.txt nogui',
+      'if "%ATM_RESTART%"=="false" goto EOF',
+      'echo Restarting automatically in 10 seconds (press Ctrl + C to cancel)',
+      'timeout /t 10 /nobreak > NUL',
+      'goto START',
+      ':EOF',
+      'timeout /t 3',
+      'pause',
+      '',
+    ].join('\r\n');
+    fs.writeFileSync(path.join(dir, 'startserver.bat'), bat, 'utf8');
+
+    const wrapper = createPauseSafeBatchWrapper(dir, 'startserver.bat', 21);
+    expect(wrapper).toBe('.serverforge-start.bat');
+
+    const content = fs.readFileSync(path.join(dir, wrapper), 'utf8');
+    expect(content).toContain('set ATM_RESTART=false');
+    expect(content).not.toContain('set ATM_RESTART=true');
+    expect(content).not.toContain('UseCompactObjectHeaders');
+    expect(content).toContain('exit /b %ERRORLEVEL%');
+    expect(content).toContain('ping -n 4 127.0.0.1 >nul');
+    expect(content).toContain('rem [ServerForge] disabled interactive pause');
+    expect(content).not.toMatch(/^\s*timeout\b/im);
+  });
+
+  it('strips UseCompactObjectHeaders during prepareCurseForgeServerPack and disables batch auto-restart env vars (Issue #9)', async () => {
+    const toolsDir = makeTempDir('sf-cf9-tools-');
+    const serverDir = makeTempDir('sf-cf9-server-');
+    const validKey = '$2a$10$' + 'c'.repeat(53);
+
+    const zipBuf = await createZipBuffer({
+      'ATM10-Pack/startserver.bat':
+        '@echo off\r\nset ATM_RESTART=true\r\n:START\r\njava @user_jvm_args.txt -jar server.jar\r\ntimeout /t 10\r\ngoto START\r\n',
+      'ATM10-Pack/startserver.sh': '#!/usr/bin/env bash\njava @user_jvm_args.txt -jar server.jar\n',
+      'ATM10-Pack/user_jvm_args.txt': '# ATM10 defaults\n-XX:+UseCompactObjectHeaders\n-XX:+UseG1GC\n-Xmx6G\n',
+    });
+
+    const mockFetch = (async (url: string | URL) => {
+      const u = String(url);
+      if (u === 'https://cdn.example.com/atm10-compact.zip') {
+        return new Response(new Uint8Array(zipBuf), {
+          status: 200,
+          headers: { 'content-length': String(zipBuf.length) },
+        });
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const adapter = new NativeProcessRuntimeAdapter(
+      toolsDir,
+      new QueryService(),
+      undefined,
+      () => ({ CF_API_KEY: validKey }),
+      mockFetch
+    );
+
+    const logs: string[] = [];
+    const inst = makeInstance({
+      config: {
+        SERVER_PACK_ZIP: 'https://cdn.example.com/atm10-compact.zip',
+        JAVA_IMAGE_TAG: 'java21',
+        MOTD: 'ATM10 Sanitized',
+        MAX_PLAYERS: 12,
+        RCON_PASSWORD: 'rcon-password',
+      },
+      memoryLimitMb: 8192,
+    });
+
+    const launchPlan = await adapter.prepareCurseForgeServerPack(
+      inst,
+      serverDir,
+      (line) => logs.push(line),
+      () => {},
+      { javaBin: '/opt/jre-21/bin/java', javaHome: '/opt/jre-21', major: 21, source: 'managed' }
+    );
+
+    const jvmArgs = fs.readFileSync(path.join(serverDir, 'user_jvm_args.txt'), 'utf8');
+    const activeJvmLines = jvmArgs
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'));
+    expect(activeJvmLines.join(' ')).not.toContain('UseCompactObjectHeaders');
+    expect(jvmArgs).toContain('# [ServerForge] disabled for Java 21: -XX:+UseCompactObjectHeaders');
+    expect(jvmArgs).toContain('-XX:+UseG1GC');
+    expect(jvmArgs).toContain('-Xmx8192M');
+    expect(logs.some((l) => l.includes('UseCompactObjectHeaders') && l.includes('Java 21'))).toBe(true);
+    expect(launchPlan.extraEnv?.ATM_RESTART).toBe('false');
+    expect(launchPlan.extraEnv?.RESTART).toBe('false');
+    expect(launchPlan.extraEnv?.AUTO_RESTART).toBe('false');
+    expect(launchPlan.extraEnv?.SERVER_RESTART).toBe('false');
+  }, 30_000);
 });

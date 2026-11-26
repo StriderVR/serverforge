@@ -68,41 +68,63 @@ export function App() {
     void refreshUpdater(false);
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
 
-    ws.onopen = () => setWsConnected(true);
-    ws.onclose = () => setWsConnected(false);
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data) as WsServerEvent;
-        if (msg.type === 'host:metrics') {
-          setMetrics(msg.metrics);
-        } else if (msg.type === 'console:line') {
-          setLiveLogsByInstance((prev) => {
-            const existing = prev[msg.instanceId] ?? [];
-            const next = [...existing, { timestamp: msg.timestamp, line: msg.line }].slice(-250);
-            return { ...prev, [msg.instanceId]: next };
-          });
-        } else if (msg.type === 'instance:update' || msg.type === 'instance:deleted') {
-          void refreshData();
-        } else if (msg.type === 'updater:progress') {
-          setUpdaterProgress({ stage: msg.stage, percent: msg.percent, message: msg.message });
-          if (msg.stage === 'error') {
-            setReconnectingState(null);
+    const connect = () => {
+      if (disposed) return;
+      const socket = new WebSocket(wsUrl);
+      ws = socket;
+
+      socket.onopen = () => {
+        if (!disposed) setWsConnected(true);
+      };
+      socket.onclose = () => {
+        if (disposed) return;
+        setWsConnected(false);
+        reconnectTimer = setTimeout(connect, 2000);
+      };
+      socket.onerror = () => {
+        // onclose will trigger automatic reconnect
+      };
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data) as WsServerEvent;
+          if (msg.type === 'host:metrics') {
+            setMetrics(msg.metrics);
+          } else if (msg.type === 'console:line') {
+            setLiveLogsByInstance((prev) => {
+              const existing = prev[msg.instanceId] ?? [];
+              const next = [...existing, { timestamp: msg.timestamp, line: msg.line }].slice(-250);
+              return { ...prev, [msg.instanceId]: next };
+            });
+          } else if (msg.type === 'instance:update' || msg.type === 'instance:deleted') {
+            void refreshData();
+          } else if (msg.type === 'updater:progress') {
+            setUpdaterProgress({ stage: msg.stage, percent: msg.percent, message: msg.message });
+            if (msg.stage === 'error') {
+              setReconnectingState(null);
+            }
           }
+        } catch {
+          // ignore malformed frames
         }
-      } catch {
-        // ignore malformed frames
-      }
+      };
     };
+
+    connect();
 
     const poll = setInterval(() => {
       void refreshData();
     }, 15_000);
 
     return () => {
+      disposed = true;
       clearInterval(poll);
-      ws.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ws?.close();
     };
   }, [auth?.authenticated, refreshData, refreshUpdater]);
 

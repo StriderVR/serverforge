@@ -129,5 +129,58 @@ runtimes:
     });
     expect(stopRes.statusCode).toBe(200);
     expect(stopRes.json().status).toBe('stopped');
+
+    const delRes = await sf.app.inject({
+      method: 'DELETE',
+      url: `/api/instances/${instance.id}`,
+      headers: authHeaders,
+    });
+    expect(delRes.statusCode).toBe(200);
+    expect(delRes.json().ok).toBe(true);
+  });
+
+  it('deletes error-state instances even when DELETE carries Content-Type: application/json with empty body (Issue #7)', async () => {
+    const sf = await makeApp();
+    const { token } = sf.auth.setupInitialAdmin('owner', 'super-secret-password');
+    const authHeaders = { authorization: `Bearer ${token}` };
+
+    const deployRes = await sf.app.inject({
+      method: 'POST',
+      url: '/api/instances',
+      headers: authHeaders,
+      payload: {
+        name: 'Broken Modpack',
+        gameId: 'minecraft-curseforge',
+        runtime: 'native',
+        startImmediately: false,
+      },
+    });
+    expect(deployRes.statusCode).toBe(201);
+    const created = deployRes.json() as { id: string };
+
+    // Simulate a failed boot leaving the server in error state
+    sf.db.updateInstance(created.id, {
+      status: 'error',
+      lastError: 'Simulated launch failure',
+    });
+
+    // Regression: Fastify 5 rejects DELETE + Content-Type: application/json + empty body unless parser handles it
+    const delRes = await sf.app.inject({
+      method: 'DELETE',
+      url: `/api/instances/${created.id}`,
+      headers: {
+        ...authHeaders,
+        'content-type': 'application/json',
+      },
+    });
+    expect(delRes.statusCode).toBe(200);
+    expect(delRes.json().ok).toBe(true);
+
+    const afterGet = await sf.app.inject({
+      method: 'GET',
+      url: `/api/instances/${created.id}`,
+      headers: authHeaders,
+    });
+    expect(afterGet.statusCode).toBe(404);
   });
 });

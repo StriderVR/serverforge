@@ -423,6 +423,7 @@ export class ServerOrchestrator extends EventEmitter {
       status: 'starting',
       lastError: null,
     })!;
+    this.appendLog(instance.id, `[ServerForge] Preparing to start "${instance.name}" (${template.name} • ${instance.runtime})...`);
     this.emit('instance:update', this.enrichInstance(startingInst));
 
     try {
@@ -749,7 +750,11 @@ export class ServerOrchestrator extends EventEmitter {
     // Only delete ServerForge-managed directory; NEVER touch a user's linked externalDir!
     const managedDir = this.getInstanceDir(instance.id);
     if (fs.existsSync(managedDir)) {
-      fs.rmSync(managedDir, { recursive: true, force: true });
+      try {
+        fs.rmSync(managedDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+      } catch (err) {
+        console.warn(`[Orchestrator] Managed folder cleanup warning for ${instance.name}:`, err);
+      }
     }
 
     this.logs.clear(instance.id);
