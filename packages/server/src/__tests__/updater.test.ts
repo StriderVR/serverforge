@@ -50,11 +50,15 @@ describe('UpdaterService — One-Click GitHub Self-Updater & Auto-Resume', () =>
     }
   });
 
-  it('compares semver versions accurately', () => {
+  it('compares semver and 4-part outlier versions accurately', () => {
     expect(compareSemver('1.0.0', 'v1.1.0')).toBe(-1);
     expect(compareSemver('v1.2.0', '1.10.0')).toBe(-1);
     expect(compareSemver('v1.1.0', '1.1.0')).toBe(0);
     expect(compareSemver('2.0.0', '1.9.9')).toBe(1);
+    expect(compareSemver('1.1.8', 'v1.1.8.1')).toBe(-1);
+    expect(compareSemver('1.1.8.1', 'v1.1.8.1')).toBe(0);
+    expect(compareSemver('1.1.8.1', '1.1.9')).toBe(-1);
+    expect(compareSemver('1.1.8.1', '2.0.0')).toBe(-1);
   });
 
   it('generates a hardened Windows CMD atomic EXE swap script with retries, rollback, logging, and Unblock-File', () => {
