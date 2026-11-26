@@ -1,0 +1,40 @@
+name: New Game Template Request
+description: Request a new built-in YAML game template under catalog/games/.
+title: "[Game Template]: "
+labels: ["enhancement", "area:catalog", "type:feature"]
+body:
+  - type: input
+    id: game_name
+    attributes:
+      label: Game Name
+      placeholder: e.g., Valheim, Enshrouded, V Rising, Terraria
+    validations:
+      required: true
+
+  - type: input
+    id: steam_app_id
+    attributes:
+      label: SteamCMD App ID / Server Distribution
+      placeholder: e.g., 896660 (SteamCMD) or direct server download URL
+    validations:
+      required: false
+
+  - type: textarea
+    id: ports_and_query
+    attributes:
+      label: Default Ports, Query Protocol & Graceful Save Method
+      description: Include game/query/RCON ports, player count query protocol (A2S, RCON, REST, etc.), and graceful save/stop command if known.
+      placeholder: |
+        - Game port: 2456-2457 UDP
+        - Query: Steam A2S / RCON
+        - Save method: SIGINT / RCON save
+    validations:
+      required: true
+
+  - type: textarea
+    id: config_fields
+    attributes:
+      label: Key Config Options Needed
+      description: World name, password, max players, crossplay, mods, etc.
+    validations:
+      required: false

@@ -1,0 +1,60 @@
+name: Feature Request
+description: Propose a new ServerForge capability or roadmap enhancement.
+title: "[Feature]: "
+labels: ["enhancement", "type:feature"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature Area
+      description: Which part of ServerForge does this feature primarily affect?
+      options:
+        - Backend / Runtime
+        - Web UI Dashboard
+        - Discord Bot
+        - Networking & Access
+        - Game Catalog / Mods
+        - Self-Updater / Packaging
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Suggested Priority
+      options:
+        - P1 - High (Core daily workflow)
+        - P2 - Medium (Quality-of-life improvement)
+        - P3 - Low (Nice to have)
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / User Story
+      description: What problem does this solve or what workflow does it improve?
+      placeholder: As a server host, I want to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Design / Behavior
+      description: Describe the expected UI, API, Discord command, or runtime behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Checkboxes will appear as sub-task progress bars in GitHub Projects.
+      value: |
+        - [ ] Backend / API implementation
+        - [ ] Web UI / Discord integration
+        - [ ] Unit or integration tests added
+        - [ ] Verified on Windows 11 standalone `ServerForge.exe`
+    validations:
+      required: false
