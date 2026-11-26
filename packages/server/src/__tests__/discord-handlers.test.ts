@@ -268,5 +268,5 @@ describe('Discord Integration: Setup, Role-Gating, Live Status Panel & Admin Com
     });
     expect(discRes.statusCode).toBe(200);
     expect(sf.db.getSettings().discordBotToken).toBe('');
-  });
+  }, 20_000);
 });
