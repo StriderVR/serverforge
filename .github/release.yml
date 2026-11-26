@@ -1,0 +1,19 @@
+changelog:
+  categories:
+    - title: "🚀 New Features & QoL"
+      labels:
+        - "type:feature"
+        - "enhancement"
+    - title: "🐛 Bug Fixes"
+      labels:
+        - "bug"
+    - title: "🎮 Game Catalog & Mods"
+      labels:
+        - "area:catalog"
+    - title: "🔧 Maintenance & Documentation"
+      labels:
+        - "documentation"
+        - "type:tech-debt"
+    - title: "Other Changes"
+      labels:
+        - "*"

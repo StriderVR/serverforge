@@ -13,7 +13,10 @@
     "start": "node packages/server/dist/index.js",
     "start:mock": "RUNTIME_MODE=mock node packages/server/dist/index.js",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "bump:patch": "node scripts/bump-version.mjs patch",
+    "bump:minor": "node scripts/bump-version.mjs minor",
+    "bump:major": "node scripts/bump-version.mjs major"
   },
   "devDependencies": {
     "esbuild": "^0.25.12"
