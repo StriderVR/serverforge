@@ -11,6 +11,7 @@ import {
   buildJavaEnv,
   ensureJavaRuntime,
   javaTagToMajor,
+  parseRequiredJavaFromCrashLogs,
   recommendJavaMajorForMcVersion,
   type DetectedJava,
 } from './java-helper.js';
@@ -117,16 +118,32 @@ export function isIncompatibleJvmFlag(token: string, javaMajor: number): boolean
 
 /**
  * Removes or comments out JVM flags in `user_jvm_args.txt` that are incompatible with `javaMajor`
- * (for example `-XX:+UseCompactObjectHeaders`, which requires Java 24/25 and crashes Java 21).
+ * (for example `-XX:+UseCompactObjectHeaders`, which requires Java 24/25 and crashes Java 21),
+ * and re-enables lines previously commented out by ServerForge when the active Java runtime supports them.
  */
 export function sanitizeUserJvmArgs(
   content: string,
   javaMajor: number
-): { content: string; removedFlags: string[] } {
+): { content: string; removedFlags: string[]; restoredFlags: string[] } {
   const removedFlags: string[] = [];
+  const restoredFlags: string[] = [];
   const outLines = content.split(/\r?\n/).map((line) => {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) return line;
+    if (!trimmed) return line;
+
+    // Re-enable flags previously disabled by ServerForge if the current Java version now supports them
+    const disabledMatch = trimmed.match(/^#\s*\[ServerForge\]\s+disabled for Java \d+:\s*(.+)$/i);
+    if (disabledMatch) {
+      const originalLine = disabledMatch[1].trim();
+      const origTokens = originalLine.split(/\s+/).filter(Boolean);
+      if (origTokens.length > 0 && !origTokens.some((tok) => isIncompatibleJvmFlag(tok, javaMajor))) {
+        restoredFlags.push(...origTokens);
+        return originalLine;
+      }
+      return line;
+    }
+
+    if (trimmed.startsWith('#')) return line;
     const tokens = trimmed.split(/\s+/);
     const kept: string[] = [];
     const removedHere: string[] = [];
@@ -144,7 +161,7 @@ export function sanitizeUserJvmArgs(
     }
     return kept.join(' ');
   });
-  return { content: outLines.join('\n'), removedFlags };
+  return { content: outLines.join('\n'), removedFlags, restoredFlags };
 }
 
 function stripIncompatibleJvmFlagsFromScript(
@@ -288,6 +305,99 @@ export function findForgeOrNeoForgeInstallerJar(serverDir: string): string | nul
   } catch {
     return null;
   }
+}
+
+/**
+ * Inspects an extracted Minecraft / CurseForge server folder for artifacts indicating
+ * a specific minimum Java major version (for example, Minecraft 26.x / NeoForge 26.x+
+ * server libraries, installers, or start scripts that require Java 25).
+ */
+export function detectRequiredJavaMajorFromServerDir(serverDir: string): number | null {
+  if (!fs.existsSync(serverDir)) return null;
+  let highest: number | null = null;
+  const noteRequired = (major: number | null) => {
+    if (major !== null) {
+      highest = highest === null ? major : Math.max(highest, major);
+    }
+  };
+
+  // 1. Check installed NeoForge / Minecraft / Forge library version folders
+  const versionedLibRoots: Array<{ dir: string; kind: 'neoforge' | 'minecraft' | 'forge' }> = [
+    { dir: path.join(serverDir, 'libraries', 'net', 'neoforged', 'neoforge'), kind: 'neoforge' },
+    { dir: path.join(serverDir, 'libraries', 'net', 'minecraft', 'server'), kind: 'minecraft' },
+    { dir: path.join(serverDir, 'libraries', 'net', 'minecraftforge', 'forge'), kind: 'forge' },
+  ];
+
+  for (const { dir, kind } of versionedLibRoots) {
+    if (!fs.existsSync(dir)) continue;
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const m = entry.name.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
+        if (!m) continue;
+        const major = Number.parseInt(m[1], 10);
+        if (major >= 26) {
+          // Mojang / NeoForge 26.x+ (2026+ releases) require Java 25
+          noteRequired(25);
+        } else if (kind === 'minecraft' || kind === 'forge') {
+          noteRequired(recommendJavaMajorForMcVersion(entry.name));
+        } else if (kind === 'neoforge' && major >= 21) {
+          noteRequired(21);
+        }
+      }
+    } catch {
+      // ignore unreadable directories
+    }
+  }
+
+  // 2. Check root installer JARs (e.g., neoforge-26.1.2.126-installer.jar)
+  try {
+    const files = fs.readdirSync(serverDir);
+    for (const file of files) {
+      const instMatch = file.match(/^(?:neo)?forge-(\d+)\.(\d+)(?:\.(\d+))?/i);
+      if (instMatch) {
+        const major = Number.parseInt(instMatch[1], 10);
+        if (major >= 26) {
+          noteRequired(25);
+        } else if (major === 1) {
+          noteRequired(recommendJavaMajorForMcVersion(`${instMatch[1]}.${instMatch[2]}.${instMatch[3] ?? '0'}`));
+        }
+      }
+    }
+  } catch {
+    // ignore unreadable root
+  }
+
+  // 3. Inspect pack metadata/startup scripts for explicit 26.x / Java 25 declarations
+  const hintFiles = [
+    'startserver.bat',
+    'startserver.sh',
+    'startserver.ps1',
+    'variables.txt',
+    'server-setup-config.yaml',
+  ];
+  for (const name of hintFiles) {
+    const full = path.join(serverDir, name);
+    if (!fs.existsSync(full)) continue;
+    try {
+      const stat = fs.statSync(full);
+      if (!stat.isFile() || stat.size > 256 * 1024) continue;
+      const content = fs.readFileSync(full, 'utf8');
+      if (
+        /\b(?:NEOFORGE_VERSION|MC_VERSION|MINECRAFT_VERSION|MODLOADER_VERSION)\s*[:=]\s*["']?(?:2[6-9]|[3-9]\d)\.\d+/i.test(
+          content
+        ) ||
+        /\bJAVA_VERSION\s*[:=]\s*["']?25\b/i.test(content) ||
+        /neoforge-(?:2[6-9]|[3-9]\d)\.\d+/i.test(content)
+      ) {
+        noteRequired(25);
+      }
+    } catch {
+      // ignore unreadable hint file
+    }
+  }
+
+  return highest;
 }
 
 /**
@@ -458,6 +568,11 @@ function writeMinecraftBaseConfig(
       if (sanitized.removedFlags.length > 0) {
         onLog?.(
           `[Java] Disabled JVM flag(s) incompatible with Java ${javaMajor} in user_jvm_args.txt: ${Array.from(new Set(sanitized.removedFlags)).join(', ')}`
+        );
+      }
+      if (sanitized.restoredFlags.length > 0) {
+        onLog?.(
+          `[Java] Re-enabled JVM flag(s) compatible with Java ${javaMajor} in user_jvm_args.txt: ${Array.from(new Set(sanitized.restoredFlags)).join(', ')}`
         );
       }
     }
@@ -754,7 +869,22 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     }
 
     // Ensure matching Java runtime first so JVM arg sanitization knows the exact Java major version
-    const requiredMajor = javaTagToMajor(recommendedJavaTag);
+    let requiredMajor = javaTagToMajor(recommendedJavaTag);
+    const detectedFromDir = detectRequiredJavaMajorFromServerDir(serverDir);
+    if (detectedFromDir !== null && detectedFromDir > requiredMajor) {
+      onLog(
+        `[Java] Detected Minecraft/NeoForge pack files requiring Java ${detectedFromDir} in server directory (was configured for Java ${requiredMajor}) — upgrading runtime automatically.`
+      );
+      requiredMajor = detectedFromDir;
+    }
+    const detectedFromCrash = parseRequiredJavaFromCrashLogs(instance.lastCrash?.logTail ?? []);
+    if (detectedFromCrash !== null && detectedFromCrash > requiredMajor) {
+      onLog(
+        `[Java] Previous crash log indicated Java ${detectedFromCrash} is required — upgrading runtime automatically.`
+      );
+      requiredMajor = detectedFromCrash;
+    }
+
     const java =
       javaOverride ??
       (await ensureJavaRuntime(requiredMajor, this.toolsDir, onLog, {
@@ -816,18 +946,28 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     const flavor = String(instance.config.SERVER_TYPE ?? 'PAPER').trim().toUpperCase();
     const mcVersion = String(instance.config.MC_VERSION ?? 'LATEST').trim();
 
-    const requiredMajor = recommendJavaMajorForMcVersion(mcVersion);
-    const java =
+    let requiredMajor = recommendJavaMajorForMcVersion(mcVersion);
+    const detectedFromDir = detectRequiredJavaMajorFromServerDir(serverDir);
+    if (detectedFromDir !== null && detectedFromDir > requiredMajor) {
+      requiredMajor = detectedFromDir;
+    }
+    const detectedFromCrash = parseRequiredJavaFromCrashLogs(instance.lastCrash?.logTail ?? []);
+    if (detectedFromCrash !== null && detectedFromCrash > requiredMajor) {
+      requiredMajor = detectedFromCrash;
+    }
+
+    let java =
       javaOverride ??
       (await ensureJavaRuntime(requiredMajor, this.toolsDir, onLog, {
         fetchImpl: this.fetchImpl,
       }));
 
-    let launcher = findNativeMinecraftLauncher(serverDir, java.javaBin, instance.memoryLimitMb);
+    let launcher = findNativeMinecraftLauncher(serverDir, java.javaBin, instance.memoryLimitMb, process.platform, java.major);
 
     if (!launcher) {
       onStatus?.('installing');
       const jarPath = path.join(serverDir, 'server.jar');
+      let resolvedMcVersion: string | null = null;
 
       if (flavor === 'PAPER') {
         onLog(`[Minecraft] Resolving PaperMC build for version ${mcVersion}...`);
@@ -842,6 +982,7 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
         if (!targetVer || !versions.includes(targetVer)) {
           throw new Error(`PaperMC version "${mcVersion}" was not found.`);
         }
+        resolvedMcVersion = targetVer;
 
         const buildsRes = await this.fetchImpl(
           `https://api.papermc.io/v2/projects/paper/versions/${encodeURIComponent(targetVer)}/builds`,
@@ -874,6 +1015,7 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
           mcVersion.toUpperCase() === 'LATEST' ? manifest.latest?.release : mcVersion;
         const entry = (manifest.versions ?? []).find((v) => v.id === targetId);
         if (!entry) throw new Error(`Vanilla Minecraft version "${mcVersion}" was not found.`);
+        resolvedMcVersion = entry.id;
 
         const verRes = await this.fetchImpl(entry.url, { signal: AbortSignal.timeout(15_000) });
         if (!verRes.ok) throw new Error(`Mojang version metadata error (HTTP ${verRes.status})`);
@@ -907,6 +1049,7 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
         if (!targetMc || !targetLoader || !targetInstaller) {
           throw new Error(`Could not resolve Fabric loader/installer versions for Minecraft ${mcVersion}.`);
         }
+        resolvedMcVersion = targetMc;
 
         const fabricUrl = `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(targetMc)}/${encodeURIComponent(targetLoader)}/${encodeURIComponent(targetInstaller)}/server/jar`;
         onLog(`[Minecraft] Downloading Fabric ${targetMc} (loader ${targetLoader}) server.jar...`);
@@ -917,10 +1060,22 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
         );
       }
 
-      launcher = findNativeMinecraftLauncher(serverDir, java.javaBin, instance.memoryLimitMb);
+      if (resolvedMcVersion && !javaOverride) {
+        const resolvedMajor = recommendJavaMajorForMcVersion(resolvedMcVersion);
+        if (resolvedMajor > java.major) {
+          onLog(
+            `[Java] Resolved Minecraft ${resolvedMcVersion} requires Java ${resolvedMajor} — upgrading runtime automatically.`
+          );
+          java = await ensureJavaRuntime(resolvedMajor, this.toolsDir, onLog, {
+            fetchImpl: this.fetchImpl,
+          });
+        }
+      }
+
+      launcher = findNativeMinecraftLauncher(serverDir, java.javaBin, instance.memoryLimitMb, process.platform, java.major);
     }
 
-    writeMinecraftBaseConfig(serverDir, instance, 'ServerForge Minecraft World');
+    writeMinecraftBaseConfig(serverDir, instance, 'ServerForge Minecraft World', java.major, onLog);
 
     if (!launcher) {
       throw new Error(`Minecraft server JAR was not found in ${serverDir}.`);

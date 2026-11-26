@@ -2,7 +2,7 @@ id: minecraft-curseforge
 name: "Minecraft (CurseForge Modpack)"
 shortName: "MC Modpack"
 category: sandbox
-description: "Dedicated modded Minecraft server built directly from any CurseForge modpack (All the Mods, Better MC, RLCraft, Create, Prominence II, etc.) with automatic Java 8/17/21 runtime selection."
+description: "Dedicated modded Minecraft server built directly from any CurseForge modpack (All the Mods, Better MC, RLCraft, Create, Prominence II, etc.) with automatic Java 8/17/21/25 runtime selection."
 accentColor: "#f97316"
 joinHint: "Launch matching CurseForge pack -> Multiplayer -> {{HOST}}:{{PORT_GAME}}"
 resources:
@@ -93,10 +93,10 @@ configFields:
     default: ""
   - key: JAVA_IMAGE_TAG
     label: "Java Runtime Version (Docker & Native)"
-    description: "Java 21 for MC 1.20.5+, Java 17 for MC 1.18-1.20.4, Java 8 for MC 1.16.5 and older. Auto-installed natively if missing."
+    description: "Java 25 for MC 26.1+ (e.g. ATM11), Java 21 for MC 1.20.5-1.21.x, Java 17 for MC 1.18-1.20.4, Java 8 for MC 1.16.5 and older. Auto-installed natively if missing."
     type: select
     default: "java21"
-    options: ["java21", "java17", "java8", "latest"]
+    options: ["java25", "java21", "java17", "java8", "latest"]
     required: true
   - key: MOTD
     label: "Server MOTD"

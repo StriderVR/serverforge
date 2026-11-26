@@ -40,6 +40,16 @@ export class CatalogService {
         const rawYaml = fs.readFileSync(filePath, 'utf8');
         const parsed = YAML.parse(rawYaml);
         const template = GameTemplateSchema.parse({ ...parsed, isCustom });
+        if (!isCustom && template.id === 'minecraft-curseforge') {
+          const javaField = template.configFields.find((f) => f.key === 'JAVA_IMAGE_TAG');
+          if (javaField && Array.isArray(javaField.options) && !javaField.options.includes('java25')) {
+            javaField.options = ['java25', ...javaField.options];
+            if (javaField.description && !javaField.description.includes('Java 25')) {
+              javaField.description =
+                'Java 25 for MC 26.1+ (e.g. ATM11), Java 21 for MC 1.20.5-1.21.x, Java 17 for MC 1.18-1.20.4, Java 8 for MC 1.16.5 and older. Auto-installed natively if missing.';
+            }
+          }
+        }
         this.templates.set(template.id, { template, rawYaml, filePath, isCustom });
       } catch (err) {
         console.error(`[CatalogService] Failed to parse template ${filePath}:`, err);

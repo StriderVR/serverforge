@@ -288,7 +288,7 @@ export interface CurseForgeModpackSummary {
   logoUrl: string | null;
   websiteUrl: string | null;
   latestGameVersions: string[];
-  recommendedJavaTag: 'java21' | 'java17' | 'java8' | 'latest';
+  recommendedJavaTag: 'java25' | 'java21' | 'java17' | 'java8' | 'latest';
 }
 
 export interface CurseForgeModpackFile {
@@ -300,7 +300,7 @@ export interface CurseForgeModpackFile {
   isServerPack: boolean;
   serverPackFileId: number | null;
   downloadUrl: string | null;
-  recommendedJavaTag: 'java21' | 'java17' | 'java8' | 'latest';
+  recommendedJavaTag: 'java25' | 'java21' | 'java17' | 'java8' | 'latest';
 }
 
 export interface DiscoveredProcess {
