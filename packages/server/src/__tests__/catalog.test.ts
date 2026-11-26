@@ -89,6 +89,19 @@ describe('CatalogService & Built-in Game Templates', () => {
     expect(legacyTiles).toHaveLength(1);
     expect(legacyTiles[0].key).toBe('minecraft');
     expect(legacyTiles[0].variants.map((v) => v.id)).toEqual(['minecraft', 'minecraft-curseforge']);
+
+    // Verify legacy satisfactory.yaml without the 1.1+ reliable TCP port is auto-upgraded
+    const staleSatYaml = fs
+      .readFileSync(path.join(WORKSPACE_ROOT, 'catalog', 'games', 'satisfactory.yaml'), 'utf8')
+      .replace(/\s+- key: reliable[\s\S]*?protocol: tcp\n/, '\n');
+    fs.writeFileSync(path.join(legacyDir, 'satisfactory.yaml'), staleSatYaml, 'utf8');
+    legacyCatalog.reload();
+    const migratedSat = legacyCatalog.getTemplate('satisfactory')!;
+    expect(migratedSat.ports.map((p) => p.key)).toEqual(['game', 'reliable']);
+    expect(migratedSat.ports.find((p) => p.key === 'reliable')).toMatchObject({
+      defaultPort: 8888,
+      protocol: 'tcp',
+    });
   });
 
   it('interpolates config, ports, and memory template placeholders', () => {

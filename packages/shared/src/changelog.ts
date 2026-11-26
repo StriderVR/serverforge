@@ -14,6 +14,14 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.3.6',
+    title: 'Automatic Satisfactory Port Upgrade',
+    summary: 'Automatically adds the Satisfactory 1.1+ Reliable Messaging port to existing installations without requiring manual YAML cleanup.',
+    changed: [
+      'Upgraded ServerForge installs now automatically show the Reliable Messaging Port (1.1+) (TCP) field on Deploy and Configuration screens even when an older satisfactory.yaml file exists on disk.',
+    ],
+  },
+  {
     version: '1.3.5',
     title: 'Custom Port Configuration',
     summary: 'Choose custom ports when deploying a new server or edit ports anytime on an existing stopped server.',

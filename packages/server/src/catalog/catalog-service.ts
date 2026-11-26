@@ -111,6 +111,18 @@ export class CatalogService {
             });
           }
         }
+        if (!isCustom && template.id === 'satisfactory') {
+          if (!template.ports.some((p) => p.key === 'reliable')) {
+            template.ports.push({
+              key: 'reliable',
+              label: 'Reliable Messaging Port (1.1+)',
+              defaultPort: 8888,
+              protocol: 'tcp',
+              internalOnly: false,
+              primary: false,
+            });
+          }
+        }
         this.templates.set(template.id, { template, rawYaml, filePath, isCustom });
       } catch (err) {
         console.error(`[CatalogService] Failed to parse template ${filePath}:`, err);
