@@ -32,20 +32,23 @@ export type UpdaterProgressCallback = (event: {
 }) => void;
 
 /**
- * Compares two semver strings (ignoring leading 'v').
+ * Compares two dot-separated version strings (ignoring leading 'v' and prerelease suffix).
+ * Supports both standard 3-part semver (1.1.8) and 4-part outlier versions (1.1.8.1).
  * Returns: -1 if a < b, 0 if a === b, 1 if a > b.
  */
 export function compareSemver(a: string, b: string): number {
   const parse = (raw: string) => {
     const clean = raw.trim().replace(/^v/i, '').split('-')[0];
-    const parts = clean.split('.').map((n) => Number.parseInt(n, 10) || 0);
-    return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
+    return clean.split('.').map((n) => Number.parseInt(n, 10) || 0);
   };
-  const [aMaj, aMin, aPat] = parse(a);
-  const [bMaj, bMin, bPat] = parse(b);
-  if (aMaj !== bMaj) return aMaj < bMaj ? -1 : 1;
-  if (aMin !== bMin) return aMin < bMin ? -1 : 1;
-  if (aPat !== bPat) return aPat < bPat ? -1 : 1;
+  const aParts = parse(a);
+  const bParts = parse(b);
+  const len = Math.max(aParts.length, bParts.length, 3);
+  for (let i = 0; i < len; i++) {
+    const av = aParts[i] ?? 0;
+    const bv = bParts[i] ?? 0;
+    if (av !== bv) return av < bv ? -1 : 1;
+  }
   return 0;
 }
 
