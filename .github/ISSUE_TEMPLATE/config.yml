@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: ServerForge Releases
+    url: https://github.com/StriderVR/serverforge/releases
+    about: Check the latest ServerForge.exe releases and release notes before filing a report.
