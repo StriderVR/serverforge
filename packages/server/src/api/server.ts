@@ -77,6 +77,7 @@ export interface CreateAppOptions extends Partial<AppConfig> {
   detectLanIpImpl?: () => string | null;
   firewallExecImpl?: FirewallExecFn;
   platformOverride?: NodeJS.Platform;
+  probePollDelayMs?: number;
 }
 
 export interface ServerForgeApp {
@@ -113,6 +114,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     detectLanIpImpl,
     firewallExecImpl,
     platformOverride,
+    probePollDelayMs,
     ...configOverrides
   } = overrides;
   const config = loadConfig(configOverrides);
@@ -158,6 +160,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     platform: platformOverride,
     fetchImpl,
     execImpl: firewallExecImpl,
+    probePollDelayMs,
   });
   const diagnostics = new DiagnosticsService(config, db, telemetry);
   const orchestrator = new ServerOrchestrator(
