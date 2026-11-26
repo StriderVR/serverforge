@@ -48,7 +48,7 @@ describe('ServerForge REST API End-to-End', () => {
     // 3. Catalog returns all 6 initial games
     const catRes = await sf.app.inject({ method: 'GET', url: '/api/catalog', headers: authHeaders });
     expect(catRes.statusCode).toBe(200);
-    expect(catRes.json()).toHaveLength(6);
+    expect(catRes.json()).toHaveLength(7);
 
     // 4. Deploy & immediately start Ark: Survival Ascended
     const deployRes = await sf.app.inject({
@@ -119,7 +119,7 @@ runtimes:
     expect(importRes.statusCode).toBe(201);
 
     const updatedCat = await sf.app.inject({ method: 'GET', url: '/api/catalog', headers: authHeaders });
-    expect(updatedCat.json()).toHaveLength(7);
+    expect(updatedCat.json()).toHaveLength(8);
 
     // 8. Stop and delete instance cleanly
     const stopRes = await sf.app.inject({

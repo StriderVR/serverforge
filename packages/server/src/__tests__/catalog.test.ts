@@ -19,7 +19,7 @@ describe('CatalogService & Built-in Game Templates', () => {
     }
   });
 
-  it('loads and validates all 6 built-in game YAML manifests', () => {
+  it('loads and validates all 7 built-in game YAML manifests', () => {
     const customDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-cat-'));
     tempDirs.push(customDir);
 
@@ -31,6 +31,7 @@ describe('CatalogService & Built-in Game Templates', () => {
       'factorio',
       'minecraft',
       'minecraft-curseforge',
+      'minecraft-modrinth',
       'palworld',
       'satisfactory',
     ]);
@@ -41,14 +42,14 @@ describe('CatalogService & Built-in Game Templates', () => {
     expect(asa?.lifecycle.saveCommand).toBe('SaveWorld');
   });
 
-  it('unifies minecraft and minecraft-curseforge into a single deploy tile and supports custom template groups (Issue #37)', () => {
+  it('unifies minecraft, minecraft-curseforge, and minecraft-modrinth into a single deploy tile (Issues #14, #37)', () => {
     const customDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-cat-group-'));
     tempDirs.push(customDir);
 
     const catalog = new CatalogService(path.join(WORKSPACE_ROOT, 'catalog', 'games'), customDir);
     const tiles = groupCatalogTemplates(catalog.listTemplates());
 
-    // 6 templates collapse cleanly into 5 deploy tiles
+    // 7 templates collapse cleanly into 5 deploy tiles
     expect(tiles.map((t) => t.key)).toEqual([
       'ark-survival-ascended',
       'factorio',
@@ -61,9 +62,14 @@ describe('CatalogService & Built-in Game Templates', () => {
     expect(mcTile.name).toBe('Minecraft');
     expect(mcTile.minRamGb).toBe(2);
     expect(mcTile.hasNative).toBe(true);
-    expect(mcTile.variants.map((v) => v.id)).toEqual(['minecraft', 'minecraft-curseforge']);
+    expect(mcTile.variants.map((v) => v.id)).toEqual([
+      'minecraft',
+      'minecraft-curseforge',
+      'minecraft-modrinth',
+    ]);
     expect(mcTile.variants[0].variantLabel).toContain('Standard');
     expect(mcTile.variants[1].variantLabel).toBe('CurseForge Modpack');
+    expect(mcTile.variants[2].variantLabel).toBe('Modrinth Modpack');
 
     // Backwards compatibility: both underlying template IDs remain independently resolvable
     expect(catalog.getTemplate('minecraft')).not.toBeNull();

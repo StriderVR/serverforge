@@ -11,6 +11,8 @@ import type {
   GameTemplate,
   ImportServerInput,
   InstanceRuntimeStats,
+  InstanceUpdateCheckResult,
+  InstanceUpdateResult,
   PublicHostSource,
   RuntimeKind,
   ServerInstance,
@@ -26,8 +28,10 @@ import { javaTagToMajor, parseRequiredJavaFromCrashLogs } from '../runtimes/java
 import { ConsoleLogBuffer } from '../runtimes/runtime-adapter.js';
 import type { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { extractZipSafely } from './backup-scheduler.js';
+import { parseCurseForgeUrl, type CurseForgeService } from './curseforge-service.js';
 import type { DiagnosticsService } from './diagnostics-service.js';
 import { enableRconInServerProperties } from './import-service.js';
+import type { ModrinthService } from './modrinth-service.js';
 import type { NetworkAddressService } from './network-service.js';
 import type { TelemetryService } from './telemetry-service.js';
 
@@ -105,7 +109,9 @@ export class ServerOrchestrator extends EventEmitter {
     private readonly telemetry: TelemetryService,
     private readonly network?: NetworkAddressService,
     private readonly diagnostics?: DiagnosticsService,
-    watchdogOptions?: WatchdogOptions
+    watchdogOptions?: WatchdogOptions,
+    private readonly curseforge?: CurseForgeService,
+    private readonly modrinth?: ModrinthService
   ) {
     super();
     this.logs = new ConsoleLogBuffer(600, {
@@ -1391,6 +1397,310 @@ export class ServerOrchestrator extends EventEmitter {
       }
     }
     return startedIds;
+  }
+
+  /**
+   * Resolves the canonical root folder containing a server instance's actual game files
+   * (supports external linked folders, managed native `server/`, and Docker `data/`).
+   */
+  getServerContentDir(instance: ServerInstance): string {
+    if (instance.externalDir) {
+      return path.resolve(instance.externalDir);
+    }
+    const base = this.getInstanceDir(instance.id);
+    const subdir = instance.runtime === 'native' ? 'server' : 'data';
+    const target = path.join(base, subdir);
+    fs.mkdirSync(target, { recursive: true });
+    return target;
+  }
+
+  async checkInstanceUpdate(instanceId: string): Promise<InstanceUpdateCheckResult> {
+    const instance = this.db.getInstanceById(instanceId);
+    if (!instance) throw new Error('Server instance not found.');
+    const template = this.catalog.getTemplate(instance.gameId);
+    if (!template) throw new Error('Unknown game template.');
+
+    // 1. SteamCMD dedicated servers (Ark, Palworld, Satisfactory)
+    if (template.runtimes.native?.installer === 'steamcmd' && template.runtimes.native.steamAppId) {
+      const branch =
+        template.id === 'satisfactory' && Boolean(instance.config.EXPERIMENTAL)
+          ? 'experimental'
+          : (template.runtimes.native.steamBeta ?? 'public');
+      return {
+        supported: true,
+        kind: 'steamcmd',
+        message: `Ready to run SteamCMD +app_update ${template.runtimes.native.steamAppId} validate (${branch} branch).`,
+        updateAvailable: false,
+        currentVersionId: null,
+        latestVersionId: null,
+        latestVersionLabel: null,
+        availableVersions: [],
+        appId: template.runtimes.native.steamAppId,
+        branch,
+      };
+    }
+
+    // 2. CurseForge modpacks
+    if (instance.gameId === 'minecraft-curseforge') {
+      const settings = this.db.getSettings(this.config.publicHost);
+      const apiKey = settings.curseforgeApiKey || this.config.curseforgeApiKey || '';
+      let slug = String(instance.config.CF_SLUG ?? '').trim().toLowerCase();
+      const pageUrl = String(instance.config.CF_PAGE_URL ?? '').trim();
+      const currentFileId = String(instance.config.CF_FILE_ID ?? '').trim() || null;
+
+      if (!slug && pageUrl) {
+        slug = parseCurseForgeUrl(pageUrl).slug ?? '';
+      }
+      if (!slug || !this.curseforge || !apiKey) {
+        return {
+          supported: Boolean(slug),
+          kind: 'curseforge',
+          message: !slug
+            ? 'No CurseForge modpack slug or URL is configured on this server.'
+            : 'Configure a CurseForge API key in Settings to check for modpack updates.',
+          updateAvailable: false,
+          currentVersionId: currentFileId,
+          latestVersionId: null,
+          latestVersionLabel: null,
+          availableVersions: [],
+        };
+      }
+
+      const results = await this.curseforge.searchModpacks(slug, apiKey, 10);
+      const match =
+        results.find((m) => m.slug.toLowerCase() === slug) ??
+        results[0];
+      if (!match) {
+        return {
+          supported: true,
+          kind: 'curseforge',
+          message: `Could not locate CurseForge modpack "${slug}".`,
+          updateAvailable: false,
+          currentVersionId: currentFileId,
+          latestVersionId: null,
+          latestVersionLabel: null,
+          availableVersions: [],
+        };
+      }
+
+      const files = await this.curseforge.getModpackFiles(match.id, apiKey, 15);
+      const latest = files[0] ?? null;
+      const latestId = latest ? String(latest.id) : null;
+      const updateAvailable = Boolean(latestId && (!currentFileId || latestId !== currentFileId));
+
+      return {
+        supported: true,
+        kind: 'curseforge',
+        message: updateAvailable
+          ? `New version available for ${match.name}: ${latest?.displayName}`
+          : `${match.name} is on the latest tracked version.`,
+        updateAvailable,
+        currentVersionId: currentFileId,
+        latestVersionId: latestId,
+        latestVersionLabel: latest?.displayName ?? null,
+        availableVersions: files.map((f) => ({
+          id: String(f.id),
+          label: f.displayName,
+          date: f.fileDate,
+          gameVersions: f.gameVersions,
+          recommendedJavaTag: f.recommendedJavaTag,
+        })),
+      };
+    }
+
+    // 3. Modrinth modpacks
+    if (instance.gameId === 'minecraft-modrinth') {
+      const slug = String(instance.config.MR_PROJECT_ID ?? '').trim();
+      const currentVersionId = String(instance.config.MR_VERSION_ID ?? '').trim() || null;
+      if (!slug || !this.modrinth) {
+        return {
+          supported: false,
+          kind: 'unsupported',
+          message: 'No Modrinth modpack slug or project ID configured.',
+          updateAvailable: false,
+          currentVersionId,
+          latestVersionId: null,
+          latestVersionLabel: null,
+          availableVersions: [],
+        };
+      }
+
+      const versions = await this.modrinth.getProjectVersions(slug);
+      const latest = versions[0] ?? null;
+      const updateAvailable = Boolean(latest && (!currentVersionId || latest.id !== currentVersionId));
+      return {
+        supported: true,
+        kind: 'modrinth',
+        message: updateAvailable
+          ? `New Modrinth version available: ${latest?.name} (${latest?.versionNumber})`
+          : 'Modrinth modpack is up to date.',
+        updateAvailable,
+        currentVersionId,
+        latestVersionId: latest?.id ?? null,
+        latestVersionLabel: latest ? `${latest.name} (${latest.versionNumber})` : null,
+        availableVersions: versions.slice(0, 15).map((v) => ({
+          id: v.id,
+          label: `${v.name} (${v.versionNumber})`,
+          date: v.datePublished,
+          gameVersions: v.gameVersions,
+          recommendedJavaTag: v.recommendedJavaTag,
+        })),
+      };
+    }
+
+    return {
+      supported: false,
+      kind: 'unsupported',
+      message: `Automated updates are supported for SteamCMD games, CurseForge modpacks, and Modrinth modpacks.`,
+      updateAvailable: false,
+      currentVersionId: null,
+      latestVersionId: null,
+      latestVersionLabel: null,
+      availableVersions: [],
+    };
+  }
+
+  async updateInstance(
+    instanceId: string,
+    options: {
+      createBackup?: boolean;
+      targetVersionId?: string;
+      restartIfRunning?: boolean;
+    } = {},
+    actor = 'admin'
+  ): Promise<InstanceUpdateResult> {
+    const instance = this.db.getInstanceById(instanceId);
+    if (!instance) throw new Error('Server instance not found.');
+    const template = this.catalog.getTemplate(instance.gameId);
+    if (!template) throw new Error('Unknown game template.');
+
+    const isSteamCmd = Boolean(template.runtimes.native?.installer === 'steamcmd' && template.runtimes.native.steamAppId);
+    const isCurseForge = instance.gameId === 'minecraft-curseforge';
+    const isModrinth = instance.gameId === 'minecraft-modrinth';
+
+    if (!isSteamCmd && !isCurseForge && !isModrinth) {
+      throw new Error(`One-click update is not supported for "${template.name}".`);
+    }
+
+    const activeLease = this.db.getActiveLeaseForInstance(instance.id);
+    const wasRunning = instance.status === 'running' || instance.status === 'starting';
+    const shouldRestart = options.restartIfRunning !== false && wasRunning;
+    let backupFilename: string | null = null;
+
+    if (wasRunning) {
+      this.appendLog(instance.id, `[Update] Stopping ${instance.name} gracefully before updating...`);
+      await this.stopInstance(instance.id, actor, 'web', 'Pre-update stop');
+    }
+
+    if (options.createBackup !== false) {
+      this.appendLog(instance.id, `[Update] Creating automatic pre-update safety backup...`);
+      const backup = await this.createBackup(instance.id, 'Automatic pre-update safety backup', actor, {
+        source: 'system',
+        applyRetention: false,
+      });
+      backupFilename = backup.filename;
+      this.appendLog(instance.id, `[Update] Safety backup saved: ${backup.filename}`);
+    }
+
+    const installing = this.db.updateInstance(instance.id, { status: 'installing', lastError: null })!;
+    this.emit('instance:update', this.enrichInstance(installing));
+
+    const serverDir = this.getServerContentDir(installing);
+    const onLog = (line: string) => this.appendLog(instance.id, line);
+
+    try {
+      let kind: 'steamcmd' | 'curseforge' | 'modrinth';
+      let summary = '';
+      let newVersionId: string | null = null;
+
+      if (isSteamCmd) {
+        kind = 'steamcmd';
+        if (this.runtimeManager.mode === 'mock') {
+          onLog(`[SteamCMD] (Mock) Validating AppID ${template.runtimes.native!.steamAppId} in ${serverDir}...`);
+          onLog(`[SteamCMD] (Mock) AppID ${template.runtimes.native!.steamAppId} is up to date.`);
+        } else {
+          await this.runtimeManager.native.updateSteamCmdServer(template, installing, serverDir, onLog);
+        }
+        summary = `SteamCMD validated & updated ${template.name} (AppID ${template.runtimes.native!.steamAppId}).`;
+      } else if (isCurseForge) {
+        kind = 'curseforge';
+        const result = await this.runtimeManager.native.upgradeCurseForgeModpack(
+          installing,
+          serverDir,
+          options.targetVersionId,
+          onLog
+        );
+        newVersionId = result.newFileId;
+        const nextConfig = {
+          ...installing.config,
+          CF_FILE_ID: result.newFileId,
+          JAVA_IMAGE_TAG: result.recommendedJavaTag,
+        };
+        this.db.updateInstance(instance.id, { config: nextConfig });
+        summary = `Upgraded CurseForge modpack to file #${result.newFileId} (Java ${result.recommendedJavaTag}; worlds & configs preserved).`;
+      } else {
+        kind = 'modrinth';
+        const result = await this.runtimeManager.native.upgradeModrinthModpack(
+          installing,
+          serverDir,
+          options.targetVersionId,
+          onLog
+        );
+        newVersionId = result.newVersionId;
+        const nextConfig = {
+          ...installing.config,
+          ...(result.newVersionId ? { MR_VERSION_ID: result.newVersionId } : {}),
+          JAVA_IMAGE_TAG: result.recommendedJavaTag,
+        };
+        this.db.updateInstance(instance.id, { config: nextConfig });
+        summary = `Upgraded Modrinth modpack${result.newVersionId ? ` to version ${result.newVersionId}` : ''} (worlds & configs preserved).`;
+      }
+
+      const stopped = this.db.updateInstance(instance.id, { status: 'stopped', lastError: null })!;
+      this.emit('instance:update', this.enrichInstance(stopped));
+
+      this.db.addAuditLog({
+        actor,
+        source: 'web',
+        action: 'instance.update',
+        instanceId: instance.id,
+        details: `${summary}${backupFilename ? ` (safety backup: ${backupFilename})` : ''}`,
+      });
+      this.appendLog(instance.id, `[Update] ${summary}`);
+
+      let restarted = false;
+      if (shouldRestart) {
+        this.appendLog(instance.id, `[Update] Restarting ${instance.name}...`);
+        const remainingMin = activeLease
+          ? Math.max(15, Math.round((new Date(activeLease.expiresAt).getTime() - Date.now()) / 60_000))
+          : undefined;
+        await this.startInstance(instance.id, {
+          temporary: Boolean(activeLease),
+          durationMinutes: remainingMin,
+          idleTimeoutMinutes: activeLease?.idleTimeoutMinutes,
+          requestedBy: activeLease?.requestedBy ?? actor,
+          requestedById: activeLease?.requestedById ?? undefined,
+          source: activeLease?.source === 'discord' ? 'discord' : 'web',
+          channelId: activeLease?.channelId ?? undefined,
+        });
+        restarted = true;
+      }
+
+      return {
+        ok: true,
+        kind,
+        summary,
+        backupCreated: backupFilename,
+        restarted,
+        newVersionId,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const errored = this.db.updateInstance(instance.id, { status: 'error', lastError: `Update failed: ${msg}` })!;
+      this.emit('instance:update', this.enrichInstance(errored));
+      this.appendLog(instance.id, `[Update] Failed: ${msg}`);
+      throw err;
+    }
   }
 
   /**

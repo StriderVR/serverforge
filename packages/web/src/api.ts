@@ -1,4 +1,5 @@
 import type {
+  AddonUpdateCandidate,
   AppDiagnosticEvent,
   AuditLogEntry,
   BackupPolicy,
@@ -14,8 +15,18 @@ import type {
   HostMetrics,
   ImportInspectionResult,
   ImportServerInput,
+  InstalledAddonEntry,
+  InstalledAddonsResponse,
   InstanceDebugReport,
+  InstanceFileContent,
+  InstanceFileEntry,
+  InstanceFileListing,
+  InstanceUpdateCheckResult,
+  InstanceUpdateResult,
   MaintenanceStatus,
+  MinecraftPropertiesResponse,
+  ModrinthProjectSummary,
+  ModrinthVersionSummary,
   NetworkStatus,
   PublicHostSource,
   ServerInstance,
@@ -302,6 +313,150 @@ export const api = {
   },
   clearDiagnosticLogs: () => request<{ ok: boolean }>('/api/diagnostics/logs', { method: 'DELETE' }),
   getSystemDiagnosticsReport: () => request<SystemDiagnosticsReport>('/api/diagnostics/report'),
+
+  // In-Browser File Manager (#12)
+  listInstanceFiles: (id: string, dirPath = '') =>
+    request<InstanceFileListing>(
+      `/api/instances/${encodeURIComponent(id)}/files?path=${encodeURIComponent(dirPath)}`
+    ),
+  readInstanceFile: (id: string, relPath: string) =>
+    request<InstanceFileContent>(
+      `/api/instances/${encodeURIComponent(id)}/files/content?path=${encodeURIComponent(relPath)}`
+    ),
+  writeInstanceFile: (id: string, relPath: string, content: string) =>
+    request<InstanceFileContent>(`/api/instances/${encodeURIComponent(id)}/files/content`, {
+      method: 'PUT',
+      body: JSON.stringify({ path: relPath, content }),
+    }),
+  mkdirInstanceDir: (id: string, relPath: string) =>
+    request<{ path: string }>(`/api/instances/${encodeURIComponent(id)}/files/mkdir`, {
+      method: 'POST',
+      body: JSON.stringify({ path: relPath }),
+    }),
+  uploadInstanceFile: (
+    id: string,
+    dir: string,
+    file: File,
+    onProgress?: (percent: number) => void
+  ): Promise<InstanceFileEntry> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const params = new URLSearchParams({ dir, filename: file.name });
+      xhr.open('POST', `/api/instances/${encodeURIComponent(id)}/files/upload?${params.toString()}`);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable && onProgress) {
+          onProgress(Math.min(100, Math.round((ev.loaded / ev.total) * 100)));
+        }
+      };
+      xhr.onload = () => {
+        try {
+          const parsed = JSON.parse(xhr.responseText || '{}') as InstanceFileEntry & { error?: string };
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(parsed);
+          } else {
+            reject(new Error(parsed.error || `Upload failed (HTTP ${xhr.status})`));
+          }
+        } catch {
+          reject(new Error(`Upload failed (HTTP ${xhr.status})`));
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error while uploading file.'));
+      xhr.send(file);
+    }),
+  getInstanceFileDownloadUrl: (id: string, relPath: string) =>
+    `/api/instances/${encodeURIComponent(id)}/files/download?path=${encodeURIComponent(relPath)}`,
+  renameInstanceFile: (id: string, relPath: string, newName: string) =>
+    request<{ fromPath: string; toPath: string }>(`/api/instances/${encodeURIComponent(id)}/files/rename`, {
+      method: 'POST',
+      body: JSON.stringify({ path: relPath, newName }),
+    }),
+  deleteInstanceFile: (id: string, relPath: string) =>
+    request<{ ok: boolean; deletedPath: string }>(
+      `/api/instances/${encodeURIComponent(id)}/files?path=${encodeURIComponent(relPath)}`,
+      { method: 'DELETE' }
+    ),
+
+  // Minecraft server.properties Editor (#36)
+  getMinecraftProperties: (id: string) =>
+    request<MinecraftPropertiesResponse>(`/api/instances/${encodeURIComponent(id)}/minecraft/properties`),
+  saveMinecraftProperties: (
+    id: string,
+    payload: {
+      properties?: Record<string, string>;
+      rawContent?: string;
+      createIfMissing?: boolean;
+      allowManagedOverride?: boolean;
+      restartAfterSave?: boolean;
+    }
+  ) =>
+    request<MinecraftPropertiesResponse & { restarted?: boolean }>(
+      `/api/instances/${encodeURIComponent(id)}/minecraft/properties`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  // Modrinth & Mods/Plugins Manager (#14)
+  searchModrinth: (opts: { q?: string; type: 'modpack' | 'mod' | 'plugin'; loader?: string; version?: string; limit?: number }) => {
+    const params = new URLSearchParams({ type: opts.type });
+    if (opts.q) params.set('q', opts.q);
+    if (opts.loader) params.set('loader', opts.loader);
+    if (opts.version) params.set('version', opts.version);
+    if (opts.limit) params.set('limit', String(opts.limit));
+    return request<{ results: ModrinthProjectSummary[] }>(`/api/modrinth/search?${params.toString()}`);
+  },
+  getModrinthVersions: (projectId: string, opts?: { loader?: string; version?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.loader) params.set('loader', opts.loader);
+    if (opts?.version) params.set('version', opts.version);
+    const qs = params.toString();
+    return request<{ versions: ModrinthVersionSummary[] }>(
+      `/api/modrinth/projects/${encodeURIComponent(projectId)}/versions${qs ? `?${qs}` : ''}`
+    );
+  },
+  listInstanceAddons: (id: string) =>
+    request<InstalledAddonsResponse>(`/api/instances/${encodeURIComponent(id)}/addons`),
+  installInstanceAddon: (
+    id: string,
+    payload: { projectId: string; versionId?: string; folder?: 'mods' | 'plugins'; loader?: string; gameVersion?: string }
+  ) =>
+    request<{ ok: boolean; installed: InstalledAddonEntry[]; dependenciesInstalled: string[] }>(
+      `/api/instances/${encodeURIComponent(id)}/addons/install`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+  toggleInstanceAddon: (id: string, folder: 'mods' | 'plugins', filename: string) =>
+    request<{ ok: boolean; filename: string; enabled: boolean }>(
+      `/api/instances/${encodeURIComponent(id)}/addons/toggle`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ folder, filename }),
+      }
+    ),
+  deleteInstanceAddon: (id: string, folder: 'mods' | 'plugins', filename: string) =>
+    request<{ ok: boolean }>(
+      `/api/instances/${encodeURIComponent(id)}/addons?folder=${encodeURIComponent(folder)}&filename=${encodeURIComponent(filename)}`,
+      { method: 'DELETE' }
+    ),
+  checkInstanceAddonUpdates: (id: string) =>
+    request<{ updates: AddonUpdateCandidate[] }>(`/api/instances/${encodeURIComponent(id)}/addons/updates`),
+
+  // One-Click Game Server & Modpack Updates (#13)
+  checkInstanceUpdate: (id: string) =>
+    request<InstanceUpdateCheckResult>(`/api/instances/${encodeURIComponent(id)}/update-check`),
+  updateInstance: (
+    id: string,
+    payload: { createBackup?: boolean; targetVersionId?: string; restartIfRunning?: boolean }
+  ) =>
+    request<InstanceUpdateResult>(`/api/instances/${encodeURIComponent(id)}/update`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   deleteInstance: (id: string) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),
