@@ -1,6 +1,12 @@
 id: minecraft
 name: "Minecraft (Java / Paper / Modded)"
 shortName: "Minecraft"
+group: minecraft
+groupName: "Minecraft"
+groupDescription: "Dedicated Minecraft Java Edition server — choose Standard (Vanilla, Paper, Fabric, Forge, NeoForge) or one-click CurseForge modpacks with automatic Java 8/17/21/25."
+variantLabel: "Standard (Vanilla / Paper / Fabric)"
+variantDescription: "Vanilla, Paper plugins, Fabric, Forge, NeoForge, or Modrinth"
+variantOrder: 1
 category: sandbox
 description: "Dedicated Minecraft Java Edition server supporting Vanilla, Paper, Fabric, Forge, NeoForge, and Modrinth/CurseForge modpacks."
 accentColor: "#22c55e"

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { groupCatalogTemplates } from '@serverforge/shared';
 import {
   buildTemplateVariables,
   CatalogService,
@@ -18,7 +19,7 @@ describe('CatalogService & Built-in Game Templates', () => {
     }
   });
 
-  it('loads and validates all 5 built-in game YAML manifests', () => {
+  it('loads and validates all 6 built-in game YAML manifests', () => {
     const customDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-cat-'));
     tempDirs.push(customDir);
 
@@ -38,6 +39,50 @@ describe('CatalogService & Built-in Game Templates', () => {
     expect(asa?.runtimes.preferred).toBe('native');
     expect(asa?.runtimes.native?.steamAppId).toBe(2430930);
     expect(asa?.lifecycle.saveCommand).toBe('SaveWorld');
+  });
+
+  it('unifies minecraft and minecraft-curseforge into a single deploy tile and supports custom template groups (Issue #37)', () => {
+    const customDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-cat-group-'));
+    tempDirs.push(customDir);
+
+    const catalog = new CatalogService(path.join(WORKSPACE_ROOT, 'catalog', 'games'), customDir);
+    const tiles = groupCatalogTemplates(catalog.listTemplates());
+
+    // 6 templates collapse cleanly into 5 deploy tiles
+    expect(tiles.map((t) => t.key)).toEqual([
+      'ark-survival-ascended',
+      'factorio',
+      'minecraft',
+      'palworld',
+      'satisfactory',
+    ]);
+
+    const mcTile = tiles.find((t) => t.key === 'minecraft')!;
+    expect(mcTile.name).toBe('Minecraft');
+    expect(mcTile.minRamGb).toBe(2);
+    expect(mcTile.hasNative).toBe(true);
+    expect(mcTile.variants.map((v) => v.id)).toEqual(['minecraft', 'minecraft-curseforge']);
+    expect(mcTile.variants[0].variantLabel).toContain('Standard');
+    expect(mcTile.variants[1].variantLabel).toBe('CurseForge Modpack');
+
+    // Backwards compatibility: both underlying template IDs remain independently resolvable
+    expect(catalog.getTemplate('minecraft')).not.toBeNull();
+    expect(catalog.getTemplate('minecraft-curseforge')).not.toBeNull();
+
+    // Verify legacy YAML files on disk without group metadata are auto-normalized
+    const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-cat-legacy-'));
+    tempDirs.push(legacyDir);
+    for (const filename of ['minecraft.yaml', 'minecraft-curseforge.yaml']) {
+      const stripped = fs
+        .readFileSync(path.join(WORKSPACE_ROOT, 'catalog', 'games', filename), 'utf8')
+        .replace(/^(group|groupName|groupDescription|variantLabel|variantDescription|variantOrder):.*\n/gm, '');
+      fs.writeFileSync(path.join(legacyDir, filename), stripped, 'utf8');
+    }
+    const legacyCatalog = new CatalogService(legacyDir, customDir);
+    const legacyTiles = groupCatalogTemplates(legacyCatalog.listTemplates());
+    expect(legacyTiles).toHaveLength(1);
+    expect(legacyTiles[0].key).toBe('minecraft');
+    expect(legacyTiles[0].variants.map((v) => v.id)).toEqual(['minecraft', 'minecraft-curseforge']);
   });
 
   it('interpolates config, ports, and memory template placeholders', () => {

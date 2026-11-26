@@ -1,6 +1,11 @@
-import React, { useEffect, useState } from 'react';
-import { Play, Rocket } from 'lucide-react';
-import type { GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Layers, Play, Rocket } from 'lucide-react';
+import {
+  groupCatalogTemplates,
+  type GameTemplate,
+  type HostMetrics,
+  type RuntimeKind,
+} from '@serverforge/shared';
 import { api } from '../api';
 import { CurseForgeBrowser, type SelectedCurseForgePack } from './CurseForgeBrowser';
 
@@ -13,9 +18,26 @@ interface DeployPageProps {
 
 const DOCKER_ONLY_FIELDS = new Set(['CF_FORCE_SYNCHRONIZE']);
 
+function buildTemplateDefaults(tpl: GameTemplate): Record<string, string | number | boolean> {
+  const defaults: Record<string, string | number | boolean> = {};
+  for (const field of tpl.configFields) {
+    if (field.default !== undefined) {
+      defaults[field.key] = field.default;
+    } else if (field.type === 'boolean') {
+      defaults[field.key] = false;
+    } else {
+      defaults[field.key] = '';
+    }
+  }
+  return defaults;
+}
+
 export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: DeployPageProps) {
-  const [selectedId, setSelectedId] = useState<string>(catalog[0]?.id ?? '');
-  const selected = catalog.find((t) => t.id === selectedId) ?? catalog[0] ?? null;
+  const tiles = useMemo(() => groupCatalogTemplates(catalog), [catalog]);
+  const [selectedId, setSelectedId] = useState<string>(tiles[0]?.variants[0]?.id ?? catalog[0]?.id ?? '');
+  const selected = catalog.find((t) => t.id === selectedId) ?? tiles[0]?.variants[0] ?? catalog[0] ?? null;
+  const activeTile =
+    tiles.find((tile) => tile.variants.some((v) => v.id === selected?.id)) ?? tiles[0] ?? null;
   const dockerAvailable = Boolean(metrics?.runtimesAvailable?.docker);
 
   const [name, setName] = useState('');
@@ -27,25 +49,62 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const lastTileKeyRef = useRef<string | null>(null);
+  const lastTemplateRef = useRef<GameTemplate | null>(null);
+  const lastAutoNameRef = useRef<string>('');
+  const lastRecommendedRamRef = useRef<number>(4);
+
   useEffect(() => {
-    if (!selected) return;
-    setName(`${selected.shortName} Server`);
-    setRuntime(selected.runtimes.native ? 'native' : 'docker');
-    setMemoryGb(selected.resources.recommendedRamGb);
-    setAutoStart(false);
-    const defaults: Record<string, string | number | boolean> = {};
-    for (const field of selected.configFields) {
-      if (field.default !== undefined) {
-        defaults[field.key] = field.default;
-      } else if (field.type === 'boolean') {
-        defaults[field.key] = false;
-      } else {
-        defaults[field.key] = '';
-      }
+    if (!selected || !activeTile) return;
+    const sameTileSwitch = lastTileKeyRef.current === activeTile.key;
+    const prevTemplate = lastTemplateRef.current;
+    const nextAutoName = `${selected.shortName} Server`;
+    const nextDefaults = buildTemplateDefaults(selected);
+
+    if (sameTileSwitch && prevTemplate) {
+      // Preserve shared form inputs (custom name, RAM, Auto-Start, Discord toggle, shared config keys)
+      // when switching editions inside a unified tile (e.g. Minecraft Standard <-> CurseForge Modpack).
+      setName((prevName) => (!prevName.trim() || prevName === lastAutoNameRef.current ? nextAutoName : prevName));
+      setMemoryGb((prevRam) => {
+        if (prevRam === lastRecommendedRamRef.current) {
+          return selected.resources.recommendedRamGb;
+        }
+        return Math.max(prevRam, selected.resources.minRamGb);
+      });
+      setRuntime((prevRuntime) => {
+        if (prevRuntime === 'native' && selected.runtimes.native) return 'native';
+        if (prevRuntime === 'docker' && selected.runtimes.docker) return 'docker';
+        return selected.runtimes.native ? 'native' : 'docker';
+      });
+      setConfig((prevConfig) => {
+        const merged = { ...nextDefaults };
+        for (const field of selected.configFields) {
+          const prevField = prevTemplate.configFields.find((f) => f.key === field.key);
+          if (!prevField || prevField.type !== field.type) continue;
+          const prevVal = prevConfig[field.key];
+          if (prevVal === undefined) continue;
+          // Don't carry over an unmodified edition-specific default (like MOTD)
+          if (prevField.default !== undefined && prevVal === prevField.default) continue;
+          if (field.type === 'select' && field.options && !field.options.includes(String(prevVal))) continue;
+          merged[field.key] = prevVal;
+        }
+        return merged;
+      });
+    } else {
+      setName(nextAutoName);
+      setRuntime(selected.runtimes.native ? 'native' : 'docker');
+      setMemoryGb(selected.resources.recommendedRamGb);
+      setAutoStart(false);
+      setDiscordEnabled(true);
+      setConfig(nextDefaults);
     }
-    setConfig(defaults);
+
+    lastTileKeyRef.current = activeTile.key;
+    lastTemplateRef.current = selected;
+    lastAutoNameRef.current = nextAutoName;
+    lastRecommendedRamRef.current = selected.resources.recommendedRamGb;
     setError(null);
-  }, [selected?.id]);
+  }, [selected?.id, activeTile?.key]);
 
   const handleSelectCurseForgePack = (pack: SelectedCurseForgePack) => {
     setName(pack.packName.slice(0, 56));
@@ -108,31 +167,44 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
       </header>
 
       <section className="catalog-grid" aria-label="Game server templates">
-        {catalog.map((tpl) => (
-          <button
-            key={tpl.id}
-            type="button"
-            className={`catalog-card ${selected?.id === tpl.id ? 'selected' : ''}`}
-            onClick={() => setSelectedId(tpl.id)}
-          >
-            <div className="catalog-title-row">
-              <span className="catalog-name">{tpl.name}</span>
-              <span className="catalog-cat">{tpl.isCustom ? 'Custom' : tpl.category}</span>
-            </div>
-            <p className="catalog-desc">{tpl.description}</p>
-            <div className="catalog-specs tabular">
-              <span>Min {tpl.resources.minRamGb} GB RAM</span>
-              <span>•</span>
-              <span>{tpl.runtimes.native ? 'Local Native' : 'Docker Only'}</span>
-            </div>
-          </button>
-        ))}
+        {tiles.map((tile) => {
+          const isSelected = activeTile?.key === tile.key;
+          return (
+            <button
+              key={tile.key}
+              type="button"
+              className={`catalog-card ${isSelected ? 'selected' : ''}`}
+              onClick={() => {
+                if (!isSelected) {
+                  setSelectedId(tile.variants[0].id);
+                }
+              }}
+            >
+              <div className="catalog-title-row">
+                <span className="catalog-name">{tile.name}</span>
+                <span className="catalog-cat">{tile.isCustom ? 'Custom' : tile.category}</span>
+              </div>
+              <p className="catalog-desc">{tile.description}</p>
+              <div className="catalog-specs tabular">
+                <span>Min {tile.minRamGb} GB RAM</span>
+                <span>•</span>
+                <span>{tile.hasNative ? 'Local Native' : 'Docker Only'}</span>
+                {tile.variants.length > 1 && (
+                  <>
+                    <span>•</span>
+                    <span className="catalog-editions-pill">{tile.variants.length} Editions</span>
+                  </>
+                )}
+              </div>
+            </button>
+          );
+        })}
       </section>
 
-      {selected && (
+      {selected && activeTile && (
         <section className="panel">
           <div className="panel-header">
-            <h2>Configure {selected.name}</h2>
+            <h2>Configure {activeTile.variants.length > 1 ? activeTile.name : selected.name}</h2>
             <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               Ports auto-assigned starting from{' '}
               <span className="mono">{selected.ports.map((p) => `${p.defaultPort}/${p.protocol}`).join(', ')}</span>
@@ -141,6 +213,38 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
 
           <div className="panel-body">
             {error && <div className="alert alert-error">{error}</div>}
+
+            {activeTile.variants.length > 1 && (
+              <div className="edition-switcher-wrap" role="radiogroup" aria-label={`${activeTile.name} Server Edition`}>
+                <div className="edition-switcher-label">
+                  <Layers size={14} />
+                  <span>Server Edition</span>
+                </div>
+                <div className="edition-switcher">
+                  {activeTile.variants.map((variant) => {
+                    const isActive = selected.id === variant.id;
+                    return (
+                      <button
+                        key={variant.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={isActive}
+                        className={`edition-option ${isActive ? 'selected' : ''}`}
+                        onClick={() => setSelectedId(variant.id)}
+                      >
+                        <div className="edition-option-head">
+                          <span className="edition-option-title">{variant.variantLabel ?? variant.name}</span>
+                          <span className="edition-option-ram tabular">Min {variant.resources.minRamGb} GB</span>
+                        </div>
+                        <span className="edition-option-desc">
+                          {variant.variantDescription ?? variant.description}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {selected.id === 'minecraft-curseforge' && (
               <CurseForgeBrowser
@@ -152,8 +256,8 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
             {selected.id === 'minecraft-curseforge' && runtime === 'native' && (
               <div className="alert alert-info" style={{ marginBottom: 16 }}>
                 <strong>Native Modpack Auto-Setup:</strong> ServerForge will automatically download &amp; extract the
-                CurseForge Server Pack ZIP, install the matching portable Java runtime (Java 8 / 17 / 21) if needed, and
-                stream setup progress to the Live Console. First boot may take 1–3 minutes depending on pack size.
+                CurseForge Server Pack ZIP, install the matching portable Java runtime (Java 8 / 17 / 21 / 25) if needed,
+                and stream setup progress to the Live Console. First boot may take 1–3 minutes depending on pack size.
               </div>
             )}
 
