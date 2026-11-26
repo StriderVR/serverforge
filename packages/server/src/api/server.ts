@@ -155,6 +155,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     platform: platformOverride,
     tmpDir: path.join(config.dataDir, 'tmp'),
     execImpl: firewallExecImpl,
+    disableOsExec: config.runtimeMode === 'mock' && !firewallExecImpl,
   });
   const connectivity = new ConnectivityService(config, db, catalog, network, firewall, {
     platform: platformOverride,

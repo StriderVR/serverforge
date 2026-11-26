@@ -30,6 +30,7 @@ export interface FirewallServiceOptions {
   platform?: NodeJS.Platform;
   tmpDir?: string;
   execImpl?: FirewallExecFn;
+  disableOsExec?: boolean;
 }
 
 export interface ResolvedInstancePort {
@@ -351,11 +352,13 @@ export class FirewallService {
   private readonly platform: NodeJS.Platform;
   private readonly tmpDir: string;
   private readonly execImpl: FirewallExecFn;
+  private readonly disableOsExec: boolean;
 
   constructor(options: FirewallServiceOptions = {}) {
     this.platform = options.platform ?? process.platform;
     this.tmpDir = options.tmpDir ?? os.tmpdir();
     this.execImpl = options.execImpl ?? defaultExec;
+    this.disableOsExec = Boolean(options.disableOsExec);
   }
 
   /**
@@ -437,8 +440,11 @@ if ('${safeExe}' -ne '') {
     const resolvedPorts = resolveInstancePorts(instance, template);
     const prefix = buildManagedRulePrefix(instance.slug);
 
-    if (this.platform !== 'win32') {
-      const ufwScript = buildLinuxUfwScript(instance, template);
+    if (this.platform !== 'win32' || this.disableOsExec) {
+      const script =
+        this.platform === 'win32'
+          ? buildWindowsFirewallScript(instance, template)
+          : buildLinuxUfwScript(instance, template);
       return {
         platform: this.platform,
         supported: false,
@@ -461,8 +467,11 @@ if ('${safeExe}' -ne '') {
           exposedInternalWarning: false,
         })),
         managedRulePrefix: prefix,
-        scriptContent: ufwScript,
-        scriptFilename: `serverforge-ufw-${sanitizeFirewallLabel(instance.slug)}.sh`,
+        scriptContent: script,
+        scriptFilename:
+          this.platform === 'win32'
+            ? `serverforge-firewall-${sanitizeFirewallLabel(instance.slug)}.ps1`
+            : `serverforge-ufw-${sanitizeFirewallLabel(instance.slug)}.sh`,
       };
     }
 
@@ -647,11 +656,11 @@ exit $proc.ExitCode
     instance: ServerInstance,
     options: { allowUac?: boolean } = {}
   ): Promise<FirewallRemoveResult> {
-    if (this.platform !== 'win32') {
+    if (this.platform !== 'win32' || this.disableOsExec) {
       return {
         ok: true,
         removedCount: 0,
-        message: 'No Windows Firewall rules to remove on this platform.',
+        message: 'No Windows Firewall rules to remove in this environment.',
       };
     }
 
