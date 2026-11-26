@@ -8,6 +8,16 @@ import { buildTemplateVariables, renderTemplateString } from '../catalog/catalog
 import type { QueryService } from '../query/query-service.js';
 import type { CurseForgeService } from '../services/curseforge-service.js';
 import {
+  buildFactorioWin64DownloadUrl,
+  FACTORIO_LINUX_HEADLESS_URL,
+  findFactorioExecutableInRoot,
+  findLocalFactorioInstall,
+  hasExistingFactorioSave,
+  probeWslAvailable,
+  toWslPath,
+  writeFactorioConfigFiles,
+} from './factorio-helper.js';
+import {
   buildJavaEnv,
   ensureJavaRuntime,
   javaTagToMajor,
@@ -16,6 +26,13 @@ import {
   type DetectedJava,
 } from './java-helper.js';
 import { splitArgs, type RuntimeAdapter, type RuntimeStartResult } from './runtime-adapter.js';
+import {
+  buildArkAsaNativeLaunchPlan,
+  buildPalworldNativeLaunchPlan,
+  buildSatisfactoryNativeLaunchPlan,
+  ensureSteamCmd,
+  writePalworldSettingsIni,
+} from './steamcmd-helper.js';
 
 interface ManagedProcess {
   child: ChildProcess;
@@ -602,68 +619,71 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     return true;
   }
 
-  private findSteamCmd(): string {
-    const isWin = process.platform === 'win32';
-    const localTool = path.join(this.toolsDir, 'steamcmd', isWin ? 'steamcmd.exe' : 'steamcmd.sh');
-    if (fs.existsSync(localTool)) return localTool;
-
-    if (isWin) {
-      const commonPaths = [
-        'C:\\steamcmd\\steamcmd.exe',
-        'C:\\Program Files (x86)\\SteamCMD\\steamcmd.exe',
-      ];
-      for (const p of commonPaths) {
-        if (fs.existsSync(p)) return p;
-      }
-      return 'steamcmd.exe';
-    }
-    return 'steamcmd';
-  }
-
   private async ensureSteamCmdInstalled(
     appId: number,
     installDir: string,
     beta: string | undefined,
     onLog: (line: string) => void
   ): Promise<void> {
-    const steamcmdBin = this.findSteamCmd();
-    fs.mkdirSync(installDir, { recursive: true });
-    onLog(`[SteamCMD] Updating/verifying Steam AppID ${appId} in ${installDir}...`);
+    const steamcmdBin = await ensureSteamCmd(this.toolsDir, onLog, {
+      fetchImpl: this.fetchImpl,
+    });
+    const resolvedDir = path.resolve(installDir);
+    fs.mkdirSync(resolvedDir, { recursive: true });
+    onLog(
+      `[SteamCMD] Updating/verifying Steam AppID ${appId}${beta ? ` (branch: ${beta})` : ''} in ${resolvedDir}...`
+    );
 
-    const args = ['+force_install_dir', installDir, '+login', 'anonymous', '+app_update', String(appId)];
+    const args = ['+force_install_dir', resolvedDir, '+login', 'anonymous', '+app_update', String(appId)];
     if (beta) {
       args.push('-beta', beta);
     }
     args.push('validate', '+quit');
 
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn(steamcmdBin, args, { windowsHide: true });
-      proc.stdout?.on('data', (d: Buffer) => {
-        for (const line of d.toString('utf8').split(/\r?\n/)) {
-          if (line.trim()) onLog(`[SteamCMD] ${line.trim()}`);
-        }
+    const runOnce = () =>
+      new Promise<{ code: number | null; sawSuccess: boolean }>((resolve, reject) => {
+        let sawSuccess = false;
+        const proc = spawn(steamcmdBin, args, {
+          cwd: path.dirname(steamcmdBin),
+          windowsHide: true,
+        });
+        const handleChunk = (d: Buffer) => {
+          for (const line of d.toString('utf8').split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            if (
+              new RegExp(`Success!\\s+App\\s+'?${appId}'?\\s+(?:fully installed|already up to date)`, 'i').test(trimmed)
+            ) {
+              sawSuccess = true;
+            }
+            onLog(`[SteamCMD] ${trimmed}`);
+          }
+        };
+        proc.stdout?.on('data', handleChunk);
+        proc.stderr?.on('data', handleChunk);
+        proc.on('error', (err) => {
+          reject(new Error(`Failed to launch SteamCMD (${steamcmdBin}): ${err.message}`));
+        });
+        proc.on('close', (code) => {
+          resolve({ code, sawSuccess });
+        });
       });
-      proc.stderr?.on('data', (d: Buffer) => {
-        for (const line of d.toString('utf8').split(/\r?\n/)) {
-          if (line.trim()) onLog(`[SteamCMD] ${line.trim()}`);
-        }
-      });
-      proc.on('error', (err) => {
-        reject(
-          new Error(
-            `Failed to launch SteamCMD (${steamcmdBin}): ${err.message}. Run scripts/install-windows.ps1 or install SteamCMD to C:\\steamcmd.`
-          )
+
+    // Freshly extracted SteamCMD on Windows self-updates on its first run and may exit with code 7 once.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const { code, sawSuccess } = await runOnce();
+      if (code === 0 || sawSuccess) {
+        onLog(`[SteamCMD] AppID ${appId} is up to date.`);
+        return;
+      }
+      if (attempt === 1 && (code === 7 || code === 8)) {
+        onLog(
+          `[SteamCMD] SteamCMD exited with code ${code} (common during first-run SteamCMD self-update or transient CDN reset). Retrying automatically...`
         );
-      });
-      proc.on('close', (code) => {
-        if (code === 0) {
-          onLog(`[SteamCMD] AppID ${appId} is up to date.`);
-          resolve();
-        } else {
-          reject(new Error(`SteamCMD exited with code ${code}`));
-        }
-      });
-    });
+        continue;
+      }
+      throw new Error(`SteamCMD exited with code ${code ?? 'unknown'} while installing AppID ${appId}.`);
+    }
   }
 
   private async streamDownloadToFile(
@@ -673,7 +693,7 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     label: string
   ): Promise<void> {
     const res = await this.fetchImpl(url, {
-      headers: { 'User-Agent': 'ServerForge/1.1.6 (+https://github.com/StriderVR/serverforge)' },
+      headers: { 'User-Agent': 'ServerForge (+https://github.com/StriderVR/serverforge)' },
       redirect: 'follow',
       signal: AbortSignal.timeout(900_000),
     });
@@ -732,6 +752,11 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
   }
 
   private async extractZip(zipPath: string, destDir: string): Promise<void> {
+    await this.extractArchive(zipPath, destDir);
+  }
+
+  private async extractArchive(archivePath: string, destDir: string): Promise<void> {
+    fs.mkdirSync(destDir, { recursive: true });
     const runExtractor = (cmd: string, args: string[]) =>
       new Promise<void>((resolve, reject) => {
         const proc = spawn(cmd, args, { windowsHide: true });
@@ -746,22 +771,35 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
         });
       });
 
+    const lower = archivePath.toLowerCase();
+
     if (process.platform === 'win32') {
-      // Windows 10/11 includes native bsdtar (`tar.exe`), which extracts ZIPs ~10x faster than PowerShell Expand-Archive
+      // Windows 10/11 includes native bsdtar (`tar.exe`), which extracts .zip, .tar.gz, and .tar.xz cleanly
       try {
-        await runExtractor('tar', ['-xf', zipPath, '-C', destDir]);
+        await runExtractor('tar', ['-xf', archivePath, '-C', destDir]);
         return;
-      } catch {
-        await runExtractor('powershell.exe', [
-          '-NoProfile',
-          '-Command',
-          `Expand-Archive -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
-        ]);
-        return;
+      } catch (tarErr) {
+        if (lower.endsWith('.zip')) {
+          await runExtractor('powershell.exe', [
+            '-NoProfile',
+            '-Command',
+            `Expand-Archive -Path '${archivePath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
+          ]);
+          return;
+        }
+        throw tarErr;
       }
     }
 
-    await runExtractor('unzip', ['-o', zipPath, '-d', destDir]);
+    if (lower.endsWith('.tar.xz') || lower.endsWith('.txz')) {
+      await runExtractor('tar', ['-xJf', archivePath, '-C', destDir]);
+      return;
+    }
+    if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+      await runExtractor('tar', ['-xzf', archivePath, '-C', destDir]);
+      return;
+    }
+    await runExtractor('unzip', ['-o', archivePath, '-d', destDir]);
   }
 
   private async runModloaderInstaller(
@@ -1088,6 +1126,237 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
+  public async prepareFactorioServer(
+    instance: ServerInstance,
+    serverDir: string,
+    onLog: (line: string) => void,
+    onStatus?: (status: 'installing' | 'starting') => void,
+    options: {
+      platform?: NodeJS.Platform;
+      searchDirs?: string[];
+      steamVdfPaths?: string[];
+      wslAvailableOverride?: boolean;
+      skipCreateSaveExec?: boolean;
+    } = {}
+  ): Promise<NativeLaunchPlan> {
+    const platform = options.platform ?? process.platform;
+    let runViaWsl = false;
+    let factorioExePath: string | null = null;
+
+    // 1. Check if already installed directly inside this instance's serverDir
+    const existingInDir = findFactorioExecutableInRoot(serverDir, platform);
+    if (existingInDir) {
+      factorioExePath = existingInDir;
+    } else if (platform === 'win32') {
+      // Also check if a Linux headless build was already extracted for WSL2 in this instance
+      const existingLinuxInDir = findFactorioExecutableInRoot(serverDir, 'linux');
+      if (existingLinuxInDir && (options.wslAvailableOverride ?? (await probeWslAvailable()))) {
+        factorioExePath = existingLinuxInDir;
+        runViaWsl = true;
+      }
+    }
+
+    // 2. Optional user-provided FACTORIO_SOURCE (local directory, archive path, or URL)
+    const sourceOverride = String(instance.config.FACTORIO_SOURCE ?? '').trim();
+    if (!factorioExePath && sourceOverride) {
+      if (fs.existsSync(sourceOverride) && fs.statSync(sourceOverride).isDirectory()) {
+        const exeInOverride = findFactorioExecutableInRoot(sourceOverride, platform);
+        if (!exeInOverride) {
+          throw new Error(
+            `FACTORIO_SOURCE folder "${sourceOverride}" does not contain a Factorio executable (expected bin/x64/${platform === 'win32' ? 'factorio.exe' : 'factorio'}).`
+          );
+        }
+        onLog(`[Factorio] Using Factorio installation from ${sourceOverride}.`);
+        factorioExePath = exeInOverride;
+      } else {
+        onStatus?.('installing');
+        const ext = sourceOverride.toLowerCase().endsWith('.tar.xz')
+          ? '.tar.xz'
+          : sourceOverride.toLowerCase().endsWith('.tar.gz')
+            ? '.tar.gz'
+            : '.zip';
+        const archivePath = path.join(serverDir, `factorio-source${ext}`);
+        if (/^https?:\/\//i.test(sourceOverride)) {
+          onLog('[Factorio] Downloading Factorio archive from FACTORIO_SOURCE URL...');
+          await this.streamDownloadToFile(sourceOverride, archivePath, onLog, 'Factorio Server');
+        } else if (fs.existsSync(sourceOverride)) {
+          onLog(`[Factorio] Copying local Factorio archive from ${sourceOverride}...`);
+          fs.copyFileSync(sourceOverride, archivePath);
+        } else {
+          throw new Error(`FACTORIO_SOURCE path not found: ${sourceOverride}`);
+        }
+        onLog('[Factorio] Extracting Factorio archive...');
+        await this.extractArchive(archivePath, serverDir);
+        fs.rmSync(archivePath, { force: true });
+        flattenSingleRootSubdir(serverDir, 1);
+        factorioExePath = findFactorioExecutableInRoot(serverDir, platform);
+      }
+    }
+
+    // 3. Auto-detect local Steam / standalone installation (Windows) or download free headless (Linux)
+    if (!factorioExePath) {
+      const localDetected = findLocalFactorioInstall(serverDir, platform, {
+        searchDirs: options.searchDirs,
+        steamVdfPaths: options.steamVdfPaths,
+      });
+      if (localDetected) {
+        onLog(
+          `[Factorio] Auto-detected local Factorio installation at ${localDetected.exePath}. Using isolated instance config & saves in ${serverDir}.`
+        );
+        factorioExePath = localDetected.exePath;
+      }
+    }
+
+    if (!factorioExePath && platform === 'linux') {
+      onStatus?.('installing');
+      const archivePath = path.join(serverDir, 'factorio-headless.tar.xz');
+      onLog('[Factorio] Downloading official free Factorio Linux Headless server from factorio.com...');
+      await this.streamDownloadToFile(FACTORIO_LINUX_HEADLESS_URL, archivePath, onLog, 'Factorio Headless');
+      onLog('[Factorio] Extracting Factorio Linux Headless archive...');
+      await this.extractArchive(archivePath, serverDir);
+      fs.rmSync(archivePath, { force: true });
+      flattenSingleRootSubdir(serverDir, 1);
+      factorioExePath = findFactorioExecutableInRoot(serverDir, 'linux');
+    }
+
+    if (!factorioExePath && platform === 'win32') {
+      const cfUser = String(instance.config.FACTORIO_USERNAME ?? '').trim();
+      const cfToken = String(instance.config.FACTORIO_TOKEN ?? '').trim();
+
+      if (cfUser && cfToken) {
+        onStatus?.('installing');
+        const archivePath = path.join(serverDir, 'factorio-win64.zip');
+        onLog('[Factorio] Downloading official Factorio Windows 64-bit ZIP using Factorio.com credentials...');
+        await this.streamDownloadToFile(
+          buildFactorioWin64DownloadUrl(cfUser, cfToken),
+          archivePath,
+          onLog,
+          'Factorio Windows ZIP'
+        );
+        onLog('[Factorio] Extracting Factorio Windows ZIP...');
+        await this.extractArchive(archivePath, serverDir);
+        fs.rmSync(archivePath, { force: true });
+        flattenSingleRootSubdir(serverDir, 1);
+        factorioExePath = findFactorioExecutableInRoot(serverDir, 'win32');
+      } else if (options.wslAvailableOverride ?? (await probeWslAvailable())) {
+        onStatus?.('installing');
+        const archivePath = path.join(serverDir, 'factorio-headless.tar.xz');
+        onLog(
+          '[Factorio] No local Windows Factorio install found — WSL2 detected! Auto-downloading official free Factorio Linux Headless server...'
+        );
+        await this.streamDownloadToFile(FACTORIO_LINUX_HEADLESS_URL, archivePath, onLog, 'Factorio Headless (WSL2)');
+        onLog('[Factorio] Extracting Factorio Headless archive...');
+        try {
+          await this.extractArchive(archivePath, serverDir);
+        } catch {
+          await new Promise<void>((resolve, reject) => {
+            const proc = spawn('wsl.exe', ['-e', 'tar', '-xJf', toWslPath(archivePath), '-C', toWslPath(serverDir)], {
+              windowsHide: true,
+            });
+            proc.on('error', reject);
+            proc.on('close', (code) =>
+              code === 0 ? resolve() : reject(new Error(`WSL tar extraction exited with code ${code}`))
+            );
+          });
+        }
+        fs.rmSync(archivePath, { force: true });
+        flattenSingleRootSubdir(serverDir, 1);
+        factorioExePath = findFactorioExecutableInRoot(serverDir, 'linux');
+        if (factorioExePath) {
+          runViaWsl = true;
+        }
+      }
+    }
+
+    if (!factorioExePath) {
+      throw new Error(
+        platform === 'win32'
+          ? 'Factorio server binary was not found. Wube only distributes the free no-login headless server for Linux, so on Windows you have 3 easy options: (1) Install Factorio via Steam on this PC (ServerForge auto-detects it automatically), (2) Open Server Configuration and enter your Factorio.com Username + Auth Token (from factorio.com/profile) or a local Factorio ZIP/folder path in FACTORIO_SOURCE, or (3) Enable WSL2 (`wsl --install`) or switch Runtime to Docker to auto-download the free official Linux headless server.'
+          : `Factorio server binary was not found in ${serverDir} after installation.`
+      );
+    }
+
+    if (!runViaWsl && platform !== 'win32') {
+      try {
+        fs.chmodSync(factorioExePath, 0o755);
+      } catch {
+        // ignore chmod errors
+      }
+    }
+
+    // Write isolated config.ini & server-settings.json inside serverDir
+    const { configIniPath, serverSettingsPath, saveFilePath } = writeFactorioConfigFiles(serverDir, instance, {
+      useWslPaths: runViaWsl,
+    });
+
+    const configArg = runViaWsl ? toWslPath(configIniPath) : configIniPath;
+    const settingsArg = runViaWsl ? toWslPath(serverSettingsPath) : serverSettingsPath;
+    const saveArg = runViaWsl ? toWslPath(saveFilePath) : saveFilePath;
+
+    // Create an initial save map if saves/ is empty so `--start-server-load-latest` succeeds on first boot
+    if (!hasExistingFactorioSave(serverDir) && !options.skipCreateSaveExec) {
+      onStatus?.('installing');
+      onLog(`[Factorio] No world save found yet — creating initial map (${path.basename(saveFilePath)})...`);
+      const createCmd = runViaWsl ? 'wsl.exe' : factorioExePath;
+      const createArgs = runViaWsl
+        ? ['-e', toWslPath(factorioExePath), '--config', configArg, '--create', saveArg]
+        : ['--config', configArg, '--create', saveArg];
+
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(createCmd, createArgs, {
+          cwd: serverDir,
+          windowsHide: true,
+        });
+        proc.stdout?.on('data', (d: Buffer) => {
+          for (const line of d.toString('utf8').split(/\r?\n/)) {
+            if (line.trim()) onLog(`[Factorio] ${line.trim()}`);
+          }
+        });
+        proc.stderr?.on('data', (d: Buffer) => {
+          for (const line of d.toString('utf8').split(/\r?\n/)) {
+            if (line.trim()) onLog(`[Factorio] ${line.trim()}`);
+          }
+        });
+        proc.on('error', reject);
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Factorio initial map creation failed with exit code ${code}`));
+        });
+      });
+    }
+
+    const portGame = instance.ports.game ?? 34197;
+    const portRcon = instance.ports.rcon ?? 27015;
+    const rconPass = String(instance.config.RCON_PASSWORD ?? '').trim();
+
+    const serverArgs = [
+      '--config',
+      configArg,
+      '--start-server-load-latest',
+      '--server-settings',
+      settingsArg,
+      '--port',
+      String(portGame),
+      '--rcon-port',
+      String(portRcon),
+    ];
+    if (rconPass) {
+      serverArgs.push('--rcon-password', rconPass);
+    }
+
+    onStatus?.('starting');
+    if (runViaWsl) {
+      return {
+        exe: 'wsl.exe',
+        args: ['-e', toWslPath(factorioExePath), ...serverArgs],
+      };
+    }
+    return {
+      exe: factorioExePath,
+      args: serverArgs,
+    };
+  }
+
   async start(
     instance: ServerInstance,
     template: GameTemplate,
@@ -1139,9 +1408,26 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
         customLaunch = await this.prepareCurseForgeServerPack(instance, serverDir, onLog, onStatus);
       } else if (nativeSpec.installer === 'java') {
         customLaunch = await this.prepareJavaMinecraftServer(instance, serverDir, onLog, onStatus);
+      } else if (template.id === 'factorio' || nativeSpec.installer === 'download') {
+        customLaunch = await this.prepareFactorioServer(instance, serverDir, onLog, onStatus);
       } else if (nativeSpec.installer === 'steamcmd' && nativeSpec.steamAppId) {
         onStatus?.('installing');
-        await this.ensureSteamCmdInstalled(nativeSpec.steamAppId, serverDir, nativeSpec.steamBeta, onLog);
+        const steamBeta =
+          template.id === 'satisfactory' && Boolean(instance.config.EXPERIMENTAL)
+            ? 'experimental'
+            : nativeSpec.steamBeta;
+        await this.ensureSteamCmdInstalled(nativeSpec.steamAppId, serverDir, steamBeta, onLog);
+
+        if (template.id === 'satisfactory') {
+          customLaunch = buildSatisfactoryNativeLaunchPlan(serverDir, instance);
+        } else if (template.id === 'palworld') {
+          writePalworldSettingsIni(serverDir, instance);
+          onLog('[Palworld] Synced PalWorldSettings.ini (Admin Password, RCON & REST API enabled).');
+          customLaunch = buildPalworldNativeLaunchPlan(serverDir, instance);
+        } else if (template.id === 'ark-survival-ascended') {
+          customLaunch = buildArkAsaNativeLaunchPlan(serverDir, instance);
+        }
+
         onStatus?.('starting');
       }
     }
@@ -1153,10 +1439,14 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     });
 
     const rawExe = isWin ? nativeSpec.executableWindows : (nativeSpec.executableLinux ?? nativeSpec.executableWindows);
-    const defaultExePath =
-      path.isAbsolute(rawExe) || (!rawExe.includes('/') && !rawExe.includes('\\'))
-        ? rawExe
-        : path.join(serverDir, rawExe);
+    const localRootExe = path.join(serverDir, rawExe);
+    const defaultExePath = path.isAbsolute(rawExe)
+      ? rawExe
+      : !rawExe.includes('/') && !rawExe.includes('\\')
+        ? fs.existsSync(localRootExe)
+          ? localRootExe
+          : rawExe
+        : localRootExe;
 
     const renderedArgs = renderTemplateString(nativeSpec.argsTemplate, vars);
     const exePath = customLaunch?.exe ?? defaultExePath;

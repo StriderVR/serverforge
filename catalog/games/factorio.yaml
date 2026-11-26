@@ -75,3 +75,18 @@ configFields:
     type: secret
     autoGenerate: true
     required: true
+  - key: FACTORIO_SOURCE
+    label: "Factorio Install Folder, ZIP Path, or URL (Optional)"
+    description: "Leave blank to auto-detect Steam/local Factorio on Windows (or auto-download the free official headless server on Linux/WSL)."
+    type: string
+    default: ""
+  - key: FACTORIO_USERNAME
+    label: "Factorio.com Username (Optional, Windows ZIP Auto-Download)"
+    description: "Optional — paired with your Factorio.com Token to auto-download the official Windows 64-bit ZIP without Steam."
+    type: string
+    default: ""
+  - key: FACTORIO_TOKEN
+    label: "Factorio.com Auth Token (Optional)"
+    description: "Found on https://factorio.com/profile (only needed if auto-downloading the Windows ZIP without Steam or WSL)."
+    type: secret
+    default: ""

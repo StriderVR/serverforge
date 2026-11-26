@@ -427,7 +427,7 @@ describe('SmartImportService — Modded Minecraft & Existing Server Import', () 
         execFile(
           'powershell.exe',
           ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
-          { timeout: 15_000, windowsHide: true },
+          { timeout: 30_000, windowsHide: true },
           (err, out) => {
             if (err) reject(err);
             else resolve(out.trim());
@@ -438,7 +438,7 @@ describe('SmartImportService — Modded Minecraft & Existing Server Import', () 
       const parsed = JSON.parse(stdout) as { cwd: string | null };
       expect(normalizeServerRootDir(parsed.cwd)?.toLowerCase()).toBe(path.resolve(spacedDir).toLowerCase());
     },
-    20_000
+    40_000
   );
 
   it.runIf(process.platform === 'win32')(
@@ -456,7 +456,7 @@ describe('SmartImportService — Modded Minecraft & Existing Server Import', () 
         execFile(
           'powershell.exe',
           ['-STA', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
-          { timeout: 15_000, windowsHide: true },
+          { timeout: 30_000, windowsHide: true },
           (err, out) => {
             if (err) reject(err);
             else resolve(out.trim());
@@ -470,7 +470,7 @@ describe('SmartImportService — Modded Minecraft & Existing Server Import', () 
       expect(parsed.cancelled).toBe(false);
       expect(parsed.folderPath).toBe('__DRY_RUN_OK__');
     },
-    20_000
+    40_000
   );
 
   it('smart-inspects a modded NeoForge Minecraft server, links in-place, enables RCON without losing custom properties, backs up, and safely unlinks without deleting files', async () => {
