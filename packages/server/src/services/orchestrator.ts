@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import archiver from 'archiver';
 import type {
+  BackupPolicy,
   BackupRecord,
+  CrashSummary,
   CreateInstanceInput,
   GameTemplate,
   ImportServerInput,
@@ -16,11 +18,14 @@ import type {
   StartInstanceInput,
   UpdateInstanceConfigInput,
 } from '@serverforge/shared';
+import { BackupPolicySchema } from '@serverforge/shared';
 import type { CatalogService } from '../catalog/catalog-service.js';
 import type { AppConfig } from '../config.js';
 import type { AppDatabase } from '../db/database.js';
 import { ConsoleLogBuffer } from '../runtimes/runtime-adapter.js';
 import type { RuntimeManager } from '../runtimes/runtime-manager.js';
+import { extractZipSafely } from './backup-scheduler.js';
+import type { DiagnosticsService } from './diagnostics-service.js';
 import { enableRconInServerProperties } from './import-service.js';
 import type { NetworkAddressService } from './network-service.js';
 import type { TelemetryService } from './telemetry-service.js';
@@ -32,10 +37,17 @@ export class GuardrailError extends Error {
   }
 }
 
+export interface WatchdogOptions {
+  windowMs?: number;
+  maxRestarts?: number;
+  baseBackoffMs?: number;
+}
+
 export interface OrchestratorEvents {
   'console:line': (payload: { instanceId: string; line: string; timestamp: string }) => void;
   'instance:update': (instance: ServerInstance) => void;
   'instance:deleted': (instanceId: string) => void;
+  'instance:crash': (payload: { instance: ServerInstance; crash: CrashSummary; channelId: string | null }) => void;
   'lease:warning': (payload: {
     lease: ServerLease;
     instance: ServerInstance;
@@ -45,9 +57,19 @@ export interface OrchestratorEvents {
   'lease:expired': (payload: { lease: ServerLease; instance: ServerInstance; reason: 'ttl' | 'idle' }) => void;
 }
 
+interface CrashTrackerState {
+  timestamps: number[];
+  timer?: NodeJS.Timeout;
+}
+
 export class ServerOrchestrator extends EventEmitter {
-  public readonly logs = new ConsoleLogBuffer(600);
+  public readonly logs: ConsoleLogBuffer;
   private readonly statsCache = new Map<string, InstanceRuntimeStats>();
+  private readonly intentionalStops = new Set<string>();
+  private readonly crashStates = new Map<string, CrashTrackerState>();
+  private watchdogWindowMs = 15 * 60_000;
+  private watchdogMaxRestarts = 3;
+  private watchdogBaseBackoffMs = 10_000;
 
   constructor(
     private readonly config: AppConfig,
@@ -55,9 +77,39 @@ export class ServerOrchestrator extends EventEmitter {
     private readonly catalog: CatalogService,
     private readonly runtimeManager: RuntimeManager,
     private readonly telemetry: TelemetryService,
-    private readonly network?: NetworkAddressService
+    private readonly network?: NetworkAddressService,
+    private readonly diagnostics?: DiagnosticsService,
+    watchdogOptions?: WatchdogOptions
   ) {
     super();
+    this.logs = new ConsoleLogBuffer(600, {
+      persistDir: path.join(config.logsDir, 'instances'),
+    });
+    if (watchdogOptions?.windowMs !== undefined) this.watchdogWindowMs = watchdogOptions.windowMs;
+    if (watchdogOptions?.maxRestarts !== undefined) this.watchdogMaxRestarts = watchdogOptions.maxRestarts;
+    if (watchdogOptions?.baseBackoffMs !== undefined) this.watchdogBaseBackoffMs = watchdogOptions.baseBackoffMs;
+  }
+
+  /** Allows tests to tune crash watchdog backoff & window timings deterministically. */
+  configureWatchdog(options: WatchdogOptions): void {
+    if (options.windowMs !== undefined) this.watchdogWindowMs = options.windowMs;
+    if (options.maxRestarts !== undefined) this.watchdogMaxRestarts = options.maxRestarts;
+    if (options.baseBackoffMs !== undefined) this.watchdogBaseBackoffMs = options.baseBackoffMs;
+  }
+
+  private cancelPendingCrashRestart(instanceId: string): void {
+    const state = this.crashStates.get(instanceId);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+  }
+
+  dispose(): void {
+    for (const [id] of this.crashStates) {
+      this.cancelPendingCrashRestart(id);
+    }
+    this.crashStates.clear();
   }
 
   private slugify(name: string): string {
@@ -219,11 +271,14 @@ export class ServerOrchestrator extends EventEmitter {
       config,
       memoryLimitMb,
       autoStart: input.autoStart ?? false,
+      autoRestartOnCrash: input.autoRestartOnCrash ?? true,
       discordEnabled: input.discordEnabled ?? true,
       containerId: null,
       externalDir: null,
       launchScript: null,
       lastError: null,
+      lastCrash: null,
+      backupPolicy: BackupPolicySchema.parse({}),
       createdAt: now,
       updatedAt: now,
       lastStartedAt: null,
@@ -298,11 +353,14 @@ export class ServerOrchestrator extends EventEmitter {
       config,
       memoryLimitMb,
       autoStart: input.autoStart ?? false,
+      autoRestartOnCrash: input.autoRestartOnCrash ?? true,
       discordEnabled: input.discordEnabled ?? true,
       containerId: null,
       externalDir,
       launchScript: input.launchScript?.trim() || null,
       lastError: null,
+      lastCrash: null,
+      backupPolicy: BackupPolicySchema.parse({}),
       createdAt: now,
       updatedAt: now,
       lastStartedAt: null,
@@ -347,14 +405,20 @@ export class ServerOrchestrator extends EventEmitter {
       nextRuntime = patch.runtime;
     }
 
+    const nextPolicy = patch.backupPolicy
+      ? BackupPolicySchema.parse({ ...(existing.backupPolicy ?? {}), ...patch.backupPolicy })
+      : existing.backupPolicy;
+
     const updated = this.db.updateInstance(id, {
       name: patch.name?.trim() || existing.name,
       runtime: nextRuntime,
       memoryLimitMb: patch.memoryLimitMb ?? existing.memoryLimitMb,
       autoStart: patch.autoStart ?? existing.autoStart,
+      autoRestartOnCrash: patch.autoRestartOnCrash ?? existing.autoRestartOnCrash,
       discordEnabled: patch.discordEnabled ?? existing.discordEnabled,
       launchScript: patch.launchScript !== undefined ? patch.launchScript : existing.launchScript,
       config: patch.config ? { ...existing.config, ...patch.config } : existing.config,
+      backupPolicy: nextPolicy,
       lastError: nextRuntime !== existing.runtime ? null : existing.lastError,
       status: nextRuntime !== existing.runtime && existing.status === 'error' ? 'stopped' : existing.status,
     });
@@ -376,6 +440,34 @@ export class ServerOrchestrator extends EventEmitter {
     return enriched;
   }
 
+  /**
+   * Updates an instance's backup schedule & retention policy without requiring a server stop.
+   */
+  updateBackupPolicy(id: string, patch: Partial<BackupPolicy>, actor = 'admin'): ServerInstance {
+    const existing = this.db.getInstanceById(id);
+    if (!existing) throw new Error('Server instance not found.');
+    const merged = BackupPolicySchema.parse({
+      ...(existing.backupPolicy ?? {}),
+      ...patch,
+    });
+    const updated = this.db.updateInstance(id, { backupPolicy: merged });
+    if (!updated) throw new Error('Failed to update backup policy.');
+
+    this.db.addAuditLog({
+      actor,
+      source: 'web',
+      action: 'instance.backup_policy',
+      instanceId: id,
+      details: merged.enabled
+        ? `Enabled auto-backups (${merged.scheduleMode === 'daily' ? `daily @ ${merged.dailyTime}` : `every ${merged.intervalHours}h`}, keep ${merged.maxCount}${merged.maxTotalGb > 0 ? ` / ${merged.maxTotalGb} GB` : ''})`
+        : `Updated backup retention policy (auto-backups disabled, keep ${merged.maxCount})`,
+    });
+
+    const enriched = this.enrichInstance(updated);
+    this.emit('instance:update', enriched);
+    return enriched;
+  }
+
   getInstanceDir(instanceId: string): string {
     return path.join(this.config.instancesDir, instanceId);
   }
@@ -385,7 +477,227 @@ export class ServerOrchestrator extends EventEmitter {
     this.emit('console:line', { instanceId, line: entry.line, timestamp: entry.timestamp });
   }
 
-  async startInstance(idOrSlug: string, input: StartInstanceInput = { temporary: false, source: 'web' }): Promise<ServerInstance> {
+  private handleUnexpectedExit(instanceId: string, exitCode: number | null): void {
+    if (this.intentionalStops.has(instanceId)) return;
+
+    const cur = this.db.getInstanceById(instanceId);
+    if (!cur || cur.status === 'stopping' || cur.status === 'stopped') return;
+
+    // Exit code 0 without intentional stop = clean in-game shutdown (e.g., admin ran /stop)
+    if (exitCode === 0) {
+      this.cancelPendingCrashRestart(instanceId);
+      this.db.deactivateLeasesForInstance(instanceId);
+      this.statsCache.delete(instanceId);
+      const stopped = this.db.updateInstance(instanceId, {
+        status: 'stopped',
+        lastError: null,
+      });
+      if (stopped) {
+        this.emit('instance:update', this.enrichInstance(stopped));
+      }
+      return;
+    }
+
+    const nowMs = Date.now();
+    const crashedAt = new Date(nowMs).toISOString();
+    const logTail = this.logs.getLines(instanceId).slice(-50).map((entry) => entry.line);
+    const detailLine = [...logTail]
+      .reverse()
+      .map((line) => line.trim())
+      .find(
+        (line) =>
+          line &&
+          !line.startsWith('[Native] Process exited') &&
+          !line.startsWith('[Mock] Process terminated') &&
+          !line.startsWith('[Watchdog]')
+      );
+
+    const exitLabel = exitCode !== null ? `code ${exitCode}` : 'unexpected signal';
+    const baseReason = detailLine
+      ? `Server crashed unexpectedly (${exitLabel}): ${detailLine.slice(0, 220)}`
+      : `Server crashed unexpectedly (${exitLabel})`;
+
+    // Capture any active lease so auto-recovery can restore it cleanly
+    const activeLease = this.db.getActiveLeaseForInstance(instanceId);
+    const leaseChannelId = activeLease?.channelId ?? null;
+    const leaseSnapshot = activeLease
+      ? {
+          remainingMinutes: Math.max(15, Math.ceil((new Date(activeLease.expiresAt).getTime() - nowMs) / 60_000)),
+          idleTimeoutMinutes: activeLease.idleTimeoutMinutes,
+          requestedBy: activeLease.requestedBy,
+          requestedById: activeLease.requestedById ?? undefined,
+          source: activeLease.source,
+          channelId: activeLease.channelId ?? undefined,
+        }
+      : null;
+
+    this.statsCache.delete(instanceId);
+
+    // Update rolling crash-loop window
+    let tracker = this.crashStates.get(instanceId);
+    if (!tracker) {
+      tracker = { timestamps: [] };
+      this.crashStates.set(instanceId, tracker);
+    }
+    this.cancelPendingCrashRestart(instanceId);
+    tracker.timestamps = tracker.timestamps.filter((ts) => nowMs - ts <= this.watchdogWindowMs);
+    tracker.timestamps.push(nowMs);
+    const attemptCount = tracker.timestamps.length;
+
+    const autoRestartEnabled = cur.autoRestartOnCrash !== false;
+    const withinBudget = autoRestartEnabled && attemptCount <= this.watchdogMaxRestarts;
+
+    if (withinBudget) {
+      const delayMs = this.watchdogBaseBackoffMs * Math.pow(2, attemptCount - 1);
+      const nextRestartAt = new Date(nowMs + delayMs).toISOString();
+      const crash: CrashSummary = {
+        crashedAt,
+        exitCode,
+        attemptCount,
+        maxAttempts: this.watchdogMaxRestarts,
+        nextRestartAt,
+        halted: false,
+        reason: baseReason,
+        logTail,
+      };
+
+      const updated = this.db.updateInstance(instanceId, {
+        status: 'error',
+        lastError: baseReason,
+        lastCrash: crash,
+      });
+
+      this.appendLog(
+        instanceId,
+        `[Watchdog] ${baseReason}. Scheduling automatic restart in ${Math.max(1, Math.round(delayMs / 1000))}s (attempt ${attemptCount}/${this.watchdogMaxRestarts})...`
+      );
+      this.diagnostics?.record({
+        level: 'error',
+        source: 'runtime',
+        instanceId,
+        message: `${cur.name}: ${baseReason} (auto-restart ${attemptCount}/${this.watchdogMaxRestarts})`,
+        details: logTail.slice(-10).join('\n'),
+      });
+      this.db.addAuditLog({
+        actor: 'Watchdog',
+        source: 'system',
+        action: 'instance.crash',
+        instanceId,
+        details: `${baseReason} — scheduling auto-restart ${attemptCount}/${this.watchdogMaxRestarts}`,
+      });
+
+      if (updated) {
+        const enriched = this.enrichInstance(updated);
+        this.emit('instance:update', enriched);
+        this.emit('instance:crash', { instance: enriched, crash, channelId: leaseChannelId });
+      }
+
+      tracker.timer = setTimeout(() => {
+        if (tracker) tracker.timer = undefined;
+        void this.executeWatchdogRestart(instanceId, leaseSnapshot, attemptCount);
+      }, delayMs);
+      tracker.timer.unref?.();
+    } else {
+      this.db.deactivateLeasesForInstance(instanceId);
+      const haltReason = !autoRestartEnabled
+        ? `${baseReason} (auto-restart disabled)`
+        : `${baseReason} — Crash-loop circuit breaker triggered (${attemptCount} crashes within ${Math.max(1, Math.round(this.watchdogWindowMs / 60_000))}m); auto-restart halted.`;
+
+      const crash: CrashSummary = {
+        crashedAt,
+        exitCode,
+        attemptCount,
+        maxAttempts: this.watchdogMaxRestarts,
+        nextRestartAt: null,
+        halted: true,
+        reason: haltReason,
+        logTail,
+      };
+
+      const updated = this.db.updateInstance(instanceId, {
+        status: 'error',
+        lastError: haltReason,
+        lastCrash: crash,
+      });
+
+      this.appendLog(instanceId, `[Watchdog] ${haltReason}`);
+      this.diagnostics?.record({
+        level: 'error',
+        source: 'runtime',
+        instanceId,
+        message: `${cur.name}: ${haltReason}`,
+        details: logTail.slice(-10).join('\n'),
+      });
+      this.db.addAuditLog({
+        actor: 'Watchdog',
+        source: 'system',
+        action: 'instance.crash_halted',
+        instanceId,
+        details: haltReason,
+      });
+
+      if (updated) {
+        const enriched = this.enrichInstance(updated);
+        this.emit('instance:update', enriched);
+        this.emit('instance:crash', { instance: enriched, crash, channelId: leaseChannelId });
+      }
+    }
+  }
+
+  private async executeWatchdogRestart(
+    instanceId: string,
+    leaseSnapshot: {
+      remainingMinutes: number;
+      idleTimeoutMinutes: number;
+      requestedBy: string;
+      requestedById?: string;
+      source: 'web' | 'discord';
+      channelId?: string;
+    } | null,
+    attemptCount: number
+  ): Promise<void> {
+    const cur = this.db.getInstanceById(instanceId);
+    if (!cur || cur.status !== 'error' || this.intentionalStops.has(instanceId)) {
+      return;
+    }
+
+    this.appendLog(
+      instanceId,
+      `[Watchdog] Executing automatic crash recovery restart (attempt ${attemptCount}/${this.watchdogMaxRestarts})...`
+    );
+
+    try {
+      await this.startInstance(
+        instanceId,
+        {
+          temporary: Boolean(leaseSnapshot),
+          durationMinutes: leaseSnapshot?.remainingMinutes,
+          idleTimeoutMinutes: leaseSnapshot?.idleTimeoutMinutes,
+          requestedBy: leaseSnapshot?.requestedBy ?? 'Watchdog',
+          requestedById: leaseSnapshot?.requestedById,
+          source: leaseSnapshot?.source ?? 'web',
+          channelId: leaseSnapshot?.channelId,
+        },
+        { isWatchdogRestart: true }
+      );
+      this.appendLog(instanceId, `[Watchdog] Automatic crash recovery succeeded (attempt ${attemptCount}).`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.appendLog(instanceId, `[Watchdog] Automatic restart attempt ${attemptCount} failed: ${msg}`);
+      this.diagnostics?.record({
+        level: 'error',
+        source: 'runtime',
+        instanceId,
+        message: `${cur.name}: Watchdog auto-restart failed — ${msg}`,
+      });
+    }
+  }
+
+  async startInstance(
+    idOrSlug: string,
+    input: StartInstanceInput = { temporary: false, source: 'web' },
+    internalOpts: { isWatchdogRestart?: boolean } = {}
+  ): Promise<ServerInstance> {
     const instance = this.db.getInstanceBySlugOrId(idOrSlug);
     if (!instance) {
       throw new Error(`Server instance "${idOrSlug}" not found.`);
@@ -418,12 +730,22 @@ export class ServerOrchestrator extends EventEmitter {
       );
     }
 
+    this.cancelPendingCrashRestart(instance.id);
+    this.intentionalStops.delete(instance.id);
+    if (!internalOpts.isWatchdogRestart) {
+      this.crashStates.delete(instance.id);
+    }
+
     const adapter = await this.runtimeManager.resolveAdapter(instance.runtime);
     const startingInst = this.db.updateInstance(instance.id, {
       status: 'starting',
       lastError: null,
+      ...(internalOpts.isWatchdogRestart ? {} : { lastCrash: null }),
     })!;
-    this.appendLog(instance.id, `[ServerForge] Preparing to start "${instance.name}" (${template.name} • ${instance.runtime})...`);
+    this.appendLog(
+      instance.id,
+      `[ServerForge] Preparing to start "${instance.name}" (${template.name} • ${instance.runtime})...`
+    );
     this.emit('instance:update', this.enrichInstance(startingInst));
 
     try {
@@ -433,29 +755,7 @@ export class ServerOrchestrator extends EventEmitter {
         this.getInstanceDir(instance.id),
         (line) => this.appendLog(instance.id, line),
         (exitCode) => {
-          const cur = this.db.getInstanceById(instance.id);
-          if (!cur || cur.status === 'stopping' || cur.status === 'stopped') return;
-          const nextStatus = exitCode === 0 ? 'stopped' : 'error';
-          let nextErr: string | null = null;
-          if (exitCode && exitCode !== 0) {
-            const recentLines = this.logs.getLines(instance.id).slice(-8);
-            const detailLine = [...recentLines]
-              .reverse()
-              .map((entry) => entry.line.trim())
-              .find((line) => line && !line.startsWith('[Native] Process exited'));
-            nextErr = detailLine
-              ? `Server exited unexpectedly with code ${exitCode}: ${detailLine.slice(0, 220)}`
-              : `Server exited unexpectedly with code ${exitCode}`;
-          }
-          this.db.deactivateLeasesForInstance(instance.id);
-          this.statsCache.delete(instance.id);
-          const crashed = this.db.updateInstance(instance.id, {
-            status: nextStatus,
-            lastError: nextErr,
-          });
-          if (crashed) {
-            this.emit('instance:update', this.enrichInstance(crashed));
-          }
+          this.handleUnexpectedExit(instance.id, exitCode);
         },
         (nextStatus) => {
           const cur = this.db.getInstanceById(instance.id);
@@ -468,11 +768,16 @@ export class ServerOrchestrator extends EventEmitter {
       );
 
       const nowIso = new Date().toISOString();
+      const recoveredCrash =
+        internalOpts.isWatchdogRestart && startingInst.lastCrash
+          ? { ...startingInst.lastCrash, nextRestartAt: null }
+          : null;
       const runningInst = this.db.updateInstance(instance.id, {
         status: 'running',
         containerId: startRes.externalId,
         lastStartedAt: nowIso,
         lastError: null,
+        lastCrash: recoveredCrash,
       })!;
 
       if (input.temporary) {
@@ -501,13 +806,19 @@ export class ServerOrchestrator extends EventEmitter {
       }
 
       this.db.addAuditLog({
-        actor: input.requestedBy || 'admin',
-        source: input.source ?? 'web',
-        action: input.temporary ? 'instance.start_temporary' : 'instance.start',
+        actor: internalOpts.isWatchdogRestart ? 'Watchdog' : input.requestedBy || 'admin',
+        source: internalOpts.isWatchdogRestart ? 'system' : input.source ?? 'web',
+        action: internalOpts.isWatchdogRestart
+          ? 'instance.auto_restart'
+          : input.temporary
+            ? 'instance.start_temporary'
+            : 'instance.start',
         instanceId: instance.id,
-        details: input.temporary
-          ? `Started ${instance.name} with temporary lease (${input.durationMinutes ?? settings.defaultLeaseMinutes}m)`
-          : `Started ${instance.name}`,
+        details: internalOpts.isWatchdogRestart
+          ? `Auto-restarted ${instance.name} after unexpected crash`
+          : input.temporary
+            ? `Started ${instance.name} with temporary lease (${input.durationMinutes ?? settings.defaultLeaseMinutes}m)`
+            : `Started ${instance.name}`,
       });
 
       const enriched = this.enrichInstance(runningInst);
@@ -516,6 +827,12 @@ export class ServerOrchestrator extends EventEmitter {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.appendLog(instance.id, `[Error] Failed to start: ${msg}`);
+      this.diagnostics?.record({
+        level: 'error',
+        source: 'orchestrator',
+        instanceId: instance.id,
+        message: `${instance.name}: Failed to start — ${msg}`,
+      });
       const errored = this.db.updateInstance(instance.id, {
         status: 'error',
         lastError: msg,
@@ -535,10 +852,15 @@ export class ServerOrchestrator extends EventEmitter {
     if (!instance) {
       throw new Error(`Server instance "${idOrSlug}" not found.`);
     }
+
+    this.cancelPendingCrashRestart(instance.id);
+    this.crashStates.delete(instance.id);
+
     if (instance.status === 'stopped') {
       return this.enrichInstance(instance);
     }
 
+    this.intentionalStops.add(instance.id);
     const template = this.catalog.getTemplate(instance.gameId);
     const stopping = this.db.updateInstance(instance.id, { status: 'stopping' })!;
     this.emit('instance:update', this.enrichInstance(stopping));
@@ -551,6 +873,14 @@ export class ServerOrchestrator extends EventEmitter {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.appendLog(instance.id, `[Warning] Stop encountered error: ${msg}`);
+      this.diagnostics?.record({
+        level: 'warn',
+        source: 'orchestrator',
+        instanceId: instance.id,
+        message: `${instance.name}: Stop encountered warning — ${msg}`,
+      });
+    } finally {
+      this.intentionalStops.delete(instance.id);
     }
 
     this.db.deactivateLeasesForInstance(instance.id);
@@ -559,6 +889,7 @@ export class ServerOrchestrator extends EventEmitter {
     const stopped = this.db.updateInstance(instance.id, {
       status: 'stopped',
       lastError: null,
+      lastCrash: null,
     })!;
 
     this.db.addAuditLog({
@@ -687,7 +1018,22 @@ export class ServerOrchestrator extends EventEmitter {
     }
   }
 
-  async createBackup(instanceId: string, note?: string, actor = 'admin'): Promise<BackupRecord> {
+  private getBackupFilePath(instanceId: string, filename: string): string {
+    const backupDir = path.resolve(this.config.backupsDir, instanceId);
+    const safeName = path.basename(filename);
+    const resolved = path.resolve(backupDir, safeName);
+    if (!resolved.startsWith(backupDir + path.sep)) {
+      throw new Error('Invalid backup filename.');
+    }
+    return resolved;
+  }
+
+  async createBackup(
+    instanceId: string,
+    note?: string,
+    actor = 'admin',
+    options: { source?: 'web' | 'system'; applyRetention?: boolean } = {}
+  ): Promise<BackupRecord> {
     const instance = this.db.getInstanceById(instanceId);
     if (!instance) throw new Error('Server instance not found.');
 
@@ -696,20 +1042,35 @@ export class ServerOrchestrator extends EventEmitter {
     fs.mkdirSync(backupDir, { recursive: true });
 
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `${instance.slug}-${stamp}.zip`;
-    const outPath = path.join(backupDir, filename);
+    let filename = `${instance.slug}-${stamp}.zip`;
+    let outPath = path.join(backupDir, filename);
+    if (fs.existsSync(outPath)) {
+      filename = `${instance.slug}-${stamp}-${crypto.randomBytes(3).toString('hex')}.zip`;
+      outPath = path.join(backupDir, filename);
+    }
 
-    await new Promise<void>((resolve, reject) => {
-      const output = fs.createWriteStream(outPath);
-      const archive = archiver('zip', { zlib: { level: 6 } });
-      output.on('close', () => resolve());
-      archive.on('error', (err) => reject(err));
-      archive.pipe(output);
-      if (fs.existsSync(sourceDir)) {
-        archive.directory(sourceDir, false);
-      }
-      void archive.finalize();
-    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const output = fs.createWriteStream(outPath);
+        const archive = archiver('zip', { zlib: { level: 6 } });
+        output.on('close', () => resolve());
+        output.on('error', (err) => reject(err));
+        archive.on('error', (err) => reject(err));
+        archive.pipe(output);
+        if (fs.existsSync(sourceDir)) {
+          archive.directory(sourceDir, false);
+        }
+        void archive.finalize();
+      });
+    } catch (err) {
+      this.diagnostics?.record({
+        level: 'error',
+        source: 'backup',
+        instanceId: instance.id,
+        message: `${instance.name}: Backup creation failed — ${err instanceof Error ? err.message : String(err)}`,
+      });
+      throw err;
+    }
 
     const stat = fs.statSync(outPath);
     const record: BackupRecord = {
@@ -724,17 +1085,195 @@ export class ServerOrchestrator extends EventEmitter {
     this.db.createBackupRecord(record);
     this.db.addAuditLog({
       actor,
-      source: 'web',
+      source: options.source ?? 'web',
       action: 'instance.backup',
       instanceId: instance.id,
       details: `Created backup ${filename} (${Math.round(stat.size / 1024)} KB)`,
     });
+    this.appendLog(instance.id, `[Backup] Created snapshot ${filename} (${Math.round(stat.size / 1024)} KB).`);
+
+    if (options.applyRetention) {
+      this.pruneBackups(instance.id, actor, options.source ?? 'system');
+    }
+
     return record;
+  }
+
+  getBackupDownload(instanceId: string, backupId: string): { record: BackupRecord; filePath: string } {
+    const instance = this.db.getInstanceById(instanceId);
+    if (!instance) throw new Error('Server instance not found.');
+    const record = this.db.getBackupById(backupId);
+    if (!record || record.instanceId !== instance.id) {
+      throw new Error('Backup not found for this server.');
+    }
+    const filePath = this.getBackupFilePath(instance.id, record.filename);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Backup archive file "${record.filename}" is missing on disk.`);
+    }
+    return { record, filePath };
+  }
+
+  deleteBackup(
+    instanceId: string,
+    backupId: string,
+    actor = 'admin',
+    source: 'web' | 'system' = 'web'
+  ): BackupRecord {
+    const instance = this.db.getInstanceById(instanceId);
+    if (!instance) throw new Error('Server instance not found.');
+    const record = this.db.getBackupById(backupId);
+    if (!record || record.instanceId !== instance.id) {
+      throw new Error('Backup not found for this server.');
+    }
+
+    const filePath = this.getBackupFilePath(instance.id, record.filename);
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.rmSync(filePath, { force: true, maxRetries: 3, retryDelay: 150 });
+      } catch (err) {
+        console.warn(`[Orchestrator] Warning removing backup file ${filePath}:`, err);
+      }
+    }
+
+    this.db.deleteBackupRecord(record.id);
+    this.db.addAuditLog({
+      actor,
+      source,
+      action: 'instance.backup_delete',
+      instanceId: instance.id,
+      details: `Deleted backup ${record.filename}`,
+    });
+    return record;
+  }
+
+  /**
+   * Prunes oldest backups exceeding maxCount or maxTotalGb in the instance's backupPolicy.
+   * Always retains at least the newest backup.
+   */
+  pruneBackups(
+    instanceId: string,
+    actor = 'Scheduler',
+    source: 'web' | 'system' = 'system',
+    overrideLimits?: { maxCount?: number; maxTotalBytes?: number }
+  ): BackupRecord[] {
+    const instance = this.db.getInstanceById(instanceId);
+    if (!instance) return [];
+
+    const policy = BackupPolicySchema.parse(instance.backupPolicy ?? {});
+    const maxCount = Math.max(1, overrideLimits?.maxCount ?? policy.maxCount);
+    const maxTotalBytes =
+      overrideLimits?.maxTotalBytes !== undefined
+        ? overrideLimits.maxTotalBytes
+        : policy.maxTotalGb > 0
+          ? Math.floor(policy.maxTotalGb * 1024 * 1024 * 1024)
+          : 0;
+
+    // listBackups returns newest-first
+    const backups = this.db.listBackups(instance.id);
+    const deleted: BackupRecord[] = [];
+    let keptBytes = 0;
+
+    for (let i = 0; i < backups.length; i++) {
+      const b = backups[i];
+      const alwaysKeepNewest = i === 0;
+      const exceedsCount = i >= maxCount;
+      const exceedsSize = maxTotalBytes > 0 && keptBytes + b.sizeBytes > maxTotalBytes;
+
+      if (!alwaysKeepNewest && (exceedsCount || exceedsSize)) {
+        try {
+          this.deleteBackup(instance.id, b.id, actor, source);
+          deleted.push(b);
+        } catch {
+          // ignore if already removed
+        }
+      } else {
+        keptBytes += b.sizeBytes;
+      }
+    }
+
+    if (deleted.length > 0) {
+      this.appendLog(instance.id, `[Backup] Retention policy pruned ${deleted.length} older backup(s).`);
+    }
+    return deleted;
+  }
+
+  async restoreBackup(
+    instanceId: string,
+    backupId: string,
+    actor = 'admin'
+  ): Promise<{ restoredBackup: BackupRecord; safetyBackup: BackupRecord; extractedFiles: number }> {
+    const instance = this.db.getInstanceById(instanceId);
+    if (!instance) throw new Error('Server instance not found.');
+    const { record: targetBackup, filePath } = this.getBackupDownload(instance.id, backupId);
+
+    // Gracefully stop the server first so files aren't locked or half-written
+    if (instance.status !== 'stopped' && instance.status !== 'error') {
+      this.appendLog(instance.id, `[Backup] Stopping server before restoring ${targetBackup.filename}...`);
+      await this.stopInstance(instance.id, actor, 'web', `Pre-restore stop for ${targetBackup.filename}`);
+    }
+
+    // Create automatic pre-restore safety snapshot before touching existing world data
+    const safetyBackup = await this.createBackup(
+      instance.id,
+      `Auto safety backup before restoring ${targetBackup.filename}`,
+      actor,
+      { source: 'system', applyRetention: false }
+    );
+
+    const targetDir = instance.externalDir ? path.resolve(instance.externalDir) : this.getInstanceDir(instance.id);
+    const stagingDir = path.join(this.config.backupsDir, `.restore-stage-${instance.id}-${Date.now()}`);
+
+    try {
+      fs.mkdirSync(stagingDir, { recursive: true });
+      const extractedFiles = extractZipSafely(filePath, stagingDir);
+
+      fs.mkdirSync(targetDir, { recursive: true });
+      // Clear current files in targetDir cleanly before copying restored files
+      for (const entry of fs.readdirSync(targetDir)) {
+        fs.rmSync(path.join(targetDir, entry), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      }
+      for (const entry of fs.readdirSync(stagingDir)) {
+        fs.cpSync(path.join(stagingDir, entry), path.join(targetDir, entry), { recursive: true, force: true });
+      }
+
+      this.db.addAuditLog({
+        actor,
+        source: 'web',
+        action: 'instance.backup_restore',
+        instanceId: instance.id,
+        details: `Restored backup ${targetBackup.filename} (${extractedFiles} file(s); safety snapshot: ${safetyBackup.filename})`,
+      });
+      this.appendLog(
+        instance.id,
+        `[Backup] Restored ${targetBackup.filename} (${extractedFiles} file(s)). Safety snapshot saved as ${safetyBackup.filename}.`
+      );
+      return { restoredBackup: targetBackup, safetyBackup, extractedFiles };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.diagnostics?.record({
+        level: 'error',
+        source: 'backup',
+        instanceId: instance.id,
+        message: `${instance.name}: Restore failed for ${targetBackup.filename} — ${msg}`,
+      });
+      throw err;
+    } finally {
+      try {
+        if (fs.existsSync(stagingDir)) {
+          fs.rmSync(stagingDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 150 });
+        }
+      } catch {
+        // ignore temp cleanup warning
+      }
+    }
   }
 
   async deleteInstance(instanceId: string, actor = 'admin'): Promise<void> {
     const instance = this.db.getInstanceById(instanceId);
     if (!instance) throw new Error('Server instance not found.');
+
+    this.cancelPendingCrashRestart(instance.id);
+    this.crashStates.delete(instance.id);
 
     if (instance.status !== 'stopped') {
       await this.stopInstance(instance.id, actor, 'web', 'Instance deleted');

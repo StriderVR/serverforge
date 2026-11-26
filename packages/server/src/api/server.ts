@@ -6,11 +6,13 @@ import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import {
+  BackupPolicySchema,
   CreateInstanceInputSchema,
   ImportServerInputSchema,
   StartInstanceInputSchema,
   SystemSettingsSchema,
   UpdateInstanceConfigInputSchema,
+  type DiagnosticLevel,
   type WsServerEvent,
 } from '@serverforge/shared';
 interface WsClient {
@@ -26,7 +28,9 @@ import { DiscordBotService } from '../discord/bot.js';
 import { EMBEDDED_WEB_ASSETS } from '../embedded-assets.js';
 import { QueryService } from '../query/query-service.js';
 import { RuntimeManager } from '../runtimes/runtime-manager.js';
+import { BackupSchedulerService } from '../services/backup-scheduler.js';
 import { CurseForgeService, normalizeCurseForgeApiKey } from '../services/curseforge-service.js';
+import { DiagnosticsService } from '../services/diagnostics-service.js';
 import { SmartImportService } from '../services/import-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
 import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
@@ -36,6 +40,15 @@ import { TelemetryService } from '../services/telemetry-service.js';
 import { UpdaterService } from '../services/updater-service.js';
 
 const AUTH_COOKIE = 'sf_token';
+
+function formatZodIssues(prefix: string, issues: Array<{ path: (string | number)[]; message: string }>): string {
+  if (!issues || issues.length === 0) return prefix;
+  const detail = issues
+    .slice(0, 4)
+    .map((issue) => (issue.path.length > 0 ? `${issue.path.join('.')}: ${issue.message}` : issue.message))
+    .join('; ');
+  return `${prefix}: ${detail}`;
+}
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -59,7 +72,9 @@ export interface ServerForgeApp {
   runtimeManager: RuntimeManager;
   telemetry: TelemetryService;
   network: NetworkAddressService;
+  diagnostics: DiagnosticsService;
   orchestrator: ServerOrchestrator;
+  backupScheduler: BackupSchedulerService;
   leaseReaper: LeaseReaper;
   discord: DiscordBotService;
   curseforge: CurseForgeService;
@@ -101,7 +116,10 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     detectDuckDnsDomainsImpl,
     detectLanIpImpl,
   });
-  const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry, network);
+  const diagnostics = new DiagnosticsService(config, db, telemetry);
+  const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry, network, diagnostics);
+  diagnostics.attachOrchestrator(orchestrator);
+  const backupScheduler = new BackupSchedulerService(db, orchestrator);
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
   const discord = new DiscordBotService(config, db, catalog, orchestrator);
   const smartImport = new SmartImportService();
@@ -124,6 +142,51 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     } catch (err) {
       done(err instanceof Error ? err : new Error('Invalid JSON payload'), undefined);
     }
+  });
+
+  // Capture unhandled Fastify errors and 4xx/5xx API responses into DiagnosticsService
+  app.addHook('onError', async (req, reply, err) => {
+    if (!req.url.startsWith('/api/')) return;
+    diagnostics.record({
+      level: 'error',
+      source: 'api',
+      statusCode: reply.statusCode >= 400 ? reply.statusCode : 500,
+      method: req.method,
+      path: req.url,
+      message: err.message || 'Unhandled API error',
+      details: err.stack?.split('\n').slice(0, 6).join('\n') ?? null,
+    });
+  });
+
+  app.addHook('onSend', async (req, reply, payload) => {
+    if (req.url.startsWith('/api/') && reply.statusCode >= 400) {
+      // Skip expected unauthenticated probes
+      if (reply.statusCode === 401 && (req.url === '/api/auth/me' || req.url.startsWith('/api/instances'))) {
+        return payload;
+      }
+      let message = `HTTP ${reply.statusCode}`;
+      if (typeof payload === 'string') {
+        try {
+          const parsed = JSON.parse(payload) as { error?: string; message?: string };
+          if (parsed.error || parsed.message) {
+            message = parsed.error || parsed.message || message;
+          }
+        } catch {
+          if (payload.trim()) message = payload.trim().slice(0, 220);
+        }
+      }
+      const instanceMatch = req.url.match(/^\/api\/instances\/([^/?]+)/);
+      diagnostics.record({
+        level: reply.statusCode >= 500 ? 'error' : 'warn',
+        source: 'api',
+        statusCode: reply.statusCode,
+        method: req.method,
+        path: req.url,
+        instanceId: instanceMatch?.[1] ?? null,
+        message,
+      });
+    }
+    return payload;
   });
 
   await app.register(cors, {
@@ -236,7 +299,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   app.put('/api/settings', { preHandler: requireAuth }, async (req, reply) => {
     const parsed = SystemSettingsSchema.partial().safeParse(req.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: 'Invalid settings payload', issues: parsed.error.issues });
+      return reply.status(400).send({ error: formatZodIssues('Invalid settings payload', parsed.error.issues), issues: parsed.error.issues });
     }
     const patch = { ...parsed.data };
     if (typeof patch.curseforgeApiKey === 'string') {
@@ -382,7 +445,9 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   app.post('/api/instances', { preHandler: requireAuth }, async (req, reply) => {
     const parsed = CreateInstanceInputSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: 'Invalid instance configuration', issues: parsed.error.issues });
+      return reply
+        .status(400)
+        .send({ error: formatZodIssues('Invalid instance configuration', parsed.error.issues), issues: parsed.error.issues });
     }
 
     try {
@@ -405,7 +470,9 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const { id } = req.params as { id: string };
     const parsed = UpdateInstanceConfigInputSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: 'Invalid config update', issues: parsed.error.issues });
+      return reply
+        .status(400)
+        .send({ error: formatZodIssues('Invalid config update', parsed.error.issues), issues: parsed.error.issues });
     }
     try {
       const updated = orchestrator.updateInstanceConfig(id, parsed.data, req.authUser?.username || 'admin');
@@ -419,7 +486,9 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const { id } = req.params as { id: string };
     const parsed = StartInstanceInputSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      return reply.status(400).send({ error: 'Invalid start options', issues: parsed.error.issues });
+      return reply
+        .status(400)
+        .send({ error: formatZodIssues('Invalid start options', parsed.error.issues), issues: parsed.error.issues });
     }
     try {
       const started = await orchestrator.startInstance(id, {
@@ -490,15 +559,127 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
   });
 
+  app.get('/api/instances/:id/backups', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    return {
+      backups: db.listBackups(inst.id),
+      policy: inst.backupPolicy ?? BackupPolicySchema.parse({}),
+    };
+  });
+
   app.post('/api/instances/:id/backups', { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const body = req.body as { note?: string } | undefined;
+    const body = req.body as { note?: string; applyRetention?: boolean } | undefined;
     try {
-      const backup = await orchestrator.createBackup(id, body?.note, req.authUser?.username || 'admin');
+      const inst = orchestrator.getInstance(id);
+      const applyRetention = body?.applyRetention ?? Boolean(inst?.backupPolicy?.enabled);
+      const backup = await orchestrator.createBackup(id, body?.note, req.authUser?.username || 'admin', {
+        source: 'web',
+        applyRetention,
+      });
       return reply.status(201).send(backup);
     } catch (err) {
       return reply.status(400).send({ error: err instanceof Error ? err.message : 'Backup failed' });
     }
+  });
+
+  app.put('/api/instances/:id/backups/policy', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = BackupPolicySchema.partial().safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .status(400)
+        .send({ error: formatZodIssues('Invalid backup policy', parsed.error.issues), issues: parsed.error.issues });
+    }
+    try {
+      const updated = orchestrator.updateBackupPolicy(id, parsed.data, req.authUser?.username || 'admin');
+      return {
+        policy: updated.backupPolicy,
+        instance: withJoinInfo(updated),
+      };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Failed to update backup policy' });
+    }
+  });
+
+  app.get('/api/instances/:id/backups/:backupId/download', { preHandler: requireAuth }, async (req, reply) => {
+    const { id, backupId } = req.params as { id: string; backupId: string };
+    try {
+      const { record, filePath } = orchestrator.getBackupDownload(id, backupId);
+      const safeName = record.filename.replace(/["\r\n]/g, '');
+      reply.header('Content-Type', 'application/zip');
+      reply.header('Content-Disposition', `attachment; filename="${safeName}"`);
+      reply.header('Content-Length', String(fs.statSync(filePath).size));
+      return reply.send(fs.createReadStream(filePath));
+    } catch (err) {
+      return reply.status(404).send({ error: err instanceof Error ? err.message : 'Backup not found' });
+    }
+  });
+
+  app.post('/api/instances/:id/backups/:backupId/restore', { preHandler: requireAuth }, async (req, reply) => {
+    const { id, backupId } = req.params as { id: string; backupId: string };
+    try {
+      const result = await orchestrator.restoreBackup(id, backupId, req.authUser?.username || 'admin');
+      return { ok: true, ...result };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Restore failed' });
+    }
+  });
+
+  app.delete('/api/instances/:id/backups/:backupId', { preHandler: requireAuth }, async (req, reply) => {
+    const { id, backupId } = req.params as { id: string; backupId: string };
+    try {
+      const deleted = orchestrator.deleteBackup(id, backupId, req.authUser?.username || 'admin', 'web');
+      return { ok: true, deleted };
+    } catch (err) {
+      return reply.status(404).send({ error: err instanceof Error ? err.message : 'Backup not found' });
+    }
+  });
+
+  // --- Diagnostics & Console Log Download Routes ---
+
+  app.get('/api/instances/:id/logs/download', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const text = orchestrator.logs.getFormattedText(inst.id);
+    const safeSlug = inst.slug.replace(/[^a-zA-Z0-9._-]/g, '-');
+    reply.header('Content-Type', 'text/plain; charset=utf-8');
+    reply.header('Content-Disposition', `attachment; filename="${safeSlug}-console.log"`);
+    return reply.send(text || '(No console output recorded yet)\n');
+  });
+
+  app.get('/api/instances/:id/debug-report', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    return diagnostics.buildInstanceDebugReport(inst);
+  });
+
+  app.get('/api/diagnostics/logs', { preHandler: requireAuth }, async (req) => {
+    const q = req.query as { level?: string; limit?: string };
+    const level =
+      q.level === 'error' || q.level === 'warn' || q.level === 'info' ? (q.level as DiagnosticLevel) : undefined;
+    const limit = q.limit ? Number(q.limit) : 100;
+    return diagnostics.listLogs({ level, limit: Number.isFinite(limit) ? limit : 100 });
+  });
+
+  app.delete('/api/diagnostics/logs', { preHandler: requireAuth }, async (req) => {
+    diagnostics.clearLogs();
+    db.addAuditLog({
+      actor: req.authUser?.username || 'admin',
+      source: 'web',
+      action: 'diagnostics.clear',
+      instanceId: null,
+      details: 'Cleared backend diagnostic logs',
+    });
+    return { ok: true };
+  });
+
+  app.get('/api/diagnostics/report', { preHandler: requireAuth }, async () => {
+    return diagnostics.buildSystemReport();
   });
 
   app.delete('/api/instances/:id', { preHandler: requireAuth }, async (req, reply) => {
@@ -766,6 +947,14 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   orchestrator.on('instance:deleted', (instanceId) => {
     broadcast({ type: 'instance:deleted', instanceId });
   });
+  orchestrator.on('instance:crash', ({ instance, crash }) => {
+    broadcast({
+      type: 'instance:crash',
+      instanceId: instance.id,
+      instanceName: instance.name,
+      crash,
+    });
+  });
   orchestrator.on('lease:warning', ({ lease, instance, reason, minutesRemaining }) => {
     broadcast({
       type: 'lease:warning',
@@ -852,8 +1041,10 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   const close = async () => {
     clearInterval(metricsTimer);
     network.stop();
+    backupScheduler.stop();
     leaseReaper.stop();
     maintenance.stop();
+    orchestrator.dispose();
     await discord.stop();
     for (const sock of wsClients) {
       sock.close();
@@ -874,7 +1065,9 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     runtimeManager,
     telemetry,
     network,
+    diagnostics,
     orchestrator,
+    backupScheduler,
     leaseReaper,
     discord,
     curseforge,
