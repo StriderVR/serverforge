@@ -164,7 +164,15 @@ describe('Native SteamCMD & Factorio Auto-Provisioning (Issues #38, #39, #40, #4
     const plan = buildSatisfactoryNativeLaunchPlan(serverDir, inst, 'win32');
     expect(plan).not.toBeNull();
     expect(plan!.exe).toBe(directExe);
-    expect(plan!.args).toEqual(['FactoryGame', '-Port=7780', '-log', '-unattended']);
+    expect(plan!.args).toEqual(['FactoryGame', '-Port=7780', '-ReliablePort=8888', '-multihome=0.0.0.0', '-log', '-unattended']);
+
+    const customInst = makeInstance({
+      gameId: 'satisfactory',
+      ports: { game: 27777, reliable: 25577 },
+    });
+    const customPlan = buildSatisfactoryNativeLaunchPlan(serverDir, customInst, 'win32');
+    expect(customPlan).not.toBeNull();
+    expect(customPlan!.args).toEqual(['FactoryGame', '-Port=27777', '-ReliablePort=25577', '-multihome=0.0.0.0', '-log', '-unattended']);
   });
 
   it('writes PalWorldSettings.ini preserving custom gameplay rates and launches PalServer-Win64-Shipping-Cmd.exe (Issue #40)', () => {

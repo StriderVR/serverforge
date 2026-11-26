@@ -14,6 +14,17 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.3.4',
+    title: 'Satisfactory 1.1+ Remote Connectivity Fix',
+    summary: 'Adds Satisfactory 1.1+ Reliable Messaging port configuration and explicit IPv4 interface binding so remote friends can connect reliably.',
+    added: [
+      'Configurable Reliable Messaging TCP port (default 8888) for Satisfactory 1.1+ servers, supporting custom alternate ports when routers block default ports.',
+    ],
+    changed: [
+      'Satisfactory native servers now launch with -ReliablePort and -multihome=0.0.0.0 for reliable remote connections on Windows and Linux.',
+    ],
+  },
+  {
     version: '1.3.3',
     title: "What's New Splash Screen",
     summary: 'See a quick, plain-English overview of changes every time ServerForge updates.',
