@@ -15,6 +15,10 @@ ports:
     defaultPort: 7777
     protocol: both
     primary: true
+  - key: reliable
+    label: "Reliable Messaging Port (1.1+)"
+    defaultPort: 8888
+    protocol: tcp
 runtimes:
   preferred: native
   docker:
@@ -35,7 +39,7 @@ runtimes:
     steamAppId: 1690800
     executableWindows: "FactoryServer.exe"
     executableLinux: "FactoryServer.sh"
-    argsTemplate: "-Port={{PORT_GAME}} -unattended"
+    argsTemplate: "-Port={{PORT_GAME}} -ReliablePort={{PORT_RELIABLE}} -multihome=0.0.0.0 -unattended"
     saveSubdir: "FactoryGame/Saved"
     envTemplate: {}
 query:

@@ -297,20 +297,21 @@ export function buildSatisfactoryNativeLaunchPlan(
   platform: NodeJS.Platform = process.platform
 ): SteamNativeLaunchPlan | null {
   const portGame = instance.ports.game ?? 7777;
+  const portReliable = instance.ports.reliable ?? 8888;
 
   if (platform === 'win32') {
     const directExe = path.join(serverDir, 'Engine', 'Binaries', 'Win64', 'FactoryServer-Win64-Shipping-Cmd.exe');
     if (fs.existsSync(directExe)) {
       return {
         exe: directExe,
-        args: ['FactoryGame', `-Port=${portGame}`, '-log', '-unattended'],
+        args: ['FactoryGame', `-Port=${portGame}`, `-ReliablePort=${portReliable}`, '-multihome=0.0.0.0', '-log', '-unattended'],
       };
     }
     const wrapperExe = path.join(serverDir, 'FactoryServer.exe');
     if (fs.existsSync(wrapperExe)) {
       return {
         exe: wrapperExe,
-        args: [`-Port=${portGame}`, '-log', '-unattended'],
+        args: [`-Port=${portGame}`, `-ReliablePort=${portReliable}`, '-multihome=0.0.0.0', '-log', '-unattended'],
       };
     }
     return null;
@@ -325,7 +326,7 @@ export function buildSatisfactoryNativeLaunchPlan(
     }
     return {
       exe: shPath,
-      args: [`-Port=${portGame}`, '-unattended'],
+      args: [`-Port=${portGame}`, `-ReliablePort=${portReliable}`, '-multihome=0.0.0.0', '-unattended'],
     };
   }
   return null;
