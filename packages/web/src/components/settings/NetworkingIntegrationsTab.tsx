@@ -1,0 +1,327 @@
+import React, { useState } from 'react';
+import { CheckCircle2, Eye, EyeOff, Globe, Package, RefreshCw } from 'lucide-react';
+import type { NetworkStatus, PublicHostMode, SystemSettings } from '@serverforge/shared';
+import { api, formatHostSourceLabel } from '../../api';
+import type { PushToastFn } from '../ToastStack';
+
+interface NetworkingIntegrationsTabProps {
+  settings: SystemSettings;
+  networkStatus: NetworkStatus | null;
+  onChange: (patch: Partial<SystemSettings>) => void;
+  onNetworkUpdated: (status: NetworkStatus) => void;
+  onSyncSavedSetting: (patch: Partial<SystemSettings>) => void;
+  onToast: PushToastFn;
+}
+
+export function NetworkingIntegrationsTab({
+  settings,
+  networkStatus,
+  onChange,
+  onNetworkUpdated,
+  onSyncSavedSetting,
+  onToast,
+}: NetworkingIntegrationsTabProps) {
+  const [detectingNetwork, setDetectingNetwork] = useState(false);
+  const [showDuckToken, setShowDuckToken] = useState(false);
+  const [updatingDuckDns, setUpdatingDuckDns] = useState(false);
+  const [duckResult, setDuckResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const [showCfKey, setShowCfKey] = useState(false);
+  const [testingCfKey, setTestingCfKey] = useState(false);
+  const [cfTestResult, setCfTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const handleDetectNetwork = async () => {
+    setDetectingNetwork(true);
+    setDuckResult(null);
+    try {
+      const detected = await api.detectNetwork();
+      onNetworkUpdated(detected);
+      onToast('success', `Detected active host: ${detected.effectiveHost}`);
+    } catch (err) {
+      onToast('error', err instanceof Error ? err.message : 'Network detection failed');
+    } finally {
+      setDetectingNetwork(false);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <section className="panel">
+        <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Globe size={16} /> Public Join Address &amp; DuckDNS
+          </h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {networkStatus && (
+              <span className="badge badge-running">
+                <span className="badge-dot" />
+                {formatHostSourceLabel(networkStatus.effectiveHostSource)}: {networkStatus.effectiveHost}
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={detectingNetwork}
+              onClick={() => void handleDetectNetwork()}
+            >
+              <RefreshCw size={12} className={detectingNetwork ? 'spin' : ''} />{' '}
+              {detectingNetwork ? 'Detecting...' : 'Re-detect Now'}
+            </button>
+          </div>
+        </div>
+        <div className="panel-body">
+          {networkStatus && (
+            <div className="settings-summary-strip">
+              <div>
+                <span className="settings-summary-label">Public IP</span>
+                <span className="mono">{networkStatus.publicIp ?? 'Not detected'}</span>
+              </div>
+              <div>
+                <span className="settings-summary-label">Local LAN IP</span>
+                <span className="mono">{networkStatus.lanIp ?? 'Not detected'}</span>
+              </div>
+              {networkStatus.detectedDuckDnsDomains.length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span className="settings-summary-label">Detected DuckDNS:</span>
+                  {networkStatus.detectedDuckDnsDomains.map((dom) => (
+                    <button
+                      key={dom}
+                      type="button"
+                      className="btn btn-sm"
+                      style={{ padding: '2px 8px', fontSize: 11.5 }}
+                      onClick={() =>
+                        onChange({
+                          publicHostMode: 'duckdns',
+                          duckdnsDomain: dom,
+                        })
+                      }
+                    >
+                      Use {dom}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="form-grid">
+            <div className="field">
+              <label htmlFor="set-public-host-mode">Public Address Mode</label>
+              <select
+                id="set-public-host-mode"
+                className="select"
+                value={settings.publicHostMode}
+                onChange={(e) =>
+                  onChange({
+                    publicHostMode: e.target.value as PublicHostMode,
+                  })
+                }
+              >
+                <option value="auto">Automatic (DuckDNS -&gt; Public IP)</option>
+                <option value="duckdns">DuckDNS Domain</option>
+                <option value="manual">Custom Hostname / Tailscale / IP</option>
+              </select>
+            </div>
+
+            <div className="field">
+              <label htmlFor="set-duckdns-domain">DuckDNS Domain (optional)</label>
+              <input
+                id="set-duckdns-domain"
+                className="input mono"
+                value={settings.duckdnsDomain}
+                onChange={(e) => {
+                  setDuckResult(null);
+                  onChange({ duckdnsDomain: e.target.value });
+                }}
+                placeholder="e.g., myserver.duckdns.org"
+              />
+            </div>
+
+            <div className="field full">
+              <label htmlFor="set-duckdns-token">DuckDNS Account Token (optional — for built-in DDNS updates)</label>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <input
+                  id="set-duckdns-token"
+                  type={showDuckToken ? 'text' : 'password'}
+                  className="input mono"
+                  style={{ flex: 1, minWidth: 220 }}
+                  value={settings.duckdnsToken}
+                  onChange={(e) => {
+                    setDuckResult(null);
+                    onChange({ duckdnsToken: e.target.value });
+                  }}
+                  placeholder="Paste your DuckDNS token from duckdns.org"
+                />
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  title={showDuckToken ? 'Hide token' : 'Show token'}
+                  onClick={() => setShowDuckToken((v) => !v)}
+                >
+                  {showDuckToken ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  disabled={updatingDuckDns}
+                  onClick={async () => {
+                    setUpdatingDuckDns(true);
+                    setDuckResult(null);
+                    try {
+                      const res = await api.updateDuckDns({
+                        domain: settings.duckdnsDomain,
+                        token: settings.duckdnsToken,
+                        saveOnSuccess: true,
+                        autoUpdate: settings.duckdnsAutoUpdate,
+                      });
+                      setDuckResult({ ok: res.ok, message: res.message });
+                      onNetworkUpdated(res.status);
+                      if (res.ok && res.saved) {
+                        onSyncSavedSetting({
+                          duckdnsDomain: res.domain,
+                          publicHostMode: 'duckdns',
+                          duckdnsToken: settings.duckdnsToken,
+                          duckdnsAutoUpdate: settings.duckdnsAutoUpdate,
+                        });
+                        onToast('success', `DuckDNS verified & saved (${res.domain}).`);
+                      }
+                    } catch (err) {
+                      setDuckResult({
+                        ok: false,
+                        message: err instanceof Error ? err.message : 'DuckDNS update failed',
+                      });
+                    } finally {
+                      setUpdatingDuckDns(false);
+                    }
+                  }}
+                >
+                  <CheckCircle2 size={14} /> {updatingDuckDns ? 'Updating...' : 'Update & Save DuckDNS'}
+                </button>
+              </div>
+              <label className="checkbox-row" style={{ paddingTop: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={settings.duckdnsAutoUpdate}
+                  onChange={(e) => onChange({ duckdnsAutoUpdate: e.target.checked })}
+                />
+                <span>Keep DuckDNS IP updated automatically from ServerForge (every 15m)</span>
+              </label>
+              {duckResult && (
+                <div
+                  className={`alert ${duckResult.ok ? 'alert-success' : 'alert-error'}`}
+                  style={{ marginTop: 8, marginBottom: 0 }}
+                >
+                  {duckResult.message}
+                </div>
+              )}
+            </div>
+
+            {settings.publicHostMode !== 'duckdns' && (
+              <div className="field full">
+                <label htmlFor="set-public-host">Custom / Tailscale Hostname or IP</label>
+                <input
+                  id="set-public-host"
+                  className="input mono"
+                  value={settings.publicHost}
+                  onChange={(e) => onChange({ publicHost: e.target.value })}
+                  placeholder="e.g., 100.64.0.12 or games.yourdomain.com (leave localhost for auto)"
+                />
+                <span className="field-hint">
+                  Displayed in copyable join addresses and Discord embeds when friends boot a server.
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Package size={16} /> CurseForge Integration (Modded Minecraft)
+          </h2>
+          <span className={`badge ${settings.curseforgeApiKey.trim() ? 'badge-running' : 'badge-stopped'}`}>
+            <span className="badge-dot" />
+            {settings.curseforgeApiKey.trim() ? 'KEY CONFIGURED' : 'NOT SET'}
+          </span>
+        </div>
+        <div className="panel-body">
+          <div className="field">
+            <label htmlFor="set-cf-key">CurseForge Core API Key</label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <input
+                id="set-cf-key"
+                type={showCfKey ? 'text' : 'password'}
+                className="input mono"
+                style={{ flex: 1, minWidth: 220 }}
+                value={settings.curseforgeApiKey}
+                onChange={(e) => {
+                  setCfTestResult(null);
+                  onChange({ curseforgeApiKey: e.target.value });
+                }}
+                placeholder="$2a$10$... (60-char Core API key from console.curseforge.com)"
+              />
+              <button
+                type="button"
+                className="btn btn-sm"
+                title={showCfKey ? 'Hide key' : 'Show key'}
+                onClick={() => setShowCfKey((v) => !v)}
+              >
+                {showCfKey ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={testingCfKey}
+                onClick={async () => {
+                  setTestingCfKey(true);
+                  setCfTestResult(null);
+                  try {
+                    const res = await api.testCurseForgeKey(settings.curseforgeApiKey);
+                    const finalKey = res.normalizedKey || settings.curseforgeApiKey;
+                    setCfTestResult({ ok: res.ok, message: res.message });
+                    if (res.ok && res.saved) {
+                      onSyncSavedSetting({ curseforgeApiKey: finalKey });
+                      onToast('success', 'CurseForge API key verified & saved.');
+                    } else if (res.normalizedKey && res.normalizedKey !== settings.curseforgeApiKey) {
+                      onChange({ curseforgeApiKey: res.normalizedKey });
+                    }
+                  } catch (err) {
+                    setCfTestResult({
+                      ok: false,
+                      message: err instanceof Error ? err.message : 'Test failed',
+                    });
+                  } finally {
+                    setTestingCfKey(false);
+                  }
+                }}
+              >
+                <CheckCircle2 size={14} /> {testingCfKey ? 'Verifying...' : 'Verify & Save Key'}
+              </button>
+            </div>
+            {cfTestResult && (
+              <div
+                className={`alert ${cfTestResult.ok ? 'alert-success' : 'alert-error'}`}
+                style={{ marginTop: 8, marginBottom: 0 }}
+              >
+                {cfTestResult.message}
+              </div>
+            )}
+            <span className="field-hint">
+              Use a <strong>Core API Key</strong> starting with <code className="mono">$2a$10$...</code> from{' '}
+              <a
+                href="https://console.curseforge.com/"
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+              >
+                console.curseforge.com
+              </a>{' '}
+              (API keys tab). Clicking <strong>Verify &amp; Save Key</strong> tests live modpack search and saves automatically.
+            </span>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}

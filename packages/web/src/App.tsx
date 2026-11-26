@@ -1,21 +1,76 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Download, FileCode2, FolderInput, LogOut, PlusCircle, Server, Settings, Wifi, WifiOff } from 'lucide-react';
 import type { GameTemplate, HostMetrics, UpdaterStatus, WsServerEvent } from '@serverforge/shared';
 import { api, type AuthState, type InstanceWithJoin } from './api';
 import { AuthView } from './components/AuthView';
+import { ConfirmModal, type ConfirmDialogOptions } from './components/ConfirmModal';
 import { DeployPage } from './components/DeployPage';
 import { ImportPage } from './components/ImportPage';
-import { InstanceDetailPage } from './components/InstanceDetailPage';
+import { InstanceDetailPage, type InstanceTabId } from './components/InstanceDetailPage';
 import { OverviewPage } from './components/OverviewPage';
-import { SettingsPage } from './components/SettingsPage';
+import { SettingsPage, type SettingsTabId } from './components/SettingsPage';
 import { TemplatesPage } from './components/TemplatesPage';
+import { ToastStack, type ToastItem, type ToastKind } from './components/ToastStack';
 
 type NavView = 'overview' | 'deploy' | 'import' | 'templates' | 'settings' | 'detail';
 
+const VALID_SETTINGS_TABS = new Set<SettingsTabId>(['general', 'networking', 'discord', 'updates', 'diagnostics']);
+const VALID_INSTANCE_TABS = new Set<InstanceTabId>(['console', 'config', 'backups']);
+
+interface ParsedRoute {
+  view: NavView;
+  instanceId: string | null;
+  instanceTab: InstanceTabId;
+  settingsTab: SettingsTabId;
+}
+
+function parseHashRoute(): ParsedRoute {
+  const raw = (typeof window !== 'undefined' ? window.location.hash : '').replace(/^#\/?/, '').trim();
+  const parts = raw.split('/').filter(Boolean);
+  const head = parts[0];
+
+  if (head === 'deploy') return { view: 'deploy', instanceId: null, instanceTab: 'console', settingsTab: 'general' };
+  if (head === 'import') return { view: 'import', instanceId: null, instanceTab: 'console', settingsTab: 'general' };
+  if (head === 'templates') return { view: 'templates', instanceId: null, instanceTab: 'console', settingsTab: 'general' };
+  if (head === 'settings') {
+    const sub = parts[1] as SettingsTabId | undefined;
+    return {
+      view: 'settings',
+      instanceId: null,
+      instanceTab: 'console',
+      settingsTab: sub && VALID_SETTINGS_TABS.has(sub) ? sub : 'general',
+    };
+  }
+  if (head === 'server' && parts[1]) {
+    const sub = parts[2] as InstanceTabId | undefined;
+    return {
+      view: 'detail',
+      instanceId: decodeURIComponent(parts[1]),
+      instanceTab: sub && VALID_INSTANCE_TABS.has(sub) ? sub : 'console',
+      settingsTab: 'general',
+    };
+  }
+  return { view: 'overview', instanceId: null, instanceTab: 'console', settingsTab: 'general' };
+}
+
+function buildHashRoute(route: ParsedRoute): string {
+  if (route.view === 'deploy') return '#deploy';
+  if (route.view === 'import') return '#import';
+  if (route.view === 'templates') return '#templates';
+  if (route.view === 'settings') return `#settings/${route.settingsTab}`;
+  if (route.view === 'detail' && route.instanceId) {
+    return `#server/${encodeURIComponent(route.instanceId)}/${route.instanceTab}`;
+  }
+  return '#overview';
+}
+
 export function App() {
+  const initialRoute = parseHashRoute();
   const [auth, setAuth] = useState<AuthState | null>(null);
-  const [view, setView] = useState<NavView>('overview');
-  const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
+  const [view, setView] = useState<NavView>(initialRoute.view);
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(initialRoute.instanceId);
+  const [instanceTab, setInstanceTab] = useState<InstanceTabId>(initialRoute.instanceTab);
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>(initialRoute.settingsTab);
   const [autoBootInstanceId, setAutoBootInstanceId] = useState<string | null>(null);
 
   const [metrics, setMetrics] = useState<HostMetrics | null>(null);
@@ -36,6 +91,60 @@ export function App() {
   const [liveLogsByInstance, setLiveLogsByInstance] = useState<
     Record<string, Array<{ timestamp: string; line: string }>>
   >({});
+
+  // Global Confirm Modal & Toast Stack
+  const [confirmState, setConfirmState] = useState<ConfirmDialogOptions | null>(null);
+  const confirmResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+  const requestConfirm = useCallback((options: ConfirmDialogOptions): Promise<boolean> => {
+    return new Promise<boolean>((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmState(options);
+    });
+  }, []);
+
+  const resolveConfirm = useCallback((confirmed: boolean) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmState(null);
+    resolver?.(confirmed);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const pushToast = useCallback(
+    (kind: ToastKind, text: string) => {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      setToasts((prev) => [...prev.slice(-3), { id, kind, text }]);
+      setTimeout(() => {
+        dismissToast(id);
+      }, 3800);
+    },
+    [dismissToast]
+  );
+
+  // Sync navigation state to URL hash so page refreshes keep the active view & tab
+  useEffect(() => {
+    const targetHash = buildHashRoute({ view, instanceId: selectedInstanceId, instanceTab, settingsTab });
+    if (window.location.hash !== targetHash) {
+      window.history.replaceState(null, '', targetHash);
+    }
+  }, [view, selectedInstanceId, instanceTab, settingsTab]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const parsed = parseHashRoute();
+      setView(parsed.view);
+      setSelectedInstanceId(parsed.instanceId);
+      setInstanceTab(parsed.instanceTab);
+      setSettingsTab(parsed.settingsTab);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   const checkAuth = useCallback(async () => {
     const state = await api.getAuthMe();
@@ -167,11 +276,17 @@ export function App() {
     return <AuthView needsSetup={auth.needsSetup} onAuthenticated={() => void checkAuth()} />;
   }
 
-  const openInstance = (id: string, autoBoot = false) => {
+  const openInstance = (id: string, autoBoot = false, tab: InstanceTabId = 'console') => {
     setLiveLogsByInstance((prev) => ({ ...prev, [id]: [] }));
     setSelectedInstanceId(id);
+    setInstanceTab(tab);
     setAutoBootInstanceId(autoBoot ? id : null);
     setView('detail');
+  };
+
+  const openSettings = (tab?: SettingsTabId) => {
+    if (tab) setSettingsTab(tab);
+    setView('settings');
   };
 
   const handleLogout = async () => {
@@ -214,7 +329,10 @@ export function App() {
             <FileCode2 size={16} />
             Game Templates
           </button>
-          <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
+          <button
+            className={`nav-item ${view === 'settings' ? 'active' : ''}`}
+            onClick={() => openSettings()}
+          >
             <Settings size={16} />
             Settings &amp; Automation
           </button>
@@ -226,7 +344,7 @@ export function App() {
               type="button"
               className="btn btn-primary btn-sm"
               style={{ width: '100%' }}
-              onClick={() => setView('settings')}
+              onClick={() => openSettings('updates')}
             >
               <Download size={13} /> Update v{updaterStatus.latestVersion} Ready
             </button>
@@ -269,6 +387,7 @@ export function App() {
             onRefresh={() => void refreshData()}
             onSelectInstance={(id) => openInstance(id, false)}
             onGoToDeploy={() => setView('deploy')}
+            onToast={pushToast}
           />
         )}
 
@@ -280,7 +399,7 @@ export function App() {
               void refreshData();
               openInstance(id, Boolean(autoBoot));
             }}
-            onGoToSettings={() => setView('settings')}
+            onGoToSettings={() => openSettings('networking')}
           />
         )}
 
@@ -301,6 +420,8 @@ export function App() {
             catalog={catalog}
             metrics={metrics}
             liveLogs={liveLogsByInstance[selectedInstanceId] ?? []}
+            activeTab={instanceTab}
+            onTabChange={setInstanceTab}
             autoBoot={autoBootInstanceId === selectedInstanceId}
             onAutoBootConsumed={() => setAutoBootInstanceId(null)}
             onBack={() => setView('overview')}
@@ -308,13 +429,21 @@ export function App() {
               setSelectedInstanceId(null);
               setAutoBootInstanceId(null);
               setView('overview');
+              pushToast('info', 'Server removed from ServerForge.');
             }}
             onGlobalRefresh={() => void refreshData()}
+            onConfirm={requestConfirm}
+            onToast={pushToast}
           />
         )}
 
         {view === 'templates' && (
-          <TemplatesPage catalog={catalog} onRefreshCatalog={() => void refreshData()} />
+          <TemplatesPage
+            catalog={catalog}
+            onRefreshCatalog={() => void refreshData()}
+            onConfirm={requestConfirm}
+            onToast={pushToast}
+          />
         )}
 
         {view === 'settings' && (
@@ -322,14 +451,27 @@ export function App() {
             metrics={metrics}
             updaterStatus={updaterStatus}
             updaterProgress={updaterProgress}
+            activeTab={settingsTab}
+            onTabChange={setSettingsTab}
             onSaved={() => void refreshData()}
             onRefreshUpdater={refreshUpdater}
             onStartReconnecting={(label, expectedVersion) =>
               setReconnectingState({ label, expectedVersion })
             }
+            onConfirm={requestConfirm}
+            onToast={pushToast}
           />
         )}
       </main>
+
+      <ConfirmModal
+        open={Boolean(confirmState)}
+        options={confirmState}
+        onConfirm={() => resolveConfirm(true)}
+        onCancel={() => resolveConfirm(false)}
+      />
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }
