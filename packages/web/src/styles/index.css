@@ -296,6 +296,70 @@ pre,
   background: var(--status-danger);
 }
 
+.progress-fill.indeterminate {
+  width: 38%;
+  animation: sf-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes sf-indeterminate {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.spin {
+  animation: sf-spin 1s linear infinite;
+}
+
+@keyframes sf-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.activity-banner {
+  background: var(--status-warn-soft);
+  border: 1px solid hsla(38, 92%, 56%, 0.35);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.activity-banner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.activity-banner-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13.5px;
+  color: hsl(38, 95%, 70%);
+}
+
+.activity-banner-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;

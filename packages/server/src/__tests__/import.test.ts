@@ -395,17 +395,28 @@ describe('SmartImportService — Modded Minecraft & Existing Server Import', () 
       const baseTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-peb-'));
       const spacedDir = path.join(baseTmp, 'Minecraft Servers', 'ATM 10');
       fs.mkdirSync(spacedDir, { recursive: true });
-      cleanups.push(async () => {
-        fs.rmSync(baseTmp, { recursive: true, force: true });
-      });
-
       const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], {
         cwd: spacedDir,
         windowsHide: true,
         stdio: 'ignore',
       });
       cleanups.push(async () => {
-        if (!child.killed) child.kill();
+        if (child.exitCode === null && !child.killed) {
+          const exited = new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 3000);
+            child.once('exit', () => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+          child.kill();
+          await exited;
+        }
+        try {
+          fs.rmSync(baseTmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        } catch {
+          // Best-effort temp cleanup on Windows
+        }
       });
 
       expect(child.pid).toBeTruthy();

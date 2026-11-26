@@ -98,21 +98,146 @@ export function flattenSingleRootSubdir(serverDir: string, maxPasses = 2): boole
 }
 
 /**
- * If a Windows .bat/.cmd script contains interactive `pause` commands, writes a clean
- * `.serverforge-start.bat` sibling with `pause` lines commented out so headless child
- * processes never hang waiting for a keypress on stop or error.
+ * Checks whether a single JVM flag token is unsupported on the target Java major version.
  */
-export function createPauseSafeBatchWrapper(serverDir: string, scriptName: string): string {
+export function isIncompatibleJvmFlag(token: string, javaMajor: number): boolean {
+  const clean = token.trim().replace(/^["']|["']$/g, '');
+  if (!clean.startsWith('-XX:')) return false;
+  if (javaMajor < 24 && /^-XX:[+-]UseCompactObjectHeaders$/i.test(clean)) return true;
+  if (javaMajor < 21 && /^-XX:[+-]ZGenerational$/i.test(clean)) return true;
+  if (
+    javaMajor >= 14 &&
+    /^-XX:[+-](?:UseConcMarkSweepGC|CMSIncrementalMode|UseParNewGC|CMSParallelRemarkEnabled)$/i.test(clean)
+  ) {
+    return true;
+  }
+  if (javaMajor >= 18 && /^-XX:[+-]UseBiasedLocking$/i.test(clean)) return true;
+  return false;
+}
+
+/**
+ * Removes or comments out JVM flags in `user_jvm_args.txt` that are incompatible with `javaMajor`
+ * (for example `-XX:+UseCompactObjectHeaders`, which requires Java 24/25 and crashes Java 21).
+ */
+export function sanitizeUserJvmArgs(
+  content: string,
+  javaMajor: number
+): { content: string; removedFlags: string[] } {
+  const removedFlags: string[] = [];
+  const outLines = content.split(/\r?\n/).map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return line;
+    const tokens = trimmed.split(/\s+/);
+    const kept: string[] = [];
+    const removedHere: string[] = [];
+    for (const tok of tokens) {
+      if (isIncompatibleJvmFlag(tok, javaMajor)) {
+        removedHere.push(tok);
+        removedFlags.push(tok);
+      } else {
+        kept.push(tok);
+      }
+    }
+    if (removedHere.length === 0) return line;
+    if (kept.length === 0) {
+      return `# [ServerForge] disabled for Java ${javaMajor}: ${trimmed}`;
+    }
+    return kept.join(' ');
+  });
+  return { content: outLines.join('\n'), removedFlags };
+}
+
+function stripIncompatibleJvmFlagsFromScript(
+  content: string,
+  javaMajor: number
+): { content: string; removedFlags: string[] } {
+  const removedFlags: string[] = [];
+  const updated = content.replace(/(?:^|\s)(-XX:[+-][A-Za-z0-9]+)/g, (match, flag: string) => {
+    if (isIncompatibleJvmFlag(flag, javaMajor)) {
+      removedFlags.push(flag);
+      return '';
+    }
+    return match;
+  });
+  return { content: updated, removedFlags };
+}
+
+/**
+ * Sanitizes a Windows .bat/.cmd startup script for headless execution under ServerForge:
+ * - Disables interactive `pause` commands that would hang forever
+ * - Disables vendor auto-restart flags (ATM_RESTART/RESTART/AUTO_RESTART)
+ * - Neutralizes `timeout /t` (which fails under piped stdio with "Input redirection is not supported")
+ *   and breaks auto-restart `goto` loops so ServerForge cleanly detects crashes & stops
+ * - Strips JVM flags incompatible with `javaMajor` (e.g., `-XX:+UseCompactObjectHeaders` on Java 21)
+ */
+export function createPauseSafeBatchWrapper(
+  serverDir: string,
+  scriptName: string,
+  javaMajor?: number
+): string {
   const fullPath = path.join(serverDir, scriptName);
   try {
-    const content = fs.readFileSync(fullPath, 'utf8');
-    const pauseRegex = /^(\s*@?pause(?:\s+.*)?)$/gim;
-    if (!pauseRegex.test(content)) {
+    const original = fs.readFileSync(fullPath, 'utf8');
+    let changed = false;
+
+    const lines = original.split(/\r?\n/);
+    const outLines: string[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+
+      // 1. Disable interactive `pause`
+      if (/^\s*@?pause(?:\s+.*)?$/i.test(line)) {
+        outLines.push(`rem [ServerForge] disabled interactive ${line.trim()}`);
+        changed = true;
+        continue;
+      }
+
+      // 2. Disable vendor auto-restart variables (e.g., ATM10 `set ATM_RESTART=true`)
+      if (/^\s*(?:set\s+["']?(?:ATM_RESTART|RESTART|AUTO_RESTART|SERVER_RESTART)\s*=\s*)true["']?\s*$/i.test(line)) {
+        outLines.push(line.replace(/true/i, 'false'));
+        changed = true;
+        continue;
+      }
+
+      // 3. Neutralize `timeout /t ...` (fails under piped stdio and causes tight crash loops)
+      if (/^\s*@?timeout(?:\.exe)?\s+/i.test(line)) {
+        const prevContext = lines.slice(Math.max(0, i - 3), i).join('\n');
+        const nextContext = lines.slice(i + 1, Math.min(lines.length, i + 5)).join('\n');
+        const isRestartLoop =
+          /restarting\s+automatically|restart/i.test(prevContext) ||
+          /^\s*@?goto\s+/im.test(nextContext);
+
+        if (isRestartLoop) {
+          outLines.push('rem [ServerForge] disabled vendor auto-restart loop (ServerForge manages lifecycle)');
+          outLines.push('exit /b %ERRORLEVEL%');
+        } else {
+          const secMatch = line.match(/\/t\s+(\d+)/i);
+          const secs = Math.min(Math.max(Number(secMatch?.[1] ?? 5), 1), 30);
+          outLines.push(`ping -n ${secs + 1} 127.0.0.1 >nul`);
+        }
+        changed = true;
+        continue;
+      }
+
+      // 4. Strip incompatible inline JVM flags for active Java major version
+      if (javaMajor !== undefined) {
+        const stripped = stripIncompatibleJvmFlagsFromScript(line, javaMajor);
+        if (stripped.removedFlags.length > 0) {
+          line = stripped.content;
+          changed = true;
+        }
+      }
+
+      outLines.push(line);
+    }
+
+    if (!changed) {
       return scriptName;
     }
-    const sanitized = content.replace(/^(\s*@?pause(?:\s+.*)?)$/gim, 'rem [ServerForge] disabled interactive $1');
+
     const wrapperName = '.serverforge-start.bat';
-    fs.writeFileSync(path.join(serverDir, wrapperName), sanitized, 'utf8');
+    fs.writeFileSync(path.join(serverDir, wrapperName), outLines.join('\r\n'), 'utf8');
     return wrapperName;
   } catch {
     return scriptName;
@@ -173,7 +298,8 @@ export function findNativeMinecraftLauncher(
   serverDir: string,
   javaBin: string,
   memoryLimitMb: number,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  javaMajor?: number
 ): NativeLaunchPlan | null {
   if (!fs.existsSync(serverDir)) return null;
 
@@ -200,7 +326,7 @@ export function findNativeMinecraftLauncher(
     if (!actualName) continue;
 
     if (lowerCandidate.endsWith('.bat') || lowerCandidate.endsWith('.cmd')) {
-      const safeScript = createPauseSafeBatchWrapper(serverDir, actualName);
+      const safeScript = createPauseSafeBatchWrapper(serverDir, actualName, javaMajor);
       // Use relative script name inside cwd=serverDir with /d /c to avoid Windows path-space quote bugs
       return { exe: 'cmd.exe', args: ['/d', '/c', safeScript] };
     }
@@ -265,9 +391,16 @@ export function findNativeMinecraftLauncher(
 }
 
 /**
- * Merges core ServerForge values into `server.properties` while preserving any custom modpack keys.
+ * Merges core ServerForge values into `server.properties` while preserving any custom modpack keys,
+ * and updates/sanitizes `user_jvm_args.txt` for the active Java major version.
  */
-function writeMinecraftBaseConfig(serverDir: string, instance: ServerInstance, defaultMotd: string): void {
+function writeMinecraftBaseConfig(
+  serverDir: string,
+  instance: ServerInstance,
+  defaultMotd: string,
+  javaMajor?: number,
+  onLog?: (line: string) => void
+): void {
   fs.writeFileSync(path.join(serverDir, 'eula.txt'), 'eula=true\n', 'utf8');
 
   const propsPath = path.join(serverDir, 'server.properties');
@@ -314,11 +447,21 @@ function writeMinecraftBaseConfig(serverDir: string, instance: ServerInstance, d
   }
   fs.writeFileSync(propsPath, updatedLines.filter((l) => l !== undefined).join('\n').replace(/\n+$/, '\n'), 'utf8');
 
-  // Update user_jvm_args.txt memory flags if present (standard Forge/NeoForge 1.18+ server packs)
+  // Update user_jvm_args.txt memory flags & sanitize version-incompatible JVM flags
   const jvmArgsPath = path.join(serverDir, 'user_jvm_args.txt');
   if (fs.existsSync(jvmArgsPath)) {
     const minMem = Math.min(2048, instance.memoryLimitMb);
-    const existingJvm = fs.readFileSync(jvmArgsPath, 'utf8').split(/\r?\n/);
+    let rawJvm = fs.readFileSync(jvmArgsPath, 'utf8');
+    if (javaMajor !== undefined) {
+      const sanitized = sanitizeUserJvmArgs(rawJvm, javaMajor);
+      rawJvm = sanitized.content;
+      if (sanitized.removedFlags.length > 0) {
+        onLog?.(
+          `[Java] Disabled JVM flag(s) incompatible with Java ${javaMajor} in user_jvm_args.txt: ${Array.from(new Set(sanitized.removedFlags)).join(', ')}`
+        );
+      }
+    }
+    const existingJvm = rawJvm.split(/\r?\n/);
     const filtered = existingJvm.filter((l) => {
       const t = l.trim();
       return !/^-Xm[sx]\d+[GMK]?$/i.test(t);
@@ -429,6 +572,12 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
       let lastLoggedPct = 0;
       let lastLoggedMb = 0;
 
+      if (totalBytes > 0) {
+        onLog(`[Download] ${label}: 0% (0.0 / ${(totalBytes / (1024 * 1024)).toFixed(1)} MB)`);
+      } else {
+        onLog(`[Download] ${label}: Downloading...`);
+      }
+
       const reader = res.body.getReader();
       const nodeStream = new Readable({
         async read() {
@@ -440,14 +589,16 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
             }
             downloaded += value.byteLength;
             if (totalBytes > 0) {
-              const pct = Math.floor((downloaded / totalBytes) * 100);
-              if (pct >= lastLoggedPct + 15) {
+              const pct = Math.min(100, Math.floor((downloaded / totalBytes) * 100));
+              if (pct >= lastLoggedPct + 5 || pct === 100) {
                 lastLoggedPct = pct;
-                onLog(`[Download] ${label}: ${pct}% (${(downloaded / (1024 * 1024)).toFixed(1)} MB)`);
+                onLog(
+                  `[Download] ${label}: ${pct}% (${(downloaded / (1024 * 1024)).toFixed(1)} / ${(totalBytes / (1024 * 1024)).toFixed(1)} MB)`
+                );
               }
             } else {
               const mb = Math.floor(downloaded / (1024 * 1024));
-              if (mb >= lastLoggedMb + 25) {
+              if (mb >= lastLoggedMb + 10) {
                 lastLoggedMb = mb;
                 onLog(`[Download] ${label}: ${mb} MB downloaded...`);
               }
@@ -602,10 +753,7 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
       onLog('[CurseForge] Server Pack extracted cleanly.');
     }
 
-    // Write eula.txt, merge server.properties, and update user_jvm_args.txt memory caps
-    writeMinecraftBaseConfig(serverDir, instance, 'ServerForge CurseForge Modpack');
-
-    // Ensure matching Java runtime (auto-provisioning portable Adoptium JRE if missing)
+    // Ensure matching Java runtime first so JVM arg sanitization knows the exact Java major version
     const requiredMajor = javaTagToMajor(recommendedJavaTag);
     const java =
       javaOverride ??
@@ -613,14 +761,29 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
         fetchImpl: this.fetchImpl,
       }));
 
+    // Write eula.txt, merge server.properties, and update/sanitize user_jvm_args.txt
+    writeMinecraftBaseConfig(serverDir, instance, 'ServerForge CurseForge Modpack', java.major, onLog);
+
     // Detect launcher; if only a Forge/NeoForge installer JAR was shipped, run it first
-    let launcher = findNativeMinecraftLauncher(serverDir, java.javaBin, instance.memoryLimitMb);
+    let launcher = findNativeMinecraftLauncher(
+      serverDir,
+      java.javaBin,
+      instance.memoryLimitMb,
+      process.platform,
+      java.major
+    );
     if (!launcher) {
       const installerJar = findForgeOrNeoForgeInstallerJar(serverDir);
       if (installerJar) {
         onStatus?.('installing');
         await this.runModloaderInstaller(installerJar, serverDir, java, onLog);
-        launcher = findNativeMinecraftLauncher(serverDir, java.javaBin, instance.memoryLimitMb);
+        launcher = findNativeMinecraftLauncher(
+          serverDir,
+          java.javaBin,
+          instance.memoryLimitMb,
+          process.platform,
+          java.major
+        );
       }
     }
 
@@ -633,7 +796,13 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     onStatus?.('starting');
     return {
       ...launcher,
-      extraEnv: buildJavaEnv(process.env, java),
+      extraEnv: {
+        ...buildJavaEnv(process.env, java),
+        ATM_RESTART: 'false',
+        RESTART: 'false',
+        AUTO_RESTART: 'false',
+        SERVER_RESTART: 'false',
+      },
     };
   }
 
@@ -988,7 +1157,13 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
   async remove(instance: ServerInstance): Promise<void> {
     const managed = this.processes.get(instance.id);
     if (managed && managed.child.exitCode === null) {
-      managed.child.kill('SIGKILL');
+      if (process.platform === 'win32' && managed.child.pid) {
+        await new Promise<void>((resolve) => {
+          execFile('taskkill', ['/PID', String(managed.child.pid), '/T', '/F'], () => resolve());
+        });
+      } else {
+        managed.child.kill('SIGKILL');
+      }
       this.processes.delete(instance.id);
     }
   }

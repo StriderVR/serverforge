@@ -296,6 +296,13 @@ export async function ensureJavaRuntime(
     let downloaded = 0;
     let lastLoggedPct = 0;
 
+    if (totalBytes > 0) {
+      const totalMb = (totalBytes / (1024 * 1024)).toFixed(1);
+      onLog(`[Java] Downloading Java ${requiredMajor} JRE... 0% (0.0 / ${totalMb} MB)`);
+    } else {
+      onLog(`[Java] Downloading Java ${requiredMajor} JRE...`);
+    }
+
     const webReader = res.body.getReader();
     const nodeStream = new Readable({
       async read() {
@@ -307,10 +314,12 @@ export async function ensureJavaRuntime(
           }
           downloaded += value.byteLength;
           if (totalBytes > 0) {
-            const pct = Math.floor((downloaded / totalBytes) * 100);
-            if (pct >= lastLoggedPct + 25) {
+            const pct = Math.min(100, Math.floor((downloaded / totalBytes) * 100));
+            if (pct >= lastLoggedPct + 10 || pct === 100) {
               lastLoggedPct = pct;
-              onLog(`[Java] Downloading Java ${requiredMajor} JRE... ${pct}%`);
+              const dlMb = (downloaded / (1024 * 1024)).toFixed(1);
+              const totalMb = (totalBytes / (1024 * 1024)).toFixed(1);
+              onLog(`[Java] Downloading Java ${requiredMajor} JRE... ${pct}% (${dlMb} / ${totalMb} MB)`);
             }
           }
           this.push(Buffer.from(value));

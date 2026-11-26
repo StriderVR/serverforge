@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArrowLeft,
   Check,
   Clock,
   Copy,
+  Loader2,
   Play,
   RotateCw,
   Save,
@@ -27,6 +28,27 @@ interface InstanceDetailPageProps {
   onBack: () => void;
   onDeleted: () => void;
   onGlobalRefresh: () => void;
+}
+
+const PROGRESS_LINE_RE = /\[(?:Download|Java)\][^\n]*?(\d{1,3})%/;
+const PHASE_AFTER_DOWNLOAD_RE = /Extracting|Launching|Starting|Prepared|installed successfully/i;
+
+function extractActiveDownloadPercent(logs: Array<{ timestamp: string; line: string }>): number | null {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const line = logs[i].line;
+    const match = line.match(PROGRESS_LINE_RE);
+    if (match) {
+      const pct = Number(match[1]);
+      if (Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+        return pct;
+      }
+    }
+    // If extraction or launch has already started after a download, switch back to indeterminate bar
+    if (PHASE_AFTER_DOWNLOAD_RE.test(line)) {
+      return null;
+    }
+  }
+  return null;
 }
 
 export function InstanceDetailPage({
@@ -58,24 +80,28 @@ export function InstanceDetailPage({
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const autoBootTriggeredRef = useRef(false);
 
-  const loadDetail = async () => {
+  const loadDetail = async (syncForm = true) => {
     try {
       const data = await api.getInstance(instanceId);
       setDetail(data);
-      setEditConfig(data.config);
-      setEditMemoryGb(Math.round(data.memoryLimitMb / 1024));
-      setEditRuntime(data.runtime);
-      setEditAutoStart(data.autoStart);
-      setEditDiscord(data.discordEnabled);
-      setEditLaunchScript(data.launchScript ?? '');
+      if (syncForm) {
+        setEditConfig(data.config);
+        setEditMemoryGb(Math.round(data.memoryLimitMb / 1024));
+        setEditRuntime(data.runtime);
+        setEditAutoStart(data.autoStart);
+        setEditDiscord(data.discordEnabled);
+        setEditLaunchScript(data.launchScript ?? '');
+      }
     } catch (err) {
-      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Failed to load server' });
+      if (syncForm) {
+        setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Failed to load server' });
+      }
     }
   };
 
   useEffect(() => {
     autoBootTriggeredRef.current = false;
-    void loadDetail();
+    void loadDetail(true);
   }, [instanceId]);
 
   // Keep status, lastError, activeLease, and stats live as WebSocket broadcasts instance updates
@@ -105,7 +131,46 @@ export function InstanceDetailPage({
     instanceSummary?.publicHostSource,
   ]);
 
-  const combinedLogs = detail ? [...detail.logs, ...liveLogs] : liveLogs;
+  const isStatusTransition =
+    detail?.status === 'installing' || detail?.status === 'starting' || detail?.status === 'stopping';
+  const isActiveTransition = busy || isStatusTransition;
+
+  // Poll server details & persisted logs during active installs/starts/stops as a fallback if WS stalls
+  useEffect(() => {
+    if (!isActiveTransition) return;
+    const timer = setInterval(() => {
+      void loadDetail(false);
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [isActiveTransition, instanceId]);
+
+  const combinedLogs = useMemo(() => {
+    if (!detail) return liveLogs;
+    if (liveLogs.length === 0) return detail.logs;
+    const seenCounts = new Map<string, number>();
+    for (const entry of detail.logs) {
+      const key = `${entry.timestamp}\0${entry.line}`;
+      seenCounts.set(key, (seenCounts.get(key) ?? 0) + 1);
+    }
+    const merged = [...detail.logs];
+    for (const entry of liveLogs) {
+      const key = `${entry.timestamp}\0${entry.line}`;
+      const remaining = seenCounts.get(key) ?? 0;
+      if (remaining > 0) {
+        seenCounts.set(key, remaining - 1);
+      } else {
+        merged.push(entry);
+      }
+    }
+    return merged;
+  }, [detail?.logs, liveLogs]);
+
+  const activeDownloadPercent = useMemo(
+    () => (isActiveTransition ? extractActiveDownloadPercent(combinedLogs) : null),
+    [isActiveTransition, combinedLogs]
+  );
+
+  const latestLogLine = combinedLogs.length > 0 ? combinedLogs[combinedLogs.length - 1].line : null;
 
   useEffect(() => {
     if (tab === 'console') {
@@ -119,11 +184,11 @@ export function InstanceDetailPage({
     try {
       await fn();
       if (successMsg) setMessage({ kind: 'success', text: successMsg });
-      await loadDetail();
+      await loadDetail(true);
       onGlobalRefresh();
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Operation failed' });
-      await loadDetail();
+      await loadDetail(true);
     } finally {
       setBusy(false);
     }
@@ -144,7 +209,9 @@ export function InstanceDetailPage({
         <button className="btn btn-ghost btn-sm" onClick={onBack}>
           <ArrowLeft size={14} /> Back to Fleet
         </button>
-        <p style={{ marginTop: 14, color: 'var(--text-secondary)' }}>Loading instance details...</p>
+        <p style={{ marginTop: 14, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Loader2 size={15} className="spin" /> Loading instance details...
+        </p>
       </div>
     );
   }
@@ -152,6 +219,15 @@ export function InstanceDetailPage({
   const template = catalog.find((t) => t.id === detail.gameId);
   const isRunning = detail.status === 'running';
   const isStopped = detail.status === 'stopped' || detail.status === 'error';
+
+  const activityTitle =
+    detail.status === 'stopping'
+      ? 'Saving world & stopping server...'
+      : detail.status === 'starting'
+        ? 'Starting game server process...'
+        : detail.status === 'installing'
+          ? 'Installing server & downloading files...'
+          : 'Preparing server setup...';
 
   const handleSendCommand = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -190,7 +266,7 @@ export function InstanceDetailPage({
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <h1>{detail.name}</h1>
             <span className={`badge badge-${detail.status}`}>
-              <span className="badge-dot" />
+              {isStatusTransition ? <Loader2 size={11} className="spin" /> : <span className="badge-dot" />}
               {detail.status.toUpperCase()}
             </span>
             {detail.activeLease && (
@@ -220,7 +296,8 @@ export function InstanceDetailPage({
                 disabled={busy}
                 onClick={() => runAction(() => api.startInstance(detail.id, { temporary: false }), 'Server started.')}
               >
-                <Play size={14} /> Start
+                {busy ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
+                {busy ? 'Starting...' : 'Start'}
               </button>
               <button
                 className="btn"
@@ -239,14 +316,21 @@ export function InstanceDetailPage({
             <>
               <button
                 className="btn btn-danger"
-                disabled={busy}
+                disabled={busy || isStatusTransition}
                 onClick={() => runAction(() => api.stopInstance(detail.id), 'World saved & server stopped.')}
               >
-                <Square size={14} /> Save & Stop
+                {isActiveTransition ? <Loader2 size={14} className="spin" /> : <Square size={14} />}
+                {detail.status === 'installing'
+                  ? 'Installing...'
+                  : detail.status === 'starting'
+                    ? 'Starting...'
+                    : detail.status === 'stopping'
+                      ? 'Stopping...'
+                      : 'Save & Stop'}
               </button>
               <button
                 className="btn"
-                disabled={busy}
+                disabled={busy || isStatusTransition}
                 onClick={() => runAction(() => api.restartInstance(detail.id), 'Server restarted.')}
               >
                 <RotateCw size={14} /> Restart
@@ -361,6 +445,33 @@ export function InstanceDetailPage({
         </div>
       )}
 
+      {isActiveTransition && (
+        <div className="activity-banner" role="status" aria-live="polite">
+          <div className="activity-banner-head">
+            <span className="activity-banner-title">
+              <Loader2 size={15} className="spin" />
+              {activityTitle}
+            </span>
+            {activeDownloadPercent !== null && (
+              <span className="mono tabular" style={{ fontSize: 12.5, fontWeight: 600, color: 'hsl(38, 95%, 72%)' }}>
+                {activeDownloadPercent}%
+              </span>
+            )}
+          </div>
+          <div className="progress-track">
+            {activeDownloadPercent !== null ? (
+              <div className="progress-fill warn" style={{ width: `${activeDownloadPercent}%` }} />
+            ) : (
+              <div className="progress-fill warn indeterminate" />
+            )}
+          </div>
+          <div className="activity-banner-line" title={latestLogLine ?? undefined}>
+            {latestLogLine ??
+              'Resolving pack download, verifying Java runtime, and preparing server files — live logs will appear below...'}
+          </div>
+        </div>
+      )}
+
       {message && (
         <div className={`alert ${message.kind === 'error' ? 'alert-error' : 'alert-success'}`}>{message.text}</div>
       )}
@@ -387,8 +498,17 @@ export function InstanceDetailPage({
         <div className="terminal-box">
           <div className="terminal-output" aria-live="polite">
             {combinedLogs.length === 0 ? (
-              <div style={{ color: 'var(--text-muted)' }}>
-                No console output yet. Start the server to stream real-time logs.
+              <div style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                {isActiveTransition ? (
+                  <>
+                    <Loader2 size={14} className="spin" />
+                    <span>
+                      Initializing server setup — live installation and boot logs will stream here momentarily...
+                    </span>
+                  </>
+                ) : (
+                  <span>No console output yet. Start the server to stream real-time logs.</span>
+                )}
               </div>
             ) : (
               combinedLogs.map((entry, idx) => (

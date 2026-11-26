@@ -111,6 +111,21 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
 
   const app = Fastify({ logger: false });
 
+  // Gracefully allow empty bodies even if a client sends Content-Type: application/json (e.g., DELETE requests)
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    const raw = typeof body === 'string' ? body.trim() : '';
+    if (!raw) {
+      done(null, undefined);
+      return;
+    }
+    try {
+      done(null, JSON.parse(raw));
+    } catch (err) {
+      done(err instanceof Error ? err : new Error('Invalid JSON payload'), undefined);
+    }
+  });
+
   await app.register(cors, {
     origin: true,
     credentials: true,
