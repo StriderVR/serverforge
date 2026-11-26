@@ -50,6 +50,45 @@ export class CatalogService {
             }
           }
         }
+        if (!isCustom && template.id === 'factorio') {
+          const existingKeys = new Set(template.configFields.map((f) => f.key));
+          if (!existingKeys.has('FACTORIO_SOURCE')) {
+            template.configFields.push({
+              key: 'FACTORIO_SOURCE',
+              label: 'Factorio Install Folder, ZIP Path, or URL (Optional)',
+              description:
+                'Leave blank to auto-detect Steam/local Factorio on Windows (or auto-download the free official headless server on Linux/WSL).',
+              type: 'string',
+              default: '',
+              required: false,
+              autoGenerate: false,
+            });
+          }
+          if (!existingKeys.has('FACTORIO_USERNAME')) {
+            template.configFields.push({
+              key: 'FACTORIO_USERNAME',
+              label: 'Factorio.com Username (Optional, Windows ZIP Auto-Download)',
+              description:
+                'Optional — paired with your Factorio.com Token to auto-download the official Windows 64-bit ZIP without Steam.',
+              type: 'string',
+              default: '',
+              required: false,
+              autoGenerate: false,
+            });
+          }
+          if (!existingKeys.has('FACTORIO_TOKEN')) {
+            template.configFields.push({
+              key: 'FACTORIO_TOKEN',
+              label: 'Factorio.com Auth Token (Optional)',
+              description:
+                'Found on https://factorio.com/profile (only needed if auto-downloading the Windows ZIP without Steam or WSL).',
+              type: 'secret',
+              default: '',
+              required: false,
+              autoGenerate: false,
+            });
+          }
+        }
         this.templates.set(template.id, { template, rawYaml, filePath, isCustom });
       } catch (err) {
         console.error(`[CatalogService] Failed to parse template ${filePath}:`, err);
