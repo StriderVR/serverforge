@@ -185,6 +185,7 @@ export const SystemSettingsSchema = z.object({
   dailyRebootDelayIfPlayersOnline: z.boolean().default(true),
   dailyRebootResumePolicy: z.enum(['resume_running', 'autostart_only']).default('autostart_only'),
   curseforgeApiKey: z.string().default(''),
+  lastSeenReleaseVersion: z.string().default(''),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
 

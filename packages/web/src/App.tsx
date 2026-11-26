@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, FileCode2, FolderInput, LogOut, PlusCircle, Server, Settings, Wifi, WifiOff } from 'lucide-react';
-import type { GameTemplate, HostMetrics, UpdaterStatus, WsServerEvent } from '@serverforge/shared';
+import { Download, FileCode2, FolderInput, LogOut, PlusCircle, Server, Settings, Sparkles, Wifi, WifiOff } from 'lucide-react';
+import {
+  getReleaseNotesForVersion,
+  normalizeReleaseVersion,
+  type GameTemplate,
+  type HostMetrics,
+  type UpdaterStatus,
+  type WsServerEvent,
+} from '@serverforge/shared';
 import { api, type AuthState, type InstanceWithJoin } from './api';
 import { AuthView } from './components/AuthView';
 import { ConfirmModal, type ConfirmDialogOptions } from './components/ConfirmModal';
@@ -11,11 +18,13 @@ import { OverviewPage } from './components/OverviewPage';
 import { SettingsPage, type SettingsTabId } from './components/SettingsPage';
 import { TemplatesPage } from './components/TemplatesPage';
 import { ToastStack, type ToastItem, type ToastKind } from './components/ToastStack';
+import { WhatsNewModal } from './components/WhatsNewModal';
 
 type NavView = 'overview' | 'deploy' | 'import' | 'templates' | 'settings' | 'detail';
 
 const VALID_SETTINGS_TABS = new Set<SettingsTabId>(['general', 'networking', 'discord', 'updates', 'diagnostics']);
-const VALID_INSTANCE_TABS = new Set<InstanceTabId>(['console', 'config', 'backups']);
+const VALID_INSTANCE_TABS = new Set<InstanceTabId>(['console', 'config', 'files', 'properties', 'mods', 'backups']);
+const WHATS_NEW_STORAGE_KEY = 'sf_last_seen_release';
 
 interface ParsedRoute {
   view: NavView;
@@ -92,10 +101,24 @@ export function App() {
     Record<string, Array<{ timestamp: string; line: string }>>
   >({});
 
-  // Global Confirm Modal & Toast Stack
+  // Global Confirm Modal, What's New Splash & Toast Stack
   const [confirmState, setConfirmState] = useState<ConfirmDialogOptions | null>(null);
   const confirmResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
+  const whatsNewCheckedRef = useRef(false);
+
+  const dismissWhatsNew = useCallback(() => {
+    setWhatsNewOpen(false);
+    const ver = updaterStatus ? normalizeReleaseVersion(updaterStatus.currentVersion) : '';
+    if (!ver) return;
+    try {
+      window.localStorage.setItem(WHATS_NEW_STORAGE_KEY, ver);
+    } catch {
+      // ignore storage errors
+    }
+    void api.saveSettings({ lastSeenReleaseVersion: ver }).catch(() => {});
+  }, [updaterStatus]);
 
   const requestConfirm = useCallback((options: ConfirmDialogOptions): Promise<boolean> => {
     return new Promise<boolean>((resolve) => {
@@ -170,6 +193,37 @@ export function App() {
   useEffect(() => {
     void checkAuth();
   }, [checkAuth]);
+
+  useEffect(() => {
+    if (!auth?.authenticated || !updaterStatus?.currentVersion || whatsNewCheckedRef.current) return;
+    whatsNewCheckedRef.current = true;
+    const currentVer = normalizeReleaseVersion(updaterStatus.currentVersion);
+    if (!getReleaseNotesForVersion(currentVer)) return;
+
+    let localSeen = '';
+    try {
+      localSeen = normalizeReleaseVersion(window.localStorage.getItem(WHATS_NEW_STORAGE_KEY) ?? '');
+    } catch {
+      // ignore
+    }
+    if (localSeen === currentVer) return;
+
+    void api
+      .getSettings()
+      .then((settings) => {
+        const dbSeen = normalizeReleaseVersion(settings.lastSeenReleaseVersion ?? '');
+        if (dbSeen === currentVer) {
+          try {
+            window.localStorage.setItem(WHATS_NEW_STORAGE_KEY, currentVer);
+          } catch {
+            // ignore
+          }
+          return;
+        }
+        setWhatsNewOpen(true);
+      })
+      .catch(() => {});
+  }, [auth?.authenticated, updaterStatus?.currentVersion]);
 
   useEffect(() => {
     if (!auth?.authenticated) return;
@@ -303,9 +357,19 @@ export function App() {
           </div>
           <div>
             <div className="brand-title">ServerForge</div>
-            <span className="brand-sub">
-              {updaterStatus ? `v${updaterStatus.currentVersion}` : 'Game Control Plane'}
-            </span>
+            {updaterStatus ? (
+              <button
+                type="button"
+                className="brand-version-btn"
+                title="See what's new in ServerForge"
+                onClick={() => setWhatsNewOpen(true)}
+              >
+                <Sparkles size={11} />
+                <span>v{updaterStatus.currentVersion}</span>
+              </button>
+            ) : (
+              <span className="brand-sub">Game Control Plane</span>
+            )}
           </div>
         </div>
 
@@ -469,6 +533,12 @@ export function App() {
         options={confirmState}
         onConfirm={() => resolveConfirm(true)}
         onCancel={() => resolveConfirm(false)}
+      />
+
+      <WhatsNewModal
+        open={whatsNewOpen}
+        currentVersion={updaterStatus?.currentVersion ?? '1.3.3'}
+        onClose={dismissWhatsNew}
       />
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
