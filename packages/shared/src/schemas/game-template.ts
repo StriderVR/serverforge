@@ -106,6 +106,12 @@ export const GameTemplateSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
   name: z.string().min(1),
   shortName: z.string().min(1).max(24),
+  group: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).optional(),
+  groupName: z.string().min(1).optional(),
+  groupDescription: z.string().min(1).optional(),
+  variantLabel: z.string().min(1).optional(),
+  variantDescription: z.string().min(1).optional(),
+  variantOrder: z.number().int().optional(),
   category: z.enum(['sandbox', 'automation', 'survival', 'factory', 'fps', 'rpg', 'other']).default('other'),
   description: z.string().min(1),
   accentColor: z.string().optional(),
@@ -132,3 +138,54 @@ export const GameTemplateSchema = z.object({
 });
 
 export type GameTemplate = z.infer<typeof GameTemplateSchema>;
+
+export interface CatalogDeployTile {
+  key: string;
+  name: string;
+  description: string;
+  category: GameTemplate['category'];
+  isCustom: boolean;
+  minRamGb: number;
+  hasNative: boolean;
+  variants: GameTemplate[];
+}
+
+/**
+ * Consolidates catalog templates that declare the same `group` into a single
+ * deploy tile while leaving standalone templates as single-variant tiles.
+ */
+export function groupCatalogTemplates(catalog: GameTemplate[]): CatalogDeployTile[] {
+  const buckets = new Map<string, GameTemplate[]>();
+  const order: string[] = [];
+
+  for (const tpl of catalog) {
+    const key = tpl.group?.trim() || tpl.id;
+    let list = buckets.get(key);
+    if (!list) {
+      list = [];
+      buckets.set(key, list);
+      order.push(key);
+    }
+    list.push(tpl);
+  }
+
+  return order.map((key) => {
+    const variants = [...(buckets.get(key) ?? [])].sort((a, b) => {
+      const orderDiff = (a.variantOrder ?? 999) - (b.variantOrder ?? 999);
+      return orderDiff !== 0 ? orderDiff : a.name.localeCompare(b.name);
+    });
+    const primary = variants[0];
+    const groupName = variants.find((v) => v.groupName)?.groupName ?? primary.name;
+    const groupDescription = variants.find((v) => v.groupDescription)?.groupDescription ?? primary.description;
+    return {
+      key,
+      name: groupName,
+      description: groupDescription,
+      category: primary.category,
+      isCustom: variants.every((v) => Boolean(v.isCustom)),
+      minRamGb: Math.min(...variants.map((v) => v.resources.minRamGb)),
+      hasNative: variants.some((v) => Boolean(v.runtimes.native)),
+      variants,
+    };
+  });
+}

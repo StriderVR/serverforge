@@ -40,7 +40,29 @@ export class CatalogService {
         const rawYaml = fs.readFileSync(filePath, 'utf8');
         const parsed = YAML.parse(rawYaml);
         const template = GameTemplateSchema.parse({ ...parsed, isCustom });
+        if (!isCustom && template.id === 'minecraft') {
+          if (!template.group) {
+            template.group = 'minecraft';
+            template.groupName = template.groupName ?? 'Minecraft';
+            template.groupDescription =
+              template.groupDescription ??
+              'Dedicated Minecraft Java Edition server — choose Standard (Vanilla, Paper, Fabric, Forge, NeoForge) or one-click CurseForge modpacks with automatic Java 8/17/21/25.';
+            template.variantLabel = template.variantLabel ?? 'Standard (Vanilla / Paper / Fabric)';
+            template.variantDescription =
+              template.variantDescription ?? 'Vanilla, Paper plugins, Fabric, Forge, NeoForge, or Modrinth';
+            template.variantOrder = template.variantOrder ?? 1;
+          }
+        }
         if (!isCustom && template.id === 'minecraft-curseforge') {
+          if (!template.group) {
+            template.group = 'minecraft';
+            template.groupName = template.groupName ?? 'Minecraft';
+            template.variantLabel = template.variantLabel ?? 'CurseForge Modpack';
+            template.variantDescription =
+              template.variantDescription ??
+              'Browse & auto-install CurseForge modpacks (ATM, Better MC, RLCraft, etc.)';
+            template.variantOrder = template.variantOrder ?? 2;
+          }
           const javaField = template.configFields.find((f) => f.key === 'JAVA_IMAGE_TAG');
           if (javaField && Array.isArray(javaField.options) && !javaField.options.includes('java25')) {
             javaField.options = ['java25', ...javaField.options];

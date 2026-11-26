@@ -1,6 +1,11 @@
 id: minecraft-curseforge
 name: "Minecraft (CurseForge Modpack)"
 shortName: "MC Modpack"
+group: minecraft
+groupName: "Minecraft"
+variantLabel: "CurseForge Modpack"
+variantDescription: "Browse & auto-install CurseForge modpacks (ATM, Better MC, RLCraft, etc.)"
+variantOrder: 2
 category: sandbox
 description: "Dedicated modded Minecraft server built directly from any CurseForge modpack (All the Mods, Better MC, RLCraft, Create, Prominence II, etc.) with automatic Java 8/17/21/25 runtime selection."
 accentColor: "#f97316"
