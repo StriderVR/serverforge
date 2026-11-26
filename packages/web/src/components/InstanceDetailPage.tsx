@@ -124,6 +124,7 @@ export function InstanceDetailPage({
   const [command, setCommand] = useState('');
   const [backupNote, setBackupNote] = useState('');
   const [editConfig, setEditConfig] = useState<Record<string, string | number | boolean>>({});
+  const [editPorts, setEditPorts] = useState<Record<string, number>>({});
   const [editMemoryGb, setEditMemoryGb] = useState(4);
   const [editRuntime, setEditRuntime] = useState<RuntimeKind>('native');
   const [editAutoStart, setEditAutoStart] = useState(false);
@@ -157,6 +158,15 @@ export function InstanceDetailPage({
       setDetail(data);
       if (syncForm) {
         setEditConfig(data.config);
+        const mergedPorts: Record<string, number> = {};
+        const tpl = catalog.find((t) => t.id === data.gameId);
+        for (const p of tpl?.ports ?? []) {
+          mergedPorts[p.key] = data.ports[p.key] ?? p.defaultPort;
+        }
+        for (const [k, v] of Object.entries(data.ports)) {
+          mergedPorts[k] = v;
+        }
+        setEditPorts(mergedPorts);
         setEditMemoryGb(Math.round(data.memoryLimitMb / 1024));
         setEditRuntime(data.runtime);
         setEditAutoStart(data.autoStart);
@@ -1105,6 +1115,33 @@ export function InstanceDetailPage({
                 )}
               </div>
             ))}
+
+            {(template?.ports ?? []).map((portSpec) => (
+              <div className="field" key={`edit-port-${portSpec.key}`}>
+                <label htmlFor={`edit-port-${portSpec.key}`}>
+                  {portSpec.label} ({portSpec.protocol.toUpperCase()})
+                </label>
+                <input
+                  id={`edit-port-${portSpec.key}`}
+                  type="number"
+                  min={1024}
+                  max={65535}
+                  step={1}
+                  className="input tabular"
+                  disabled={!isStopped}
+                  value={editPorts[portSpec.key] ?? portSpec.defaultPort}
+                  onChange={(e) =>
+                    setEditPorts((prev) => ({
+                      ...prev,
+                      [portSpec.key]: Number(e.target.value),
+                    }))
+                  }
+                />
+                <span className="field-hint">
+                  Default {portSpec.defaultPort}/{portSpec.protocol}
+                </span>
+              </div>
+            ))}
           </div>
 
           <div
@@ -1125,6 +1162,7 @@ export function InstanceDetailPage({
                     api.updateInstanceConfig(detail.id, {
                       runtime: editRuntime,
                       memoryLimitMb: editMemoryGb * 1024,
+                      ports: editPorts,
                       autoStart: editAutoStart,
                       autoRestartOnCrash: editAutoRestartOnCrash,
                       discordEnabled: editDiscord,

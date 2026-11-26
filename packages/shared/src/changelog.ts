@@ -14,6 +14,15 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.3.5',
+    title: 'Custom Port Configuration',
+    summary: 'Choose custom ports when deploying a new server or edit ports anytime on an existing stopped server.',
+    added: [
+      'Editable port fields on the One-Click Deploy page so you can pick alternate ports (e.g. 27777 / 25577) when your router blocks defaults.',
+      'Editable port fields in the Instance Configuration tab so existing servers can be reassigned to new ports without recreating them.',
+    ],
+  },
+  {
     version: '1.3.4',
     title: 'Satisfactory 1.1+ Remote Connectivity Fix',
     summary: 'Adds Satisfactory 1.1+ Reliable Messaging port configuration and explicit IPv4 interface binding so remote friends can connect reliably.',
