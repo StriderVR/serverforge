@@ -121,7 +121,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   diagnostics.attachOrchestrator(orchestrator);
   const backupScheduler = new BackupSchedulerService(db, orchestrator);
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
-  const discord = new DiscordBotService(config, db, catalog, orchestrator);
+  const discord = new DiscordBotService(config, db, catalog, orchestrator, fetchImpl);
   const smartImport = new SmartImportService();
   const updater = new UpdaterService(config, db, orchestrator, fetchImpl);
   const maintenance = new MaintenanceService(config, db, orchestrator, updater, osRebootExecutor);
@@ -301,12 +301,16 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     if (!parsed.success) {
       return reply.status(400).send({ error: formatZodIssues('Invalid settings payload', parsed.error.issues), issues: parsed.error.issues });
     }
+    const previous = db.getSettings(config.publicHost);
     const patch = { ...parsed.data };
     if (typeof patch.curseforgeApiKey === 'string') {
       patch.curseforgeApiKey = normalizeCurseForgeApiKey(patch.curseforgeApiKey);
     }
     if (typeof patch.duckdnsDomain === 'string' && patch.duckdnsDomain.trim()) {
       patch.duckdnsDomain = normalizeDuckDnsDomain(patch.duckdnsDomain) || patch.duckdnsDomain.trim();
+    }
+    if (typeof patch.discordBotToken === 'string') {
+      patch.discordBotToken = patch.discordBotToken.trim();
     }
     const updated = db.saveSettings(patch, config.publicHost);
     db.addAuditLog({
@@ -316,7 +320,94 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       instanceId: null,
       details: 'Updated system & Discord guardrails settings',
     });
+
+    // Re-sync slash commands automatically when switching the target Discord guild while connected
+    if (discord.getStatus().connected && updated.discordGuildId !== previous.discordGuildId) {
+      void discord.resyncSlashCommands().catch(() => {});
+    }
+    if (discord.getStatus().connected && updated.discordStatusPanelChannelId) {
+      discord.scheduleStatusPanelUpdate();
+    }
+
     return updated;
+  });
+
+  // --- Discord Bot Setup, Discovery & Live Status Panel ---
+
+  app.get('/api/discord/status', { preHandler: requireAuth }, async () => {
+    return discord.getDiscoveryStatus();
+  });
+
+  app.post('/api/discord/connect', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { token?: string } | undefined;
+    try {
+      const status = await discord.connectWithToken(body?.token);
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'discord.connect',
+        instanceId: null,
+        details: `Connected Discord bot as ${status.botTag ?? 'unknown'}`,
+      });
+      return status;
+    } catch (err) {
+      return reply.status(400).send({
+        error: err instanceof Error ? err.message : 'Failed to connect Discord bot',
+      });
+    }
+  });
+
+  app.post('/api/discord/disconnect', { preHandler: requireAuth }, async (req) => {
+    const body = req.body as { clearToken?: boolean } | undefined;
+    const status = await discord.disconnect(Boolean(body?.clearToken));
+    db.addAuditLog({
+      actor: req.authUser?.username || 'admin',
+      source: 'web',
+      action: 'discord.disconnect',
+      instanceId: null,
+      details: body?.clearToken ? 'Disconnected Discord bot and cleared saved token' : 'Disconnected Discord bot',
+    });
+    return status;
+  });
+
+  app.post('/api/discord/sync-commands', { preHandler: requireAuth }, async (_req, reply) => {
+    try {
+      return await discord.resyncSlashCommands();
+    } catch (err) {
+      return reply.status(400).send({
+        error: err instanceof Error ? err.message : 'Failed to sync slash commands',
+      });
+    }
+  });
+
+  app.post('/api/discord/test-message', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { channelId?: string } | undefined;
+    try {
+      return await discord.sendTestNotification(body?.channelId);
+    } catch (err) {
+      return reply.status(400).send({
+        error: err instanceof Error ? err.message : 'Failed to send Discord test alert',
+      });
+    }
+  });
+
+  app.post('/api/discord/panel', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { channelId?: string; repost?: boolean } | undefined;
+    try {
+      const res = await discord.postOrUpdateStatusPanel(body?.channelId, Boolean(body?.repost));
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'discord.panel',
+        instanceId: null,
+        details: `${res.updatedExisting ? 'Refreshed' : 'Posted'} live Discord status panel in channel ${res.channelId}`,
+      });
+      return res;
+    } catch (err) {
+      return reply.status(400).send({
+        error: err instanceof Error ? err.message : 'Failed to post Discord status panel',
+      });
+    }
   });
 
   // --- Network & DuckDNS Public Address Discovery ---

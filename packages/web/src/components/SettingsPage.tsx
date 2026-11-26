@@ -4,6 +4,7 @@ import type {
   AppDiagnosticEvent,
   AuditLogEntry,
   DiagnosticLevel,
+  DiscordDiscoveryStatus,
   HostMetrics,
   MaintenanceStatus,
   NetworkStatus,
@@ -57,6 +58,7 @@ export function SettingsPage({
   const [savedSnapshot, setSavedSnapshot] = useState<SystemSettings | null>(null);
   const [maintenance, setMaintenance] = useState<MaintenanceStatus | null>(null);
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(null);
+  const [discordStatus, setDiscordStatus] = useState<DiscordDiscoveryStatus | null>(null);
   const [allowedRolesText, setAllowedRolesText] = useState('');
   const [adminRolesText, setAdminRolesText] = useState('');
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
@@ -80,17 +82,19 @@ export function SettingsPage({
   };
 
   const loadAll = async () => {
-    const [s, logs, maint, net, diag] = await Promise.all([
+    const [s, logs, maint, net, diag, disc] = await Promise.all([
       api.getSettings(),
       api.getAuditLogs(40),
       api.getMaintenanceStatus(),
       api.getNetworkStatus().catch(() => null),
       api.getDiagnosticLogs(undefined, 120).catch(() => []),
+      api.getDiscordStatus().catch(() => null),
     ]);
     setSettings(s);
     setSavedSnapshot(s);
     setMaintenance(maint);
     if (net) setNetworkStatus(net);
+    if (disc) setDiscordStatus(disc);
     setAllowedRolesText(s.discordAllowedRoleIds.join(', '));
     setAdminRolesText(s.discordAdminRoleIds.join(', '));
     setAuditLogs(logs);
@@ -147,12 +151,14 @@ export function SettingsPage({
       setSavedSnapshot(saved);
       setAllowedRolesText(saved.discordAllowedRoleIds.join(', '));
       setAdminRolesText(saved.discordAdminRoleIds.join(', '));
-      const [maint, net] = await Promise.all([
+      const [maint, net, disc] = await Promise.all([
         api.getMaintenanceStatus(),
         api.getNetworkStatus().catch(() => null),
+        api.getDiscordStatus().catch(() => null),
       ]);
       setMaintenance(maint);
       if (net) setNetworkStatus(net);
+      if (disc) setDiscordStatus(disc);
       onToast('success', 'Settings saved.');
       onSaved();
     } catch (err) {
@@ -219,8 +225,8 @@ export function SettingsPage({
           <Bot size={14} />
           <span>Discord Bot</span>
           <span
-            className={`tab-dot ${metrics?.discordConnected ? 'tab-dot-online' : 'tab-dot-muted'}`}
-            title={metrics?.discordConnected ? 'Discord bot connected' : 'Discord bot offline'}
+            className={`tab-dot ${(discordStatus?.connected ?? metrics?.discordConnected) ? 'tab-dot-online' : 'tab-dot-muted'}`}
+            title={(discordStatus?.connected ?? metrics?.discordConnected) ? 'Discord bot connected' : 'Discord bot offline'}
           />
         </button>
 
@@ -271,11 +277,18 @@ export function SettingsPage({
         <DiscordBotTab
           metrics={metrics}
           settings={settings}
+          discordStatus={discordStatus}
           allowedRolesText={allowedRolesText}
           adminRolesText={adminRolesText}
           onAllowedRolesChange={setAllowedRolesText}
           onAdminRolesChange={setAdminRolesText}
           onChange={patchSettings}
+          onSyncSavedSetting={syncSavedSetting}
+          onDiscordStatusUpdated={(status) => {
+            setDiscordStatus(status);
+            onSaved();
+          }}
+          onToast={onToast}
         />
       )}
 

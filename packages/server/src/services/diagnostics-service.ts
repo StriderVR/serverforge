@@ -102,6 +102,7 @@ export class DiagnosticsService {
       const settings = this.db.getSettings(this.config.publicHost);
       if (settings.curseforgeApiKey) secrets.push(settings.curseforgeApiKey);
       if (settings.duckdnsToken) secrets.push(settings.duckdnsToken);
+      if (settings.discordBotToken) secrets.push(settings.discordBotToken);
     } catch {
       // Ignore if DB closed
     }
