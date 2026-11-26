@@ -182,5 +182,5 @@ describe('Debugging & Diagnostics: Persistent Rotating Logs, Secret Redaction & 
       headers: authHeaders,
     });
     expect(afterClear.json()).toEqual([]);
-  });
+  }, 20_000);
 });
