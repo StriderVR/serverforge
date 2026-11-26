@@ -169,6 +169,34 @@ export const api = {
   getCurseForgeServerPackUrl: (modId: number, fileId: number) =>
     request<{ url: string | null }>(`/api/curseforge/mods/${modId}/files/${fileId}/download-url`),
 
+  // Discord Bot Setup, Discovery & Live Status Panel
+  getDiscordStatus: () => request<import('@serverforge/shared').DiscordDiscoveryStatus>('/api/discord/status'),
+  connectDiscord: (token?: string) =>
+    request<import('@serverforge/shared').DiscordDiscoveryStatus>('/api/discord/connect', {
+      method: 'POST',
+      body: JSON.stringify(token !== undefined ? { token } : {}),
+    }),
+  disconnectDiscord: (clearToken = false) =>
+    request<import('@serverforge/shared').DiscordDiscoveryStatus>('/api/discord/disconnect', {
+      method: 'POST',
+      body: JSON.stringify({ clearToken }),
+    }),
+  syncDiscordCommands: () =>
+    request<{ ok: boolean; scope: string }>('/api/discord/sync-commands', {
+      method: 'POST',
+      body: '{}',
+    }),
+  sendDiscordTestMessage: (channelId?: string) =>
+    request<{ ok: boolean; channelName: string }>('/api/discord/test-message', {
+      method: 'POST',
+      body: JSON.stringify(channelId ? { channelId } : {}),
+    }),
+  postDiscordStatusPanel: (channelId?: string, repost = false) =>
+    request<{ ok: boolean; channelId: string; messageId: string; updatedExisting: boolean }>('/api/discord/panel', {
+      method: 'POST',
+      body: JSON.stringify({ ...(channelId ? { channelId } : {}), repost }),
+    }),
+
   // Smart Server Import
   discoverRunningServers: () => request<DiscoveredProcess[]>('/api/import/discover'),
   pickImportFolder: (initialDir?: string) =>

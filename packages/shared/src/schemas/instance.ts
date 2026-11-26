@@ -167,9 +167,14 @@ export const SystemSettingsSchema = z.object({
   maxLeaseMinutes: z.number().int().min(30).max(2880).default(480),
   defaultIdleTimeoutMinutes: z.number().int().min(0).max(240).default(30),
   warningBeforeStopMinutes: z.number().int().min(1).max(60).default(10),
+  discordBotToken: z.string().default(''),
+  discordGuildId: z.string().default(''),
   discordAllowedRoleIds: z.array(z.string()).default([]),
   discordAdminRoleIds: z.array(z.string()).default([]),
   discordNotifyChannelId: z.string().default(''),
+  discordStatusPanelChannelId: z.string().default(''),
+  discordStatusPanelMessageId: z.string().default(''),
+  discordPlayerActivityEnabled: z.boolean().default(false),
   githubRepo: z.string().default('StriderVR/serverforge'),
   autoUpdateOnBoot: z.boolean().default(false),
   dailyRebootEnabled: z.boolean().default(false),
@@ -182,6 +187,44 @@ export const SystemSettingsSchema = z.object({
   curseforgeApiKey: z.string().default(''),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
+
+export interface DiscordGuildSummary {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  memberCount: number | null;
+}
+
+export interface DiscordChannelSummary {
+  id: string;
+  name: string;
+  categoryName: string | null;
+  canSend: boolean;
+}
+
+export interface DiscordRoleSummary {
+  id: string;
+  name: string;
+  colorHex: string;
+  position: number;
+}
+
+export interface DiscordDiscoveryStatus {
+  connected: boolean;
+  connecting: boolean;
+  hasToken: boolean;
+  tokenSource: 'settings' | 'env' | 'none';
+  botTag: string | null;
+  botId: string | null;
+  applicationId: string | null;
+  inviteUrl: string | null;
+  lastError: string | null;
+  selectedGuildId: string;
+  guilds: DiscordGuildSummary[];
+  channels: DiscordChannelSummary[];
+  roles: DiscordRoleSummary[];
+  statusPanelActive: boolean;
+}
 
 export const HostMetricsSchema = z.object({
   hostname: z.string(),

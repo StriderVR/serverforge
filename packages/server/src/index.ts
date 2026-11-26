@@ -39,7 +39,9 @@ async function main() {
   console.log(`  Data Folder:  ${WORKSPACE_ROOT}`);
   console.log(`  Runtime Mode: ${sf.config.runtimeMode}`);
   console.log(`  Templates:    ${sf.catalog.listTemplates().length} games loaded`);
-  console.log(`  Discord Bot:  ${sf.config.discordToken ? 'Connecting...' : 'Disabled (set DISCORD_TOKEN in .env)'}`);
+  console.log(
+    `  Discord Bot:  ${sf.discord.getEffectiveToken().token ? 'Connecting...' : 'Not configured (configure in Settings -> Discord Bot)'}`
+  );
   console.log('======================================================');
   console.log('  Keep this window open while running game servers.');
   console.log('  Press Ctrl+C to save and shut down cleanly.');

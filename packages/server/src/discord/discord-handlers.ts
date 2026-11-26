@@ -356,4 +356,375 @@ export class DiscordCommandHandler {
       instanceIdForButtons: inst.status === 'running' ? inst.id : undefined,
     };
   }
+
+  /**
+   * Admin command: triggers a world backup snapshot for a server from Discord.
+   */
+  async handleBackup(
+    actor: DiscordActorContext,
+    serverIdentifier: string,
+    note?: string
+  ): Promise<CommandOutcome> {
+    const settings = this.db.getSettings(this.config.publicHost);
+    if (!hasDiscordAdminAccess(actor, settings)) {
+      return {
+        ok: false,
+        title: 'Admin Permission Required',
+        description: 'Only Discord admins or configured Admin Roles can trigger backups from Discord.',
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+
+    const inst = this.orchestrator.getInstance(serverIdentifier);
+    if (!inst) {
+      return {
+        ok: false,
+        title: 'Server Not Found',
+        description: `Could not find a server named \`${serverIdentifier}\`.`,
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+
+    try {
+      const backup = await this.orchestrator.createBackup(
+        inst.id,
+        actor.username,
+        note?.trim() || `Discord backup by ${actor.username}`
+      );
+      const sizeMb = (backup.sizeBytes / (1024 * 1024)).toFixed(2);
+      return {
+        ok: true,
+        title: `Backup Created — ${inst.name}`,
+        description: `World snapshot saved by **${actor.username}**.`,
+        color: COLOR_GREEN,
+        fields: [
+          { name: 'Archive', value: `\`${backup.filename}\``, inline: true },
+          { name: 'Size', value: `${sizeMb} MB`, inline: true },
+          { name: 'Note', value: backup.note || '—', inline: false },
+        ],
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        title: 'Backup Failed',
+        description: err instanceof Error ? err.message : String(err),
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+  }
+
+  /**
+   * Admin command: broadcasts an in-game announcement to a running server via RCON/stdin.
+   */
+  async handleSay(
+    actor: DiscordActorContext,
+    serverIdentifier: string,
+    message: string
+  ): Promise<CommandOutcome> {
+    const settings = this.db.getSettings(this.config.publicHost);
+    if (!hasDiscordAdminAccess(actor, settings)) {
+      return {
+        ok: false,
+        title: 'Admin Permission Required',
+        description: 'Only Discord admins or configured Admin Roles can broadcast announcements.',
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+
+    const cleanMessage = message.replace(/[\r\n]+/g, ' ').trim();
+    if (!cleanMessage) {
+      return {
+        ok: false,
+        title: 'Empty Message',
+        description: 'Provide a non-empty message to broadcast.',
+        color: COLOR_AMBER,
+        ephemeral: true,
+      };
+    }
+
+    const inst = this.orchestrator.getInstance(serverIdentifier);
+    if (!inst) {
+      return {
+        ok: false,
+        title: 'Server Not Found',
+        description: `Could not find a server named \`${serverIdentifier}\`.`,
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+
+    if (inst.status !== 'running') {
+      return {
+        ok: false,
+        title: 'Server Offline',
+        description: `**${inst.name}** must be running to broadcast an in-game message.`,
+        color: COLOR_AMBER,
+        ephemeral: true,
+      };
+    }
+
+    const command =
+      inst.gameId === 'ark-survival-ascended' || inst.gameId === 'palworld'
+        ? `Broadcast [Discord/${actor.username}] ${cleanMessage}`
+        : inst.gameId === 'factorio'
+          ? `[Discord/${actor.username}] ${cleanMessage}`
+          : `say [Discord/${actor.username}] ${cleanMessage}`;
+
+    try {
+      const reply = await this.orchestrator.sendCommand(inst.id, command, actor.username);
+      return {
+        ok: true,
+        title: `Announcement Sent — ${inst.name}`,
+        description: `> ${cleanMessage}`,
+        color: COLOR_GREEN,
+        fields: [
+          { name: 'Sent By', value: actor.username, inline: true },
+          ...(reply ? [{ name: 'Server Reply', value: `\`${reply.slice(0, 180)}\``, inline: false }] : []),
+        ],
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        title: 'Broadcast Failed',
+        description: err instanceof Error ? err.message : String(err),
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+  }
+
+  /**
+   * Admin command: manages Minecraft server whitelists (`add`, `remove`, `list`) via RCON.
+   */
+  async handleWhitelist(
+    actor: DiscordActorContext,
+    serverIdentifier: string,
+    action: 'add' | 'remove' | 'list',
+    player?: string
+  ): Promise<CommandOutcome> {
+    const settings = this.db.getSettings(this.config.publicHost);
+    if (!hasDiscordAdminAccess(actor, settings)) {
+      return {
+        ok: false,
+        title: 'Admin Permission Required',
+        description: 'Only Discord admins or configured Admin Roles can manage whitelists.',
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+
+    const inst = this.orchestrator.getInstance(serverIdentifier);
+    if (!inst) {
+      return {
+        ok: false,
+        title: 'Server Not Found',
+        description: `Could not find a server named \`${serverIdentifier}\`.`,
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+
+    if (inst.gameId !== 'minecraft' && inst.gameId !== 'minecraft-curseforge') {
+      return {
+        ok: false,
+        title: 'Unsupported Game',
+        description: `\`/server whitelist\` is currently supported for Minecraft servers (**${inst.name}** is \`${inst.gameId}\`).`,
+        color: COLOR_AMBER,
+        ephemeral: true,
+      };
+    }
+
+    if (inst.status !== 'running') {
+      return {
+        ok: false,
+        title: 'Server Offline',
+        description: `**${inst.name}** must be running to update its whitelist via RCON.`,
+        color: COLOR_AMBER,
+        ephemeral: true,
+      };
+    }
+
+    const safePlayer = (player ?? '').trim();
+    if (action !== 'list') {
+      if (!safePlayer || !/^[A-Za-z0-9_]{2,32}$/.test(safePlayer)) {
+        return {
+          ok: false,
+          title: 'Invalid Player Name',
+          description: 'Provide a valid Minecraft username (2–32 letters, numbers, or underscores).',
+          color: COLOR_AMBER,
+          ephemeral: true,
+        };
+      }
+    }
+
+    const cmd = action === 'list' ? 'whitelist list' : `whitelist ${action} ${safePlayer}`;
+    try {
+      const reply = await this.orchestrator.sendCommand(inst.id, cmd, actor.username);
+      return {
+        ok: true,
+        title: `Whitelist Updated — ${inst.name}`,
+        description: reply ? `\`${reply.slice(0, 500)}\`` : `Executed \`${cmd}\`.`,
+        color: COLOR_GREEN,
+        fields: [
+          { name: 'Action', value: action.toUpperCase(), inline: true },
+          ...(safePlayer ? [{ name: 'Player', value: `\`${safePlayer}\``, inline: true }] : []),
+        ],
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        title: 'Whitelist Command Failed',
+        description: err instanceof Error ? err.message : String(err),
+        color: COLOR_RED,
+        ephemeral: true,
+      };
+    }
+  }
+
+  /**
+   * Builds the persistent, auto-updating Live Status Panel embed and interactive quick-action button rows.
+   * Respects Discord's strict 5-action-row / 5-buttons-per-row message limits.
+   */
+  buildStatusPanelPayload(): StatusPanelPayload {
+    const settings = this.db.getSettings(this.config.publicHost);
+    const instances = this.orchestrator.listInstances().filter((i) => i.discordEnabled);
+    const running = this.orchestrator.getRunningCount();
+
+    if (instances.length === 0) {
+      return {
+        title: 'ServerForge — Live Server Status',
+        description: 'No Discord-enabled game servers have been deployed yet. Deploy one from the ServerForge Web Dashboard.',
+        color: COLOR_SLATE,
+        fields: [],
+        buttonRows: [[{ customId: 'sf:panel_refresh', label: 'Refresh Now', style: 'secondary' }]],
+      };
+    }
+
+    // Prioritize running servers first so online servers and Stop/+1h buttons appear at the top
+    const prioritized = [...instances].sort((a, b) => {
+      const rank = (s: ServerInstance['status']) => (s === 'running' ? 0 : s === 'starting' || s === 'installing' ? 1 : 2);
+      return rank(a.status) - rank(b.status);
+    });
+
+    const fields = prioritized.slice(0, 25).map((inst) => {
+      const tpl = this.catalog.getTemplate(inst.gameId);
+      const join = this.orchestrator.getJoinAddress(inst);
+      const statusLabel =
+        inst.status === 'running'
+          ? '🟢 ONLINE'
+          : inst.status === 'starting' || inst.status === 'installing'
+            ? `🟡 ${inst.status.toUpperCase()}`
+            : inst.status === 'error'
+              ? '🔴 ERROR'
+              : '⚫ OFFLINE';
+
+      const details: string[] = [statusLabel];
+      if (inst.status === 'running') {
+        details.push(`Join: \`${join}\``);
+        if (inst.stats?.playerCount !== null && inst.stats?.playerCount !== undefined) {
+          details.push(`Players: **${inst.stats.playerCount}/${inst.stats.maxPlayers ?? '?'}**`);
+        }
+        if (inst.activeLease) {
+          details.push(`Auto-stop: **${formatRemainingMinutes(inst.activeLease.expiresAt)}**`);
+        }
+      } else if (inst.status === 'error' && inst.lastError) {
+        details.push(inst.lastError.slice(0, 90));
+      } else {
+        details.push(`${tpl?.shortName ?? inst.gameId} • ${tpl?.resources.minRamGb ?? '?'} GB RAM`);
+      }
+
+      return {
+        name: `${inst.name} (\`${inst.slug}\`)`,
+        value: details.join(' • '),
+        inline: false,
+      };
+    });
+
+    // Build up to 4 rows of quick-action server buttons + 1 final utility row (max 5 rows total)
+    const buttonRows: StatusPanelButtonSpec[][] = [];
+    const shorten = (name: string, max = 18) => (name.length > max ? `${name.slice(0, max - 1)}…` : name);
+
+    for (const inst of prioritized) {
+      if (buttonRows.length >= 4) break;
+      const shortName = shorten(inst.name, 16);
+      if (inst.status === 'running') {
+        buttonRows.push([
+          { customId: `sf:extend:${inst.id}`, label: `+1h ${shortName}`, style: 'primary' },
+          { customId: `sf:stop:${inst.id}`, label: `Stop ${shortName}`, style: 'danger' },
+        ]);
+      } else if (inst.status === 'stopped' || inst.status === 'error') {
+        // Pack up to 3 Start buttons on a single row to keep the panel compact
+        const lastRow = buttonRows[buttonRows.length - 1];
+        const canPack = lastRow && lastRow.every((b) => b.customId.startsWith('sf:panel_start:')) && lastRow.length < 3;
+        const startBtn: StatusPanelButtonSpec = {
+          customId: `sf:panel_start:${inst.id}`,
+          label: `Start ${shortName}`,
+          style: 'success',
+        };
+        if (canPack) {
+          lastRow.push(startBtn);
+        } else {
+          buttonRows.push([startBtn]);
+        }
+      }
+    }
+
+    buttonRows.push([{ customId: 'sf:panel_refresh', label: 'Refresh Now', style: 'secondary' }]);
+
+    return {
+      title: `ServerForge — Live Server Status (${running}/${settings.maxConcurrentServers} Running)`,
+      description:
+        'Click a button below to start, extend, or stop a server — or use `/server start <name>`. This panel updates automatically.',
+      color: running > 0 ? COLOR_GREEN : COLOR_SLATE,
+      fields,
+      buttonRows,
+    };
+  }
+}
+
+export interface StatusPanelButtonSpec {
+  customId: string;
+  label: string;
+  style: 'primary' | 'secondary' | 'success' | 'danger';
+}
+
+export interface StatusPanelPayload {
+  title: string;
+  description: string;
+  color: number;
+  fields: Array<{ name: string; value: string; inline?: boolean }>;
+  buttonRows: StatusPanelButtonSpec[][];
+}
+
+/**
+ * Formats a compact Discord activity embed payload when players join or leave a server.
+ */
+export function formatPlayerActivityMessage(
+  instanceName: string,
+  joined: string[],
+  left: string[],
+  playerCount: number | null,
+  maxPlayers: number | null
+): { title: string; description: string; color: number } | null {
+  if (joined.length === 0 && left.length === 0) return null;
+
+  const lines: string[] = [];
+  for (const p of joined) {
+    lines.push(`🟢 **${p}** joined **${instanceName}**`);
+  }
+  for (const p of left) {
+    lines.push(`⚪ **${p}** left **${instanceName}**`);
+  }
+  const countSuffix =
+    playerCount !== null ? ` (${playerCount}${maxPlayers !== null ? `/${maxPlayers}` : ''} online)` : '';
+
+  return {
+    title: `Player Activity — ${instanceName}${countSuffix}`,
+    description: lines.join('\n'),
+    color: joined.length > 0 ? COLOR_GREEN : COLOR_SLATE,
+  };
 }
