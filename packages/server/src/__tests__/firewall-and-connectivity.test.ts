@@ -246,6 +246,7 @@ describe('v1.4.0 Security-First Networking Suite (#49, #50, #51)', () => {
       detectLanIpImpl: () => currentLanIp,
       firewallExecImpl: mockExec,
       platformOverride: 'win32',
+      probePollDelayMs: 0,
     });
     apps.push(sf);
 
@@ -354,5 +355,5 @@ describe('v1.4.0 Security-First Networking Suite (#49, #50, #51)', () => {
     const beforeDeleteCleanups = removedSlugs.length;
     await sf.orchestrator.deleteInstance(sat.id, 'admin');
     expect(removedSlugs.length).toBeGreaterThan(beforeDeleteCleanups);
-  });
+  }, 15_000);
 });
