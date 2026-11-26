@@ -47,6 +47,7 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
   const [autoStart, setAutoStart] = useState(false);
   const [discordEnabled, setDiscordEnabled] = useState(true);
   const [config, setConfig] = useState<Record<string, string | number | boolean>>({});
+  const [ports, setPorts] = useState<Record<string, number>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,6 +62,9 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
     const prevTemplate = lastTemplateRef.current;
     const nextAutoName = `${selected.shortName} Server`;
     const nextDefaults = buildTemplateDefaults(selected);
+    const nextDefaultPorts: Record<string, number> = Object.fromEntries(
+      selected.ports.map((p) => [p.key, p.defaultPort])
+    );
 
     if (sameTileSwitch && prevTemplate) {
       // Preserve shared form inputs (custom name, RAM, Auto-Start, Discord toggle, shared config keys)
@@ -91,6 +95,13 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
         }
         return merged;
       });
+      setPorts((prevPorts) => {
+        const merged = { ...nextDefaultPorts };
+        for (const p of selected.ports) {
+          if (prevPorts[p.key] !== undefined) merged[p.key] = prevPorts[p.key];
+        }
+        return merged;
+      });
     } else {
       setName(nextAutoName);
       setRuntime(selected.runtimes.native ? 'native' : 'docker');
@@ -98,6 +109,7 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
       setAutoStart(false);
       setDiscordEnabled(true);
       setConfig(nextDefaults);
+      setPorts(nextDefaultPorts);
     }
 
     lastTileKeyRef.current = activeTile.key;
@@ -146,6 +158,7 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
         gameId: selected.id,
         runtime,
         memoryLimitMb: Math.round(memoryGb * 1024),
+        ports,
         config,
         autoStart,
         discordEnabled,
@@ -356,6 +369,32 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
                   <span>Auto-start when server PC boots (after daily morning restart)</span>
                 </label>
               </div>
+
+              {selected.ports.map((portSpec) => (
+                <div className="field" key={`port-${portSpec.key}`}>
+                  <label htmlFor={`deploy-port-${portSpec.key}`}>
+                    {portSpec.label} ({portSpec.protocol.toUpperCase()})
+                  </label>
+                  <input
+                    id={`deploy-port-${portSpec.key}`}
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    step={1}
+                    className="input tabular"
+                    value={ports[portSpec.key] ?? portSpec.defaultPort}
+                    onChange={(e) =>
+                      setPorts((prev) => ({
+                        ...prev,
+                        [portSpec.key]: Number(e.target.value),
+                      }))
+                    }
+                  />
+                  <span className="field-hint">
+                    Default {portSpec.defaultPort}/{portSpec.protocol} • Change if your router blocks the default port
+                  </span>
+                </div>
+              ))}
 
               {visibleConfigFields.map((field) => (
                 <div key={field.key} className="field">

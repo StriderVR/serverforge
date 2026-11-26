@@ -445,6 +445,7 @@ export class ServerOrchestrator extends EventEmitter {
       name: patch.name?.trim() || existing.name,
       runtime: nextRuntime,
       memoryLimitMb: patch.memoryLimitMb ?? existing.memoryLimitMb,
+      ports: patch.ports ? { ...existing.ports, ...patch.ports } : existing.ports,
       autoStart: patch.autoStart ?? existing.autoStart,
       autoRestartOnCrash: patch.autoRestartOnCrash ?? existing.autoRestartOnCrash,
       discordEnabled: patch.discordEnabled ?? existing.discordEnabled,

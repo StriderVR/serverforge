@@ -109,6 +109,7 @@ export type CreateInstanceInput = z.input<typeof CreateInstanceInputSchema>;
 export const UpdateInstanceConfigInputSchema = z.object({
   name: z.string().min(2).max(60).optional(),
   memoryLimitMb: z.number().int().min(512).max(131072).optional(),
+  ports: z.record(z.string(), z.number().int().min(1024).max(65535)).optional(),
   runtime: RuntimeKindSchema.optional(),
   autoStart: z.boolean().optional(),
   autoRestartOnCrash: z.boolean().optional(),
