@@ -14,6 +14,17 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.4.1',
+    title: 'Opt-In Automatic Router Port Forwarding (UPnP / NAT-PMP)',
+    summary: 'Automatically open and clean up required game ports on compatible routers — disabled by default for security, with per-server controls.',
+    added: [
+      'Opt-in UPnP IGD (v1/v2) & NAT-PMP automatic port forwarding: maps only required external game ports while a server is running, renews leases automatically, and deletes mappings immediately on stop, delete, or shutdown.',
+      'Per-server UPnP override (Inherit / Enabled / Disabled) right inside each server\'s Network & Firewall tab so you can test UPnP on one game without affecting others.',
+      'Router UPnP Discovery card in Settings -> Network showing router model, router-reported WAN IP, and existing port mappings with clear error hints for port conflicts (718) and permanent-lease routers (725).',
+      'Crash-recovery cleanup persisted in SQLite so stale UPnP router rules are automatically removed on next startup.',
+    ],
+  },
+  {
     version: '1.4.0',
     title: 'Security-First Network Guide, Firewall & External Reachability Tester',
     summary: 'Pinpoint why remote friends cannot connect, open only the exact required game ports on your Private network profile, and keep internal management ports locked down locally.',

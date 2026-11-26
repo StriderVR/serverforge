@@ -21,6 +21,7 @@ async function main() {
   const sf = await createServerForgeApp();
   await sf.orchestrator.reconcileOnStartup();
   await sf.network.start(3000);
+  sf.upnp.startRenewalLoop(() => sf.orchestrator.listRunningInstances());
   sf.leaseReaper.start(30_000);
   sf.backupScheduler.start(60_000);
   sf.maintenance.start(60_000);

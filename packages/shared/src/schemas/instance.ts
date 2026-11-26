@@ -65,6 +65,9 @@ export const CrashSummarySchema = z.object({
 });
 export type CrashSummary = z.infer<typeof CrashSummarySchema>;
 
+export const UpnpModeSchema = z.enum(['inherit', 'enabled', 'disabled']);
+export type UpnpMode = z.infer<typeof UpnpModeSchema>;
+
 export const ServerInstanceSchema = z.object({
   id: z.string(),
   slug: z.string(),
@@ -78,6 +81,7 @@ export const ServerInstanceSchema = z.object({
   autoStart: z.boolean().default(false),
   autoRestartOnCrash: z.boolean().optional().default(true),
   discordEnabled: z.boolean().default(true),
+  upnpMode: UpnpModeSchema.optional(),
   containerId: z.string().nullable(),
   externalDir: z.string().nullable().optional().default(null),
   launchScript: z.string().nullable().optional().default(null),
@@ -102,6 +106,7 @@ export const CreateInstanceInputSchema = z.object({
   autoStart: z.boolean().optional().default(false),
   autoRestartOnCrash: z.boolean().optional().default(true),
   discordEnabled: z.boolean().optional().default(true),
+  upnpMode: UpnpModeSchema.optional().default('inherit'),
   startImmediately: z.boolean().optional().default(false),
 });
 export type CreateInstanceInput = z.input<typeof CreateInstanceInputSchema>;
@@ -114,6 +119,7 @@ export const UpdateInstanceConfigInputSchema = z.object({
   autoStart: z.boolean().optional(),
   autoRestartOnCrash: z.boolean().optional(),
   discordEnabled: z.boolean().optional(),
+  upnpMode: UpnpModeSchema.optional(),
   launchScript: z.string().nullable().optional(),
   config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
   backupPolicy: BackupPolicySchema.partial().optional(),
@@ -188,6 +194,7 @@ export const SystemSettingsSchema = z.object({
   curseforgeApiKey: z.string().default(''),
   lastSeenReleaseVersion: z.string().default(''),
   lastKnownLanIp: z.string().default(''),
+  upnpEnabled: z.boolean().default(false),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
 

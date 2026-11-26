@@ -10,6 +10,9 @@ import type {
   ServerInstance,
   ServerLease,
   SystemSettings,
+  UpnpMappingRecord,
+  UpnpMode,
+  UpnpProtocolKind,
 } from '@serverforge/shared';
 import { BackupPolicySchema, SystemSettingsSchema } from '@serverforge/shared';
 
@@ -108,6 +111,22 @@ export class AppDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(timestamp DESC);
+
+      CREATE TABLE IF NOT EXISTS upnp_mappings (
+        id TEXT PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        external_port INTEGER NOT NULL,
+        internal_port INTEGER NOT NULL,
+        protocol TEXT NOT NULL,
+        internal_client TEXT NOT NULL,
+        description TEXT NOT NULL,
+        lease_duration_seconds INTEGER NOT NULL,
+        protocol_used TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_upnp_mappings_inst ON upnp_mappings(instance_id);
     `);
 
     // Safe additive column migrations for existing v1.0/v1.1 SQLite databases
@@ -127,6 +146,9 @@ export class AppDatabase {
     }
     if (!colNames.has('backup_policy_json')) {
       this.db.exec('ALTER TABLE instances ADD COLUMN backup_policy_json TEXT;');
+    }
+    if (!colNames.has('upnp_mode')) {
+      this.db.exec("ALTER TABLE instances ADD COLUMN upnp_mode TEXT NOT NULL DEFAULT 'inherit';");
     }
   }
 
@@ -252,6 +274,7 @@ export class AppDatabase {
       autoStart: Boolean(row.auto_start),
       autoRestartOnCrash: row.auto_restart_on_crash === undefined ? true : Boolean(row.auto_restart_on_crash),
       discordEnabled: Boolean(row.discord_enabled),
+      upnpMode: (row.upnp_mode ? String(row.upnp_mode) : 'inherit') as UpnpMode,
       containerId: row.container_id ? String(row.container_id) : null,
       externalDir: row.external_dir ? String(row.external_dir) : null,
       launchScript: row.launch_script ? String(row.launch_script) : null,
@@ -287,14 +310,15 @@ export class AppDatabase {
 
   createInstance(instance: ServerInstance): ServerInstance {
     const policy = BackupPolicySchema.parse(instance.backupPolicy ?? {});
+    const upnpMode: UpnpMode = instance.upnpMode ?? 'inherit';
     this.db
       .prepare(
         `INSERT INTO instances (
           id, slug, name, game_id, runtime, status, ports_json, config_json,
-          memory_limit_mb, auto_start, auto_restart_on_crash, discord_enabled,
+          memory_limit_mb, auto_start, auto_restart_on_crash, discord_enabled, upnp_mode,
           container_id, external_dir, launch_script, last_error, last_crash_json,
           backup_policy_json, created_at, updated_at, last_started_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         instance.id,
@@ -309,6 +333,7 @@ export class AppDatabase {
         instance.autoStart ? 1 : 0,
         instance.autoRestartOnCrash === false ? 0 : 1,
         instance.discordEnabled ? 1 : 0,
+        upnpMode,
         instance.containerId,
         instance.externalDir ?? null,
         instance.launchScript ?? null,
@@ -322,6 +347,7 @@ export class AppDatabase {
     return {
       ...instance,
       autoRestartOnCrash: instance.autoRestartOnCrash === false ? false : true,
+      upnpMode,
       lastCrash: instance.lastCrash ?? null,
       backupPolicy: policy,
     };
@@ -339,6 +365,7 @@ export class AppDatabase {
       autoStart: boolean;
       autoRestartOnCrash: boolean;
       discordEnabled: boolean;
+      upnpMode: UpnpMode;
       containerId: string | null;
       externalDir: string | null;
       launchScript: string | null;
@@ -359,13 +386,14 @@ export class AppDatabase {
 
     const policy = BackupPolicySchema.parse(updated.backupPolicy ?? {});
     updated.backupPolicy = policy;
+    updated.upnpMode = updated.upnpMode ?? 'inherit';
 
     this.db
       .prepare(
         `UPDATE instances SET
           name = ?, runtime = ?, status = ?, ports_json = ?, config_json = ?,
           memory_limit_mb = ?, auto_start = ?, auto_restart_on_crash = ?, discord_enabled = ?,
-          container_id = ?, external_dir = ?, launch_script = ?,
+          upnp_mode = ?, container_id = ?, external_dir = ?, launch_script = ?,
           last_error = ?, last_crash_json = ?, backup_policy_json = ?,
           updated_at = ?, last_started_at = ?
          WHERE id = ?`
@@ -380,6 +408,7 @@ export class AppDatabase {
         updated.autoStart ? 1 : 0,
         updated.autoRestartOnCrash === false ? 0 : 1,
         updated.discordEnabled ? 1 : 0,
+        updated.upnpMode,
         updated.containerId,
         updated.externalDir ?? null,
         updated.launchScript ?? null,
@@ -579,5 +608,88 @@ export class AppDatabase {
       instanceId: r.instance_id ? String(r.instance_id) : null,
       details: r.details ? String(r.details) : null,
     }));
+  }
+
+  // --- UPnP Mappings (Crash-Recovery Tracking) ---
+
+  private mapUpnpRow(r: Record<string, unknown>): UpnpMappingRecord {
+    return {
+      id: String(r.id),
+      instanceId: String(r.instance_id),
+      externalPort: Number(r.external_port),
+      internalPort: Number(r.internal_port),
+      protocol: String(r.protocol) as 'TCP' | 'UDP',
+      internalClient: String(r.internal_client),
+      description: String(r.description),
+      leaseDurationSeconds: Number(r.lease_duration_seconds),
+      protocolUsed: String(r.protocol_used) as UpnpProtocolKind,
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at),
+    };
+  }
+
+  listUpnpMappings(instanceId?: string): UpnpMappingRecord[] {
+    const rows = instanceId
+      ? (this.db
+          .prepare('SELECT * FROM upnp_mappings WHERE instance_id = ? ORDER BY external_port ASC, protocol ASC')
+          .all(instanceId) as Record<string, unknown>[])
+      : (this.db
+          .prepare('SELECT * FROM upnp_mappings ORDER BY instance_id ASC, external_port ASC, protocol ASC')
+          .all() as Record<string, unknown>[]);
+    return rows.map((r) => this.mapUpnpRow(r));
+  }
+
+  upsertUpnpMapping(
+    entry: Omit<UpnpMappingRecord, 'id' | 'createdAt' | 'updatedAt'>
+  ): UpnpMappingRecord {
+    const now = new Date().toISOString();
+    const id = `${entry.instanceId}:${entry.externalPort}:${entry.protocol}`;
+    const existing = this.db.prepare('SELECT created_at FROM upnp_mappings WHERE id = ?').get(id) as
+      | { created_at: string }
+      | undefined;
+    const createdAt = existing?.created_at ?? now;
+    this.db
+      .prepare(
+        `INSERT INTO upnp_mappings (
+          id, instance_id, external_port, internal_port, protocol, internal_client,
+          description, lease_duration_seconds, protocol_used, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          internal_port = excluded.internal_port,
+          internal_client = excluded.internal_client,
+          description = excluded.description,
+          lease_duration_seconds = excluded.lease_duration_seconds,
+          protocol_used = excluded.protocol_used,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        id,
+        entry.instanceId,
+        entry.externalPort,
+        entry.internalPort,
+        entry.protocol,
+        entry.internalClient,
+        entry.description,
+        entry.leaseDurationSeconds,
+        entry.protocolUsed,
+        createdAt,
+        now
+      );
+    return {
+      id,
+      ...entry,
+      createdAt,
+      updatedAt: now,
+    };
+  }
+
+  deleteUpnpMapping(id: string): boolean {
+    const res = this.db.prepare('DELETE FROM upnp_mappings WHERE id = ?').run(id);
+    return Number(res.changes) > 0;
+  }
+
+  deleteUpnpMappingsForInstance(instanceId: string): number {
+    const res = this.db.prepare('DELETE FROM upnp_mappings WHERE instance_id = ?').run(instanceId);
+    return Number(res.changes);
   }
 }

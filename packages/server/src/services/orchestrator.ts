@@ -35,6 +35,7 @@ import { enableRconInServerProperties } from './import-service.js';
 import type { ModrinthService } from './modrinth-service.js';
 import type { NetworkAddressService } from './network-service.js';
 import type { TelemetryService } from './telemetry-service.js';
+import type { UpnpService } from './upnp-service.js';
 
 const CRASH_NOISE_PATTERNS = [
   /^\[Native\] Process exited/i,
@@ -102,6 +103,7 @@ export class ServerOrchestrator extends EventEmitter {
   private watchdogMaxRestarts = 3;
   private watchdogBaseBackoffMs = 10_000;
   private firewall?: FirewallService;
+  private upnp?: UpnpService;
 
   constructor(
     private readonly config: AppConfig,
@@ -126,6 +128,10 @@ export class ServerOrchestrator extends EventEmitter {
 
   attachFirewallService(firewall: FirewallService): void {
     this.firewall = firewall;
+  }
+
+  attachUpnpService(upnp: UpnpService): void {
+    this.upnp = upnp;
   }
 
   /** Allows tests to tune crash watchdog backoff & window timings deterministically. */
@@ -459,6 +465,7 @@ export class ServerOrchestrator extends EventEmitter {
       autoStart: patch.autoStart ?? existing.autoStart,
       autoRestartOnCrash: patch.autoRestartOnCrash ?? existing.autoRestartOnCrash,
       discordEnabled: patch.discordEnabled ?? existing.discordEnabled,
+      upnpMode: patch.upnpMode ?? existing.upnpMode,
       launchScript: patch.launchScript !== undefined ? patch.launchScript : existing.launchScript,
       config: patch.config ? { ...existing.config, ...patch.config } : existing.config,
       backupPolicy: nextPolicy,
@@ -469,6 +476,9 @@ export class ServerOrchestrator extends EventEmitter {
 
     if (portsChanged && this.firewall) {
       void this.firewall.removeInstanceRules(existing, { allowUac: false }).catch(() => {});
+    }
+    if (portsChanged && this.upnp) {
+      void this.upnp.unmapInstancePorts(existing.id).catch(() => {});
     }
 
     this.db.addAuditLog({
@@ -839,6 +849,20 @@ export class ServerOrchestrator extends EventEmitter {
         lastCrash: recoveredCrash,
       })!;
 
+      if (this.upnp && this.upnp.isEnabledForInstance(runningInst)) {
+        try {
+          const attempts = await this.upnp.mapInstancePorts(runningInst, template);
+          for (const a of attempts) {
+            this.appendLog(instance.id, `[UPnP] ${a.ok ? 'OK' : 'Warning'}: ${a.message}`);
+          }
+        } catch (err) {
+          this.appendLog(
+            instance.id,
+            `[UPnP] Warning: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+
       if (input.temporary) {
         const durationMin = Math.min(
           input.durationMinutes ?? settings.defaultLeaseMinutes,
@@ -944,6 +968,17 @@ export class ServerOrchestrator extends EventEmitter {
 
     this.db.deactivateLeasesForInstance(instance.id);
     this.statsCache.delete(instance.id);
+
+    if (this.upnp) {
+      try {
+        const res = await this.upnp.unmapInstancePorts(instance.id);
+        if (res.removed > 0) {
+          this.appendLog(instance.id, `[UPnP] Removed ${res.removed} router port mapping(s).`);
+        }
+      } catch {
+        // Non-blocking UPnP cleanup
+      }
+    }
 
     const stopped = this.db.updateInstance(instance.id, {
       status: 'stopped',
@@ -1352,6 +1387,13 @@ export class ServerOrchestrator extends EventEmitter {
         // Non-blocking best-effort firewall cleanup
       }
     }
+    if (this.upnp) {
+      try {
+        await this.upnp.unmapInstancePorts(instance.id);
+      } catch {
+        // Non-blocking best-effort UPnP cleanup
+      }
+    }
 
     // Only delete ServerForge-managed directory; NEVER touch a user's linked externalDir!
     const managedDir = this.getInstanceDir(instance.id);
@@ -1743,6 +1785,20 @@ export class ServerOrchestrator extends EventEmitter {
           this.db.deactivateLeasesForInstance(inst.id);
           this.db.updateInstance(inst.id, { status: 'stopped' });
         }
+      }
+    }
+
+    if (this.upnp) {
+      const runningIds = new Set(
+        this.db
+          .listInstances()
+          .filter((i) => i.status === 'running')
+          .map((i) => i.id)
+      );
+      try {
+        await this.upnp.reconcileStaleMappings(runningIds);
+      } catch {
+        // Non-blocking startup reconciliation
       }
     }
   }

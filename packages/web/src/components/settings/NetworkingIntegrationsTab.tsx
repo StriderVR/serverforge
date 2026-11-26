@@ -1,6 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Eye, EyeOff, Globe, Lock, Network, Package, RefreshCw } from 'lucide-react';
-import type { ConsolidatedPortMapEntry, NetworkStatus, PublicHostMode, SystemSettings } from '@serverforge/shared';
+import { AlertTriangle, CheckCircle2, Eye, EyeOff, Globe, Lock, Network, Package, RefreshCw, Router } from 'lucide-react';
+import type {
+  ConsolidatedPortMapEntry,
+  NetworkStatus,
+  PublicHostMode,
+  SystemSettings,
+  UpnpMappingRecord,
+  UpnpRouterInfo,
+} from '@serverforge/shared';
 import { api, formatHostSourceLabel } from '../../api';
 import type { PushToastFn } from '../ToastStack';
 
@@ -34,6 +41,10 @@ export function NetworkingIntegrationsTab({
   const [portMapLanIp, setPortMapLanIp] = useState<string | null>(null);
   const [loadingPortMap, setLoadingPortMap] = useState(false);
 
+  const [upnpRouter, setUpnpRouter] = useState<UpnpRouterInfo | null>(null);
+  const [upnpActiveMappings, setUpnpActiveMappings] = useState<UpnpMappingRecord[]>([]);
+  const [discoveringUpnp, setDiscoveringUpnp] = useState(false);
+
   const loadPortMap = async () => {
     setLoadingPortMap(true);
     try {
@@ -47,8 +58,37 @@ export function NetworkingIntegrationsTab({
     }
   };
 
+  const loadUpnpStatus = async () => {
+    try {
+      const res = await api.getUpnpStatus();
+      setUpnpRouter(res.router);
+      setUpnpActiveMappings(res.activeMappings);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDiscoverUpnp = async () => {
+    setDiscoveringUpnp(true);
+    try {
+      const res = await api.discoverUpnpRouter();
+      setUpnpRouter(res.router);
+      setUpnpActiveMappings(res.activeMappings);
+      if (res.router.found) {
+        onToast('success', `Discovered ${res.router.friendlyName ?? res.router.routerIp} (${res.router.protocol}).`);
+      } else {
+        onToast('info', res.router.error ?? 'No UPnP/NAT-PMP router responded.');
+      }
+    } catch (err) {
+      onToast('error', err instanceof Error ? err.message : 'Router discovery failed');
+    } finally {
+      setDiscoveringUpnp(false);
+    }
+  };
+
   useEffect(() => {
     void loadPortMap();
+    void loadUpnpStatus();
   }, []);
 
   const handleDetectNetwork = async () => {
@@ -416,6 +456,90 @@ export function NetworkingIntegrationsTab({
                 ))}
               </tbody>
             </table>
+          )}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Router size={16} /> Automatic Router Port Forwarding (UPnP IGD / NAT-PMP — Opt-In)
+          </h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className={`badge ${settings.upnpEnabled ? 'badge-running' : 'badge-stopped'}`}>
+              <span className="badge-dot" />
+              {settings.upnpEnabled ? 'ENABLED GLOBALLY' : 'OFF BY DEFAULT'}
+            </span>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={discoveringUpnp}
+              onClick={() => void handleDiscoverUpnp()}
+            >
+              <RefreshCw size={12} className={discoveringUpnp ? 'spin' : ''} />
+              {discoveringUpnp ? 'Scanning LAN...' : 'Discover Router'}
+            </button>
+          </div>
+        </div>
+        <div className="panel-body">
+          <label className="checkbox-row" style={{ marginBottom: 10 }}>
+            <input
+              type="checkbox"
+              checked={Boolean(settings.upnpEnabled)}
+              onChange={(e) => onChange({ upnpEnabled: e.target.checked })}
+            />
+            <span>
+              <strong>Enable automatic UPnP / NAT-PMP port forwarding by default</strong> for newly started servers
+              (remember to click <em>Save Settings</em>; you can also override this per-server in each server&apos;s{' '}
+              <strong>Network &amp; Firewall</strong> tab).
+            </span>
+          </label>
+          <p style={{ margin: '0 0 12px', fontSize: 12.5, color: 'var(--text-muted)' }}>
+            Security: ServerForge only maps required external game ports while a server is running, never maps internal-only ports (RCON / REST / Dashboard), and automatically deletes mappings on stop, shutdown, or after a PC crash.
+          </p>
+
+          {upnpRouter && (
+            <div className="settings-summary-strip" style={{ marginBottom: upnpRouter.error ? 10 : 0 }}>
+              <div>
+                <span className="settings-summary-label">Router Gateway</span>
+                <span className="mono">
+                  {upnpRouter.found
+                    ? `${upnpRouter.friendlyName ?? upnpRouter.modelName ?? 'Gateway'} (${upnpRouter.routerIp})`
+                    : 'Not detected'}
+                </span>
+              </div>
+              <div>
+                <span className="settings-summary-label">Protocol</span>
+                <span className="mono">{upnpRouter.protocol}</span>
+              </div>
+              <div>
+                <span className="settings-summary-label">Router WAN IP</span>
+                <span className="mono">{upnpRouter.externalIp ?? 'Unknown'}</span>
+              </div>
+              <div>
+                <span className="settings-summary-label">Active ServerForge Leases</span>
+                <span className="mono">{upnpActiveMappings.length}</span>
+              </div>
+            </div>
+          )}
+
+          {upnpRouter?.error && (
+            <div className="alert alert-info" style={{ marginTop: 10, marginBottom: 0 }}>
+              {upnpRouter.error}
+            </div>
+          )}
+
+          {upnpRouter?.found && upnpRouter.existingMappings.length > 0 && (
+            <div style={{ marginTop: 12, fontSize: 12.5, color: 'var(--text-secondary)' }}>
+              <strong>Existing Router UPnP Mappings ({upnpRouter.existingMappings.length}):</strong>{' '}
+              <span className="mono">
+                {upnpRouter.existingMappings
+                  .slice(0, 8)
+                  .map((m) => `${m.externalPort}/${m.protocol} -> ${m.internalClient}`)
+                  .join(', ')}
+                {upnpRouter.existingMappings.length > 8 ? ` (+${upnpRouter.existingMappings.length - 8} more)` : ''}
+              </span>
+            </div>
           )}
         </div>
       </section>
