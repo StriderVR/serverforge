@@ -129,10 +129,16 @@ export function TemplatesPage({ catalog, onRefreshCatalog, onConfirm, onToast }:
         })
       : window.confirm(`Remove custom game template "${id}"?`);
     if (!confirmed) return;
-    await api.deleteCustomTemplate(id);
-    if (inspectYaml?.id === id) setInspectYaml(null);
-    onToast?.('info', `Removed custom template "${id}".`);
-    onRefreshCatalog();
+    try {
+      await api.deleteCustomTemplate(id);
+      if (inspectYaml?.id === id) setInspectYaml(null);
+      onToast?.('info', `Removed custom template "${id}".`);
+      onRefreshCatalog();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to remove template';
+      setStatus({ kind: 'error', text: msg });
+      onToast?.('error', msg);
+    }
   };
 
   return (

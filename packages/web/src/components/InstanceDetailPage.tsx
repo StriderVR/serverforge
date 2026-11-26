@@ -288,7 +288,7 @@ export function InstanceDetailPage({
     }
   };
 
-  const runAction = async (fn: () => Promise<unknown>, successMsg?: string) => {
+  const runAction = async (fn: () => Promise<unknown>, successMsg?: string): Promise<boolean> => {
     setMessage(null);
     setBusy(true);
     try {
@@ -296,9 +296,11 @@ export function InstanceDetailPage({
       if (successMsg) setMessage({ kind: 'success', text: successMsg });
       await loadDetail(true);
       onGlobalRefresh();
+      return true;
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Operation failed' });
       await loadDetail(true);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -1067,11 +1069,11 @@ export function InstanceDetailPage({
                                 })
                               : window.confirm(confirmMsg);
                             if (!confirmed) return;
-                            await runAction(
+                            const ok = await runAction(
                               () => api.restoreBackup(detail.id, b.id),
                               `Restored "${b.filename}" (safety snapshot created before restore).`
                             );
-                            onToast?.('success', `Restored backup "${b.filename}".`);
+                            if (ok) onToast?.('success', `Restored backup "${b.filename}".`);
                           }}
                         >
                           <RotateCcw size={12} /> Restore
@@ -1091,8 +1093,11 @@ export function InstanceDetailPage({
                                 })
                               : window.confirm(`Permanently delete backup "${b.filename}"?`);
                             if (!confirmed) return;
-                            await runAction(() => api.deleteBackup(detail.id, b.id), `Deleted backup "${b.filename}".`);
-                            onToast?.('info', `Deleted backup "${b.filename}".`);
+                            const ok = await runAction(
+                              () => api.deleteBackup(detail.id, b.id),
+                              `Deleted backup "${b.filename}".`
+                            );
+                            if (ok) onToast?.('info', `Deleted backup "${b.filename}".`);
                           }}
                         >
                           <Trash2 size={12} /> Delete
