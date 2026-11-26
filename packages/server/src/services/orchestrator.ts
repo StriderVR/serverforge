@@ -22,6 +22,7 @@ import { BackupPolicySchema } from '@serverforge/shared';
 import type { CatalogService } from '../catalog/catalog-service.js';
 import type { AppConfig } from '../config.js';
 import type { AppDatabase } from '../db/database.js';
+import { javaTagToMajor, parseRequiredJavaFromCrashLogs } from '../runtimes/java-helper.js';
 import { ConsoleLogBuffer } from '../runtimes/runtime-adapter.js';
 import type { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { extractZipSafely } from './backup-scheduler.js';
@@ -29,6 +30,31 @@ import type { DiagnosticsService } from './diagnostics-service.js';
 import { enableRconInServerProperties } from './import-service.js';
 import type { NetworkAddressService } from './network-service.js';
 import type { TelemetryService } from './telemetry-service.js';
+
+const CRASH_NOISE_PATTERNS = [
+  /^\[Native\] Process exited/i,
+  /^\[Mock\] Process terminated/i,
+  /^\[Watchdog\]/i,
+  /^Restarting automatically in\b/i,
+  /press\s+Ctrl\s*\+\s*C/i,
+  /^Press any key to continue/i,
+];
+
+const CRASH_HIGH_SIGNAL_PATTERN =
+  /UnsupportedClassVersionError|LinkageError|OutOfMemoryError|Unrecognized VM option|Could not create the Java Virtual Machine|NoClassDefFoundError|ClassNotFoundException|BindException|Address already in use|Failed to bind to port|\bFATAL\b|Exception:|Error:/i;
+
+/**
+ * Selects the most informative crash line from the console tail, skipping generic
+ * wrapper exit/restart-prompt chatter and prioritizing real JVM/server errors.
+ */
+export function extractCrashDetailLine(logTail: string[]): string | undefined {
+  const candidates = [...logTail]
+    .reverse()
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !CRASH_NOISE_PATTERNS.some((pattern) => pattern.test(line)));
+
+  return candidates.find((line) => CRASH_HIGH_SIGNAL_PATTERN.test(line)) ?? candidates[0];
+}
 
 export class GuardrailError extends Error {
   constructor(message: string) {
@@ -501,21 +527,31 @@ export class ServerOrchestrator extends EventEmitter {
     const nowMs = Date.now();
     const crashedAt = new Date(nowMs).toISOString();
     const logTail = this.logs.getLines(instanceId).slice(-50).map((entry) => entry.line);
-    const detailLine = [...logTail]
-      .reverse()
-      .map((line) => line.trim())
-      .find(
-        (line) =>
-          line &&
-          !line.startsWith('[Native] Process exited') &&
-          !line.startsWith('[Mock] Process terminated') &&
-          !line.startsWith('[Watchdog]')
-      );
+    const detailLine = extractCrashDetailLine(logTail);
 
     const exitLabel = exitCode !== null ? `code ${exitCode}` : 'unexpected signal';
     const baseReason = detailLine
       ? `Server crashed unexpectedly (${exitLabel}): ${detailLine.slice(0, 220)}`
       : `Server crashed unexpectedly (${exitLabel})`;
+
+    // Detect JVM class-file version mismatch (e.g. class file version 69.0 requiring Java 25)
+    // and automatically upgrade JAVA_IMAGE_TAG before recovery restart so it doesn't crash-loop.
+    let updatedConfig: Record<string, string | number | boolean> | undefined;
+    const neededJava = parseRequiredJavaFromCrashLogs(logTail);
+    if (
+      neededJava !== null &&
+      (cur.gameId === 'minecraft-curseforge' || 'JAVA_IMAGE_TAG' in cur.config)
+    ) {
+      const currentMajor = javaTagToMajor(String(cur.config.JAVA_IMAGE_TAG ?? 'java21'));
+      if (neededJava > currentMajor) {
+        const nextTag = `java${neededJava}`;
+        updatedConfig = { ...cur.config, JAVA_IMAGE_TAG: nextTag };
+        this.appendLog(
+          instanceId,
+          `[Watchdog] Detected Java runtime version mismatch (requires Java ${neededJava}, was Java ${currentMajor}). Automatically switched JAVA_IMAGE_TAG to "${nextTag}" before recovery restart.`
+        );
+      }
+    }
 
     // Capture any active lease so auto-recovery can restore it cleanly
     const activeLease = this.db.getActiveLeaseForInstance(instanceId);
@@ -565,6 +601,7 @@ export class ServerOrchestrator extends EventEmitter {
         status: 'error',
         lastError: baseReason,
         lastCrash: crash,
+        ...(updatedConfig ? { config: updatedConfig } : {}),
       });
 
       this.appendLog(
@@ -618,6 +655,7 @@ export class ServerOrchestrator extends EventEmitter {
         status: 'error',
         lastError: haltReason,
         lastCrash: crash,
+        ...(updatedConfig ? { config: updatedConfig } : {}),
       });
 
       this.appendLog(instanceId, `[Watchdog] ${haltReason}`);

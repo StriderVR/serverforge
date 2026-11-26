@@ -41,28 +41,90 @@ export function parseJavaMajorVersion(versionOutput: string): number | null {
 }
 
 /**
- * Maps a ServerForge Java image tag ("java8", "java17", "java21", "latest") to a major Java version.
+ * Maps a ServerForge Java image tag ("java8", "java17", "java21", "java25", "latest") to a major Java version.
  */
 export function javaTagToMajor(tag: string | undefined): number {
   const normalized = (tag ?? '').trim().toLowerCase();
-  if (normalized === 'java8' || normalized === '8') return 8;
-  if (normalized === 'java17' || normalized === '17') return 17;
+  if (!normalized || normalized === 'latest') return 21;
+  const numeric = normalized.match(/^(?:java)?(\d+)$/);
+  if (numeric) {
+    const parsed = Number.parseInt(numeric[1], 10);
+    if (Number.isFinite(parsed) && parsed >= 8 && parsed <= 40) {
+      return parsed;
+    }
+  }
   return 21;
 }
 
 /**
- * Recommends the required Java major version for a Minecraft version string (e.g., "1.21.4", "1.20.1", "LATEST").
+ * Recommends the required Java major version for a Minecraft version string
+ * (e.g., "26.1.2" -> 25, "1.21.4" -> 21, "1.20.1" -> 17, "1.16.5" -> 8, "LATEST" -> 21).
  */
 export function recommendJavaMajorForMcVersion(mcVersion: string | undefined): number {
   const trimmed = (mcVersion ?? '').trim();
   if (!trimmed || trimmed.toUpperCase() === 'LATEST') return 21;
-  const m = trimmed.match(/^1\.(\d+)(?:\.(\d+))?/);
+  const m = trimmed.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
   if (!m) return 21;
-  const minor = Number.parseInt(m[1], 10);
-  const patch = m[2] ? Number.parseInt(m[2], 10) : 0;
-  if (minor > 20 || (minor === 20 && patch >= 5)) return 21;
-  if (minor >= 17) return 17;
-  return 8;
+  const major = Number.parseInt(m[1], 10);
+  const minor = Number.parseInt(m[2], 10);
+  const patch = m[3] ? Number.parseInt(m[3], 10) : 0;
+
+  // Mojang 2026+ year-based Minecraft versioning (26.1+) requires Java 25
+  if (major >= 26) return 25;
+
+  if (major === 1) {
+    if (minor >= 22) return 25;
+    if (minor > 20 || (minor === 20 && patch >= 5)) return 21;
+    if (minor >= 17) return 17;
+    return 8;
+  }
+
+  return 21;
+}
+
+/**
+ * Maps a minimum required Java major version to the smallest supported Adoptium LTS release
+ * capable of running it (8, 17, 21, 25, or higher).
+ */
+function normalizeToSupportedJavaMajor(rawMajor: number): number {
+  if (rawMajor <= 8) return 8;
+  if (rawMajor <= 17) return 17;
+  if (rawMajor <= 21) return 21;
+  if (rawMajor <= 25) return 25;
+  return rawMajor;
+}
+
+/**
+ * Inspects server crash logs for JVM version mismatch errors (such as
+ * `UnsupportedClassVersionError: ... (class file version 69.0)`) and returns
+ * the required Java major version (e.g., 69 - 44 = 25), or null if none detected.
+ */
+export function parseRequiredJavaFromCrashLogs(lines: string[]): number | null {
+  let highestRequired: number | null = null;
+
+  for (const line of lines) {
+    const classVerMatch = line.match(/class file version (\d+)\.\d+/i);
+    if (classVerMatch) {
+      const classMajor = Number.parseInt(classVerMatch[1], 10);
+      const javaMajor = classMajor - 44;
+      if (javaMajor >= 8 && javaMajor <= 40) {
+        const normalized = normalizeToSupportedJavaMajor(javaMajor);
+        highestRequired = highestRequired === null ? normalized : Math.max(highestRequired, normalized);
+      }
+      continue;
+    }
+
+    const explicitMatch = line.match(/(?:requires?|needs?)\s+Java\s+(\d+)(?:\+|\s+or\s+(?:higher|newer|later))?/i);
+    if (explicitMatch) {
+      const javaMajor = Number.parseInt(explicitMatch[1], 10);
+      if (javaMajor >= 8 && javaMajor <= 40) {
+        const normalized = normalizeToSupportedJavaMajor(javaMajor);
+        highestRequired = highestRequired === null ? normalized : Math.max(highestRequired, normalized);
+      }
+    }
+  }
+
+  return highestRequired;
 }
 
 export function buildAdoptiumJreUrl(
@@ -241,7 +303,7 @@ async function extractArchive(
 }
 
 /**
- * Ensures a Java runtime matching `requiredMajor` (8, 17, or 21) is available.
+ * Ensures a Java runtime matching `requiredMajor` (8, 17, 21, or 25) is available.
  * If missing, automatically downloads a portable Eclipse Temurin (Adoptium) JRE into `toolsDir/java/jre-<major>`.
  */
 export async function ensureJavaRuntime(
@@ -280,7 +342,7 @@ export async function ensureJavaRuntime(
   );
 
   const res = await fetchImpl(url, {
-    headers: { 'User-Agent': 'ServerForge/1.1.6 (+https://github.com/StriderVR/serverforge)' },
+    headers: { 'User-Agent': 'ServerForge (+https://github.com/StriderVR/serverforge)' },
     redirect: 'follow',
     signal: AbortSignal.timeout(300_000),
   });

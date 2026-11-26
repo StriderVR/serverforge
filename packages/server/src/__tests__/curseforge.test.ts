@@ -88,6 +88,9 @@ describe('CurseForge Modded Minecraft Integration', () => {
   });
 
   it('recommends the exact Java Docker image tag for Minecraft versions', () => {
+    expect(recommendJavaTag(['26.1.2', 'NeoForge'])).toBe('java25');
+    expect(recommendJavaTag(['26.1.2', '1.21.1', 'NeoForge'])).toBe('java25');
+    expect(recommendJavaTag(['1.22', 'Fabric'])).toBe('java25');
     expect(recommendJavaTag(['1.21.1', 'NeoForge'])).toBe('java21');
     expect(recommendJavaTag(['1.20.6', 'Fabric'])).toBe('java21');
     expect(recommendJavaTag(['1.20.1', 'Forge'])).toBe('java17');

@@ -171,4 +171,45 @@ describe('Crash Watchdog, Auto-Restart with Backoff & Discord Crash Alerts (Issu
     expect(after.lastCrash?.halted).toBe(true);
     expect(after.lastCrash?.nextRestartAt).toBeNull();
   });
+
+  it('extracts UnsupportedClassVersionError over restart prompt and auto-upgrades JAVA_IMAGE_TAG to java25 (Issue #34)', async () => {
+    const { sf, mockAdapter } = await makeApp();
+    const crashEvents: CrashSummary[] = [];
+    sf.orchestrator.on('instance:crash', ({ crash }) => crashEvents.push(crash));
+
+    const inst = sf.orchestrator.createInstance({
+      name: 'ATM11 Java25 Recovery',
+      gameId: 'minecraft-curseforge',
+      runtime: 'native',
+      autoRestartOnCrash: true,
+      config: {
+        CF_SLUG: 'all-the-mods-11',
+        JAVA_IMAGE_TAG: 'java21',
+      },
+    });
+    await sf.orchestrator.startInstance(inst.id);
+
+    const atm11CrashLines = [
+      'Error: LinkageError occurred while loading main class net.neoforged.fml.startup.Server',
+      'java.lang.UnsupportedClassVersionError: net/neoforged/fml/startup/Server has been compiled by a more recent version of the Java Runtime (class file version 69.0), this version of the Java Runtime only recognizes class file versions up to 65.0',
+      'Restarting automatically in 10 seconds (press Ctrl + C to cancel)',
+    ];
+
+    expect(mockAdapter.simulateCrash(inst.id, 1, atm11CrashLines)).toBe(true);
+    expect(crashEvents).toHaveLength(1);
+
+    // Must surface the real UnsupportedClassVersionError, NOT "Restarting automatically in 10 seconds"
+    expect(crashEvents[0].reason).toContain('UnsupportedClassVersionError');
+    expect(crashEvents[0].reason).not.toContain('Restarting automatically');
+
+    // Watchdog must immediately persist JAVA_IMAGE_TAG = 'java25' before recovery restart
+    const afterCrash = sf.db.getInstanceById(inst.id)!;
+    expect(afterCrash.config.JAVA_IMAGE_TAG).toBe('java25');
+
+    // Wait for automatic recovery restart (~40ms) to complete with upgraded config
+    await new Promise((r) => setTimeout(r, 200));
+    const recovered = sf.db.getInstanceById(inst.id)!;
+    expect(recovered.status).toBe('running');
+    expect(recovered.config.JAVA_IMAGE_TAG).toBe('java25');
+  });
 });

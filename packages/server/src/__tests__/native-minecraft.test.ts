@@ -5,16 +5,20 @@ import path from 'node:path';
 import archiver from 'archiver';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { GameTemplate, ServerInstance } from '@serverforge/shared';
+import { CatalogService } from '../catalog/catalog-service.js';
 import { QueryService } from '../query/query-service.js';
 import {
+  buildAdoptiumJreUrl,
   buildJavaEnv,
   ensureJavaRuntime,
   javaTagToMajor,
   parseJavaMajorVersion,
+  parseRequiredJavaFromCrashLogs,
   recommendJavaMajorForMcVersion,
 } from '../runtimes/java-helper.js';
 import {
   createPauseSafeBatchWrapper,
+  detectRequiredJavaMajorFromServerDir,
   findForgeOrNeoForgeInstallerJar,
   findNativeMinecraftLauncher,
   flattenSingleRootSubdir,
@@ -643,4 +647,166 @@ describe('Native Modded Minecraft & Java Auto-Provisioning (Issue #1)', () => {
     expect(launchPlan.extraEnv?.AUTO_RESTART).toBe('false');
     expect(launchPlan.extraEnv?.SERVER_RESTART).toBe('false');
   }, 30_000);
+
+  it('supports Java 25 tags, Minecraft 26.x year-based versions, Adoptium 25 URLs, and crash-log class version parsing (Issue #34)', () => {
+    expect(javaTagToMajor('java25')).toBe(25);
+    expect(javaTagToMajor('25')).toBe(25);
+    expect(recommendJavaMajorForMcVersion('26.1.2')).toBe(25);
+    expect(recommendJavaMajorForMcVersion('26.1')).toBe(25);
+    expect(recommendJavaMajorForMcVersion('1.22')).toBe(25);
+    expect(buildAdoptiumJreUrl(25, 'win32', 'x64')).toBe(
+      'https://api.adoptium.net/v3/binary/latest/25/ga/windows/x64/jre/hotspot/normal/eclipse'
+    );
+
+    expect(
+      parseRequiredJavaFromCrashLogs([
+        'java.lang.UnsupportedClassVersionError: net/neoforged/fml/startup/Server has been compiled by a more recent version of the Java Runtime (class file version 69.0), this version of the Java Runtime only recognizes class file versions up to 65.0',
+      ])
+    ).toBe(25);
+    expect(
+      parseRequiredJavaFromCrashLogs([
+        'UnsupportedClassVersionError: class file version 68.0',
+      ])
+    ).toBe(25);
+    expect(
+      parseRequiredJavaFromCrashLogs([
+        'UnsupportedClassVersionError: class file version 65.0',
+      ])
+    ).toBe(21);
+    expect(parseRequiredJavaFromCrashLogs(['Normal startup log line'])).toBeNull();
+  });
+
+  it('detects Minecraft/NeoForge 26.x Java 25 requirement from server directory without false positives on NeoForge 21.1 (Issue #34)', () => {
+    // ATM11 NeoForge 26.1.2.126 library directory
+    const atm11Dir = makeTempDir('sf-atm11-lib-');
+    fs.mkdirSync(path.join(atm11Dir, 'libraries', 'net', 'neoforged', 'neoforge', '26.1.2.126'), { recursive: true });
+    expect(detectRequiredJavaMajorFromServerDir(atm11Dir)).toBe(25);
+
+    // NeoForge 26.x installer JAR in root
+    const installerDir = makeTempDir('sf-atm11-inst-');
+    fs.writeFileSync(path.join(installerDir, 'neoforge-26.1.2.126-installer.jar'), 'jar');
+    expect(detectRequiredJavaMajorFromServerDir(installerDir)).toBe(25);
+
+    // Start script referencing NEOFORGE_VERSION=26.1.2.126
+    const scriptDir = makeTempDir('sf-atm11-script-');
+    fs.writeFileSync(path.join(scriptDir, 'startserver.bat'), '@echo off\r\nset NEOFORGE_VERSION=26.1.2.126\r\n');
+    expect(detectRequiredJavaMajorFromServerDir(scriptDir)).toBe(25);
+
+    // ATM10 NeoForge 21.1.72 must remain Java 21 (NOT upgraded to Java 25)
+    const atm10Dir = makeTempDir('sf-atm10-lib-');
+    fs.mkdirSync(path.join(atm10Dir, 'libraries', 'net', 'neoforged', 'neoforge', '21.1.72'), { recursive: true });
+    expect(detectRequiredJavaMajorFromServerDir(atm10Dir)).toBe(21);
+  });
+
+  it('re-enables previously disabled -XX:+UseCompactObjectHeaders in user_jvm_args.txt when running Java 25 (Issue #34)', () => {
+    const disabledOn21 = [
+      '# ATM11 JVM args',
+      '# [ServerForge] disabled for Java 21: -XX:+UseCompactObjectHeaders',
+      '-XX:+UseG1GC',
+      '-Xmx8192M',
+    ].join('\n');
+
+    // Staying on Java 21 keeps it disabled
+    const on21 = sanitizeUserJvmArgs(disabledOn21, 21);
+    expect(on21.restoredFlags).toEqual([]);
+    expect(on21.content).toContain('# [ServerForge] disabled for Java 21: -XX:+UseCompactObjectHeaders');
+
+    // Upgrading to Java 25 automatically restores it
+    const on25 = sanitizeUserJvmArgs(disabledOn21, 25);
+    expect(on25.restoredFlags).toEqual(['-XX:+UseCompactObjectHeaders']);
+    expect(on25.removedFlags).toEqual([]);
+    expect(on25.content).toContain('\n-XX:+UseCompactObjectHeaders\n');
+    expect(on25.content).not.toContain('[ServerForge] disabled for Java 21');
+  });
+
+  it('auto-upgrades an already-deployed ATM11 instance from java21 to Java 25 and restores UseCompactObjectHeaders (Issue #34)', async () => {
+    const toolsDir = makeTempDir('sf-atm11-tools-');
+    const serverDir = makeTempDir('sf-atm11-server-');
+    const stagingDir = makeTempDir('sf-atm11-jre25-');
+
+    // Simulate pre-extracted ATM11 server directory (already installed under v1.2.0 with java21)
+    const neoDir = path.join(serverDir, 'libraries', 'net', 'neoforged', 'neoforge', '26.1.2.126');
+    fs.mkdirSync(neoDir, { recursive: true });
+    fs.writeFileSync(path.join(neoDir, process.platform === 'win32' ? 'win_args.txt' : 'unix_args.txt'), '--nogui\n');
+    fs.writeFileSync(path.join(serverDir, '.serverforge-pack-installed'), '2026-11-25T00:00:00.000Z');
+    fs.writeFileSync(
+      path.join(serverDir, 'user_jvm_args.txt'),
+      '# [ServerForge] disabled for Java 21: -XX:+UseCompactObjectHeaders\n-XX:+UseG1GC\n-Xmx8192M\n',
+      'utf8'
+    );
+
+    // Build a fake portable Java 25 JRE archive matching the host platform (.zip on Windows, .tar.gz on Linux/macOS)
+    const archiveBuf =
+      process.platform === 'win32'
+        ? await createZipBuffer({
+            'jdk-25.0.1+8-jre/bin/java.exe': 'fake-java25-exe',
+          })
+        : await (async () => {
+            const fakeJreRoot = path.join(stagingDir, 'jdk-25.0.1+8-jre');
+            fs.mkdirSync(path.join(fakeJreRoot, 'bin'), { recursive: true });
+            fs.writeFileSync(
+              path.join(fakeJreRoot, 'bin', 'java'),
+              '#!/bin/sh\necho "openjdk version \\"25.0.1\\"" >&2\n',
+              { mode: 0o755 }
+            );
+            return createTarGzBuffer(fakeJreRoot);
+          })();
+
+    let requestedAdoptiumUrl = '';
+    const mockFetch = (async (url: string | URL) => {
+      requestedAdoptiumUrl = String(url);
+      return new Response(new Uint8Array(archiveBuf), {
+        status: 200,
+        headers: { 'content-length': String(archiveBuf.length) },
+      });
+    }) as unknown as typeof fetch;
+
+    const adapter = new NativeProcessRuntimeAdapter(toolsDir, new QueryService(), undefined, () => ({}), mockFetch);
+    const logs: string[] = [];
+    const inst = makeInstance({
+      name: 'ATM11 Existing',
+      config: {
+        CF_SLUG: 'all-the-mods-11',
+        JAVA_IMAGE_TAG: 'java21',
+        MOTD: 'ATM11',
+        MAX_PLAYERS: 8,
+        RCON_PASSWORD: 'rcon-password',
+      },
+      memoryLimitMb: 8192,
+    });
+
+    const launchPlan = await adapter.prepareCurseForgeServerPack(
+      inst,
+      serverDir,
+      (line) => logs.push(line)
+    );
+
+    if (requestedAdoptiumUrl) {
+      expect(requestedAdoptiumUrl).toContain('/v3/binary/latest/25/ga/');
+      expect(launchPlan.extraEnv?.JAVA_HOME).toContain('jre-25');
+    } else {
+      expect(logs.some((l) => l.includes('Java 25'))).toBe(true);
+    }
+    expect(logs.some((l) => l.includes('requiring Java 25') && l.includes('upgrading runtime automatically'))).toBe(true);
+    expect(logs.some((l) => l.includes('Re-enabled JVM flag(s) compatible with Java 25'))).toBe(true);
+
+    const updatedJvm = fs.readFileSync(path.join(serverDir, 'user_jvm_args.txt'), 'utf8');
+    expect(updatedJvm).toContain('-XX:+UseCompactObjectHeaders');
+    expect(updatedJvm).not.toContain('[ServerForge] disabled for Java 21');
+  }, 30_000);
+
+  it('normalizes legacy minecraft-curseforge.yaml on disk to include java25 option (Issue #34)', () => {
+    const builtInDir = makeTempDir('sf-cat-builtin-');
+    const customDir = makeTempDir('sf-cat-custom-');
+    const legacyYaml = fs
+      .readFileSync(path.resolve(process.cwd(), '../../catalog/games/minecraft-curseforge.yaml'), 'utf8')
+      .replace('["java25", "java21", "java17", "java8", "latest"]', '["java21", "java17", "java8", "latest"]');
+    fs.writeFileSync(path.join(builtInDir, 'minecraft-curseforge.yaml'), legacyYaml, 'utf8');
+
+    const catalog = new CatalogService(builtInDir, customDir);
+    const tpl = catalog.getTemplate('minecraft-curseforge')!;
+    const javaField = tpl.configFields.find((f) => f.key === 'JAVA_IMAGE_TAG')!;
+    expect(javaField.options).toContain('java25');
+    expect(javaField.options![0]).toBe('java25');
+  });
 });

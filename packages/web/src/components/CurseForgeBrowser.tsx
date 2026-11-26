@@ -8,7 +8,7 @@ export interface SelectedCurseForgePack {
   slug: string;
   fileId: string;
   pageUrl: string;
-  javaTag: 'java21' | 'java17' | 'java8' | 'latest';
+  javaTag: 'java25' | 'java21' | 'java17' | 'java8' | 'latest';
   serverPackZipUrl?: string;
   hasNativeServerPack?: boolean;
 }

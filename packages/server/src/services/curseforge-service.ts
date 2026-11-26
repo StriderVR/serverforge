@@ -4,7 +4,7 @@ const CURSEFORGE_API_BASE = 'https://api.curseforge.com/v1';
 const MINECRAFT_GAME_ID = 432;
 const MODPACKS_CLASS_ID = 4471;
 
-export type JavaImageTag = 'java21' | 'java17' | 'java8' | 'latest';
+export type JavaImageTag = 'java25' | 'java21' | 'java17' | 'java8' | 'latest';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -54,23 +54,34 @@ export function validateCurseForgeKeyFormat(key: string): string | null {
 
 /**
  * Selects the optimal itzg/minecraft-server Java Docker image tag for a given list
- * of CurseForge gameVersions (e.g., ["1.21.1", "NeoForge"] or ["1.12.2", "Forge"]).
+ * of CurseForge gameVersions (e.g., ["26.1.2", "NeoForge"], ["1.21.1", "NeoForge"], or ["1.12.2", "Forge"]).
  */
 export function recommendJavaTag(gameVersions: string[]): JavaImageTag {
   const mcVersions = gameVersions
     .map((v) => v.trim())
     .map((v) => {
-      const m = v.match(/^1\.(\d+)(?:\.(\d+))?$/);
+      const m = v.match(/^(\d+)\.(\d+)(?:\.(\d+))?$/);
       if (!m) return null;
-      return { minor: Number(m[1]), patch: Number(m[2] ?? 0) };
+      const major = Number(m[1]);
+      if (major !== 1 && major < 26) return null;
+      return { major, minor: Number(m[2]), patch: Number(m[3] ?? 0) };
     })
-    .filter((v): v is { minor: number; patch: number } => v !== null);
+    .filter((v): v is { major: number; minor: number; patch: number } => v !== null);
 
   if (mcVersions.length === 0) return 'java21';
 
-  mcVersions.sort((a, b) => (b.minor !== a.minor ? b.minor - a.minor : b.patch - a.patch));
+  mcVersions.sort((a, b) =>
+    b.major !== a.major
+      ? b.major - a.major
+      : b.minor !== a.minor
+        ? b.minor - a.minor
+        : b.patch - a.patch
+  );
   const latest = mcVersions[0];
 
+  if (latest.major >= 26 || (latest.major === 1 && latest.minor >= 22)) {
+    return 'java25';
+  }
   if (latest.minor > 20 || (latest.minor === 20 && latest.patch >= 5)) {
     return 'java21';
   }
