@@ -2,10 +2,14 @@ import React, { useState } from 'react';
 import { CheckCircle2, FileCode2, Plus, Trash2 } from 'lucide-react';
 import type { GameTemplate } from '@serverforge/shared';
 import { api } from '../api';
+import type { ConfirmDialogOptions } from './ConfirmModal';
+import type { PushToastFn } from './ToastStack';
 
 interface TemplatesPageProps {
   catalog: GameTemplate[];
   onRefreshCatalog: () => void;
+  onConfirm?: (opts: ConfirmDialogOptions) => Promise<boolean>;
+  onToast?: PushToastFn;
 }
 
 const VALHEIM_EXAMPLE_YAML = `id: valheim
@@ -72,7 +76,7 @@ configFields:
     required: true
 `;
 
-export function TemplatesPage({ catalog, onRefreshCatalog }: TemplatesPageProps) {
+export function TemplatesPage({ catalog, onRefreshCatalog, onConfirm, onToast }: TemplatesPageProps) {
   const [yamlText, setYamlText] = useState(VALHEIM_EXAMPLE_YAML);
   const [inspectYaml, setInspectYaml] = useState<{ id: string; yaml: string } | null>(null);
   const [status, setStatus] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
@@ -106,6 +110,7 @@ export function TemplatesPage({ catalog, onRefreshCatalog }: TemplatesPageProps)
         kind: 'success',
         text: `Imported "${created.name}"! It is now immediately available in One-Click Deploy.`,
       });
+      onToast?.('success', `Imported custom template "${created.name}".`);
       onRefreshCatalog();
     } catch (err) {
       setStatus({ kind: 'error', text: err instanceof Error ? err.message : 'Import failed' });
@@ -115,9 +120,18 @@ export function TemplatesPage({ catalog, onRefreshCatalog }: TemplatesPageProps)
   };
 
   const handleDeleteCustom = async (id: string) => {
-    if (!window.confirm(`Remove custom game template "${id}"?`)) return;
+    const confirmed = onConfirm
+      ? await onConfirm({
+          title: 'Remove Custom Template?',
+          message: `Remove custom game template "${id}" from your catalog?`,
+          confirmLabel: 'Remove Template',
+          tone: 'danger',
+        })
+      : window.confirm(`Remove custom game template "${id}"?`);
+    if (!confirmed) return;
     await api.deleteCustomTemplate(id);
     if (inspectYaml?.id === id) setInspectYaml(null);
+    onToast?.('info', `Removed custom template "${id}".`);
     onRefreshCatalog();
   };
 

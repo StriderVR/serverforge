@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Check,
   Clock,
@@ -9,6 +9,7 @@ import {
   Play,
   Plus,
   RotateCw,
+  Search,
   Server,
   Square,
   Terminal,
@@ -16,6 +17,8 @@ import {
 } from 'lucide-react';
 import type { GameTemplate, HostMetrics } from '@serverforge/shared';
 import { api, formatHostSourceLabel, formatRemaining, type InstanceWithJoin } from '../api';
+import { copyTextToClipboard } from '../utils/clipboard';
+import type { PushToastFn } from './ToastStack';
 
 interface OverviewPageProps {
   metrics: HostMetrics | null;
@@ -24,7 +27,10 @@ interface OverviewPageProps {
   onRefresh: () => void;
   onSelectInstance: (id: string) => void;
   onGoToDeploy: () => void;
+  onToast?: PushToastFn;
 }
+
+type FleetStatusFilter = 'all' | 'running' | 'stopped' | 'error';
 
 export function OverviewPage({
   metrics,
@@ -33,12 +39,46 @@ export function OverviewPage({
   onRefresh,
   onSelectInstance,
   onGoToDeploy,
+  onToast,
 }: OverviewPageProps) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fleetSearch, setFleetSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<FleetStatusFilter>('all');
 
   const templateMap = new Map(catalog.map((t) => [t.id, t]));
+
+  const filteredInstances = useMemo(() => {
+    const q = fleetSearch.trim().toLowerCase();
+    return instances.filter((inst) => {
+      if (statusFilter === 'running' && inst.status !== 'running' && inst.status !== 'starting' && inst.status !== 'installing') {
+        return false;
+      }
+      if (statusFilter === 'stopped' && inst.status !== 'stopped' && inst.status !== 'stopping') {
+        return false;
+      }
+      if (statusFilter === 'error' && inst.status !== 'error') {
+        return false;
+      }
+      if (q) {
+        const tplName = templateMap.get(inst.gameId)?.name ?? inst.gameId;
+        const hay = `${inst.name} ${inst.slug} ${tplName} ${inst.runtime}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [instances, fleetSearch, statusFilter, catalog]);
+
+  const statusCounts = useMemo(
+    () => ({
+      all: instances.length,
+      running: instances.filter((i) => i.status === 'running' || i.status === 'starting' || i.status === 'installing').length,
+      stopped: instances.filter((i) => i.status === 'stopped' || i.status === 'stopping').length,
+      error: instances.filter((i) => i.status === 'error').length,
+    }),
+    [instances]
+  );
 
   const runAction = async (id: string, fn: () => Promise<unknown>) => {
     setError(null);
@@ -53,10 +93,13 @@ export function OverviewPage({
     }
   };
 
-  const copyAddress = (id: string, address: string) => {
-    navigator.clipboard?.writeText(address).catch(() => {});
-    setCopiedId(id);
-    setTimeout(() => setCopiedId((prev) => (prev === id ? null : prev)), 1800);
+  const copyAddress = async (id: string, address: string) => {
+    const ok = await copyTextToClipboard(address);
+    if (ok) {
+      setCopiedId(id);
+      onToast?.('success', `Copied join address: ${address}`);
+      setTimeout(() => setCopiedId((prev) => (prev === id ? null : prev)), 1800);
+    }
   };
 
   const ramPct =
@@ -167,6 +210,45 @@ export function OverviewPage({
         </div>
       </section>
 
+      {/* Fleet Search & Status Filter (shown when 2+ servers exist) */}
+      {instances.length >= 2 && (
+        <div className="fleet-filter-bar">
+          <div className="terminal-toolbar-group">
+            {(['all', 'running', 'stopped', 'error'] as FleetStatusFilter[]).map((key) => {
+              if (key === 'error' && statusCounts.error === 0 && statusFilter !== 'error') return null;
+              const label =
+                key === 'all'
+                  ? `All (${statusCounts.all})`
+                  : key === 'running'
+                    ? `Running (${statusCounts.running})`
+                    : key === 'stopped'
+                      ? `Stopped (${statusCounts.stopped})`
+                      : `Error (${statusCounts.error})`;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className={`terminal-filter-btn ${statusFilter === key ? 'active' : ''} ${key === 'error' && statusCounts.error > 0 ? 'has-errors' : ''}`}
+                  onClick={() => setStatusFilter(key)}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="terminal-search">
+            <Search size={13} />
+            <input
+              type="text"
+              aria-label="Search servers"
+              placeholder="Search servers or games..."
+              value={fleetSearch}
+              onChange={(e) => setFleetSearch(e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Instances List */}
       {instances.length === 0 ? (
         <div className="panel empty-state">
@@ -181,9 +263,26 @@ export function OverviewPage({
             Deploy Your First Server
           </button>
         </div>
+      ) : filteredInstances.length === 0 ? (
+        <div className="panel empty-state">
+          <h3>No servers match your filter</h3>
+          <p style={{ margin: '0 auto 14px', fontSize: 13.5 }}>
+            Try clearing the search query or switching back to All servers.
+          </p>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => {
+              setFleetSearch('');
+              setStatusFilter('all');
+            }}
+          >
+            Reset Filters
+          </button>
+        </div>
       ) : (
         <section className="instance-grid" aria-label="Deployed game servers">
-          {instances.map((inst) => {
+          {filteredInstances.map((inst) => {
             const tpl = templateMap.get(inst.gameId);
             const isBusy = busyId === inst.id;
             const isRunning = inst.status === 'running';

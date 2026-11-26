@@ -25,6 +25,10 @@ import {
 import type { BackupPolicy, GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
 import { api, formatHostSourceLabel, formatRemaining, type InstanceDetail, type InstanceWithJoin } from '../api';
 import { copyTextToClipboard } from '../utils/clipboard';
+import type { ConfirmDialogOptions } from './ConfirmModal';
+import type { PushToastFn } from './ToastStack';
+
+export type InstanceTabId = 'console' | 'config' | 'backups';
 
 interface InstanceDetailPageProps {
   instanceId: string;
@@ -32,11 +36,15 @@ interface InstanceDetailPageProps {
   catalog: GameTemplate[];
   metrics: HostMetrics | null;
   liveLogs: Array<{ timestamp: string; line: string }>;
+  activeTab?: InstanceTabId;
+  onTabChange?: (tab: InstanceTabId) => void;
   autoBoot?: boolean;
   onAutoBootConsumed?: () => void;
   onBack: () => void;
   onDeleted: () => void;
   onGlobalRefresh: () => void;
+  onConfirm?: (opts: ConfirmDialogOptions) => Promise<boolean>;
+  onToast?: PushToastFn;
 }
 
 const PROGRESS_LINE_RE = /\[(?:Download|Java)\][^\n]*?(\d{1,3})%/;
@@ -86,14 +94,23 @@ export function InstanceDetailPage({
   catalog,
   metrics,
   liveLogs,
+  activeTab,
+  onTabChange,
   autoBoot = false,
   onAutoBootConsumed,
   onBack,
   onDeleted,
   onGlobalRefresh,
+  onConfirm,
+  onToast,
 }: InstanceDetailPageProps) {
   const [detail, setDetail] = useState<InstanceDetail | null>(null);
-  const [tab, setTab] = useState<'console' | 'config' | 'backups'>('console');
+  const [internalTab, setInternalTab] = useState<InstanceTabId>(activeTab ?? 'console');
+  const tab = activeTab ?? internalTab;
+  const setTab = (next: InstanceTabId) => {
+    setInternalTab(next);
+    onTabChange?.(next);
+  };
   const [command, setCommand] = useState('');
   const [backupNote, setBackupNote] = useState('');
   const [editConfig, setEditConfig] = useState<Record<string, string | number | boolean>>({});
@@ -334,7 +351,15 @@ export function InstanceDetailPage({
     const prompt = detail.externalDir
       ? `Unlink "${detail.name}" from ServerForge? Your original server files in ${detail.externalDir} will NOT be deleted.`
       : `Permanently delete "${detail.name}" and its ServerForge-managed server files?`;
-    if (!window.confirm(prompt)) return;
+    const confirmed = onConfirm
+      ? await onConfirm({
+          title: detail.externalDir ? 'Unlink Server?' : 'Delete Server?',
+          message: prompt,
+          confirmLabel: detail.externalDir ? 'Unlink Server' : 'Delete Permanently',
+          tone: 'danger',
+        })
+      : window.confirm(prompt);
+    if (!confirmed) return;
     setBusy(true);
     try {
       await api.deleteInstance(detail.id);
@@ -1029,15 +1054,24 @@ export function InstanceDetailPage({
                           className="btn btn-sm"
                           disabled={busy}
                           title="Restore this snapshot (auto-creates a safety backup first)"
-                          onClick={() => {
+                          onClick={async () => {
                             const confirmMsg = `Restore "${detail.name}" from backup "${b.filename}"?\n\n${
                               !isStopped ? 'The running server will be saved & stopped first. ' : ''
                             }ServerForge will automatically create a pre-restore safety snapshot before replacing world files.`;
-                            if (!window.confirm(confirmMsg)) return;
-                            void runAction(
+                            const confirmed = onConfirm
+                              ? await onConfirm({
+                                  title: 'Restore World Backup?',
+                                  message: confirmMsg,
+                                  confirmLabel: 'Restore Snapshot',
+                                  tone: 'primary',
+                                })
+                              : window.confirm(confirmMsg);
+                            if (!confirmed) return;
+                            await runAction(
                               () => api.restoreBackup(detail.id, b.id),
                               `Restored "${b.filename}" (safety snapshot created before restore).`
                             );
+                            onToast?.('success', `Restored backup "${b.filename}".`);
                           }}
                         >
                           <RotateCcw size={12} /> Restore
@@ -1047,9 +1081,18 @@ export function InstanceDetailPage({
                           className="btn btn-sm btn-danger"
                           disabled={busy}
                           title="Delete backup from disk"
-                          onClick={() => {
-                            if (!window.confirm(`Permanently delete backup "${b.filename}"?`)) return;
-                            void runAction(() => api.deleteBackup(detail.id, b.id), `Deleted backup "${b.filename}".`);
+                          onClick={async () => {
+                            const confirmed = onConfirm
+                              ? await onConfirm({
+                                  title: 'Delete Backup Archive?',
+                                  message: `Permanently delete backup "${b.filename}" from disk?`,
+                                  confirmLabel: 'Delete Backup',
+                                  tone: 'danger',
+                                })
+                              : window.confirm(`Permanently delete backup "${b.filename}"?`);
+                            if (!confirmed) return;
+                            await runAction(() => api.deleteBackup(detail.id, b.id), `Deleted backup "${b.filename}".`);
+                            onToast?.('info', `Deleted backup "${b.filename}".`);
                           }}
                         >
                           <Trash2 size={12} /> Delete
