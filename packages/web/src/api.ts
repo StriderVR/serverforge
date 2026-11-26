@@ -42,6 +42,10 @@ import type {
   SystemSettings,
   UpdateInstanceConfigInput,
   UpdaterStatus,
+  UpnpInstanceStatus,
+  UpnpMappingRecord,
+  UpnpMode,
+  UpnpRouterInfo,
   WindowsRebootInspection,
 } from '@serverforge/shared';
 
@@ -270,6 +274,30 @@ export const api = {
     request<InstanceConnectivityReport>(`/api/instances/${id}/network-check`, {
       method: 'POST',
       body: '{}',
+    }),
+  getUpnpStatus: () =>
+    request<{ globalEnabled: boolean; router: UpnpRouterInfo | null; activeMappings: UpnpMappingRecord[] }>(
+      '/api/network/upnp/status'
+    ),
+  discoverUpnpRouter: () =>
+    request<{ globalEnabled: boolean; router: UpnpRouterInfo; activeMappings: UpnpMappingRecord[] }>(
+      '/api/network/upnp/discover',
+      { method: 'POST', body: '{}' }
+    ),
+  getInstanceUpnp: (id: string) => request<UpnpInstanceStatus>(`/api/instances/${id}/upnp`),
+  setInstanceUpnpMode: (id: string, upnpMode: UpnpMode) =>
+    request<UpnpInstanceStatus>(`/api/instances/${id}/upnp`, {
+      method: 'PATCH',
+      body: JSON.stringify({ upnpMode }),
+    }),
+  mapInstanceUpnp: (id: string) =>
+    request<UpnpInstanceStatus>(`/api/instances/${id}/upnp/map`, {
+      method: 'POST',
+      body: '{}',
+    }),
+  unmapInstanceUpnp: (id: string) =>
+    request<{ ok: boolean; removed: number; status: UpnpInstanceStatus }>(`/api/instances/${id}/upnp`, {
+      method: 'DELETE',
     }),
   createInstance: (input: CreateInstanceInput) =>
     request<InstanceWithJoin>('/api/instances', {

@@ -138,3 +138,63 @@ export interface ConsolidatedPortMapEntry {
   primary: boolean;
   conflictWith: string[];
 }
+
+export type UpnpProtocolKind = 'upnp-igd-v2' | 'upnp-igd-v1' | 'nat-pmp' | 'none';
+
+export interface UpnpExistingRouterMapping {
+  externalPort: number;
+  internalPort: number;
+  protocol: 'TCP' | 'UDP';
+  internalClient: string;
+  description: string;
+  enabled: boolean;
+  leaseDuration: number;
+}
+
+export interface UpnpRouterInfo {
+  found: boolean;
+  protocol: UpnpProtocolKind;
+  friendlyName: string | null;
+  modelName: string | null;
+  routerIp: string | null;
+  externalIp: string | null;
+  serviceType: string | null;
+  existingMappings: UpnpExistingRouterMapping[];
+  error: string | null;
+  checkedAt: string;
+}
+
+export interface UpnpMappingRecord {
+  id: string;
+  instanceId: string;
+  externalPort: number;
+  internalPort: number;
+  protocol: 'TCP' | 'UDP';
+  internalClient: string;
+  description: string;
+  leaseDurationSeconds: number;
+  protocolUsed: UpnpProtocolKind;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpnpPortMapAttempt {
+  portKey: string;
+  label: string;
+  port: number;
+  protocol: 'TCP' | 'UDP';
+  ok: boolean;
+  permanentFallback: boolean;
+  errorCode?: string;
+  message: string;
+}
+
+export interface UpnpInstanceStatus {
+  globalEnabled: boolean;
+  instanceMode: 'inherit' | 'enabled' | 'disabled';
+  effectiveEnabled: boolean;
+  router: UpnpRouterInfo | null;
+  activeMappings: UpnpMappingRecord[];
+  lastAttempts: UpnpPortMapAttempt[];
+}
+

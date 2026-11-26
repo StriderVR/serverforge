@@ -13,6 +13,7 @@ import {
   StartInstanceInputSchema,
   SystemSettingsSchema,
   UpdateInstanceConfigInputSchema,
+  UpnpModeSchema,
   type DiagnosticLevel,
   type WsServerEvent,
 } from '@serverforge/shared';
@@ -52,6 +53,7 @@ import { NetworkAddressService, normalizeDuckDnsDomain } from '../services/netwo
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
 import { TelemetryService } from '../services/telemetry-service.js';
 import { UpdaterService } from '../services/updater-service.js';
+import { UpnpService } from '../services/upnp-service.js';
 
 const AUTH_COOKIE = 'sf_token';
 
@@ -78,6 +80,8 @@ export interface CreateAppOptions extends Partial<AppConfig> {
   firewallExecImpl?: FirewallExecFn;
   platformOverride?: NodeJS.Platform;
   probePollDelayMs?: number;
+  ssdpDiscoverImpl?: () => Promise<string[]>;
+  natPmpRequestImpl?: (gatewayIp: string, packet: Buffer) => Promise<Buffer | null>;
 }
 
 export interface ServerForgeApp {
@@ -90,6 +94,7 @@ export interface ServerForgeApp {
   telemetry: TelemetryService;
   network: NetworkAddressService;
   firewall: FirewallService;
+  upnp: UpnpService;
   connectivity: ConnectivityService;
   diagnostics: DiagnosticsService;
   orchestrator: ServerOrchestrator;
@@ -115,6 +120,8 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     firewallExecImpl,
     platformOverride,
     probePollDelayMs,
+    ssdpDiscoverImpl,
+    natPmpRequestImpl,
     ...configOverrides
   } = overrides;
   const config = loadConfig(configOverrides);
@@ -157,6 +164,12 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     execImpl: firewallExecImpl,
     disableOsExec: config.runtimeMode === 'mock' && !firewallExecImpl,
   });
+  const upnp = new UpnpService(config, db, catalog, network, {
+    fetchImpl,
+    ssdpDiscoverImpl,
+    natPmpRequestImpl,
+    disableNetworkDiscovery: config.runtimeMode === 'mock' && !ssdpDiscoverImpl && !natPmpRequestImpl,
+  });
   const connectivity = new ConnectivityService(config, db, catalog, network, firewall, {
     platform: platformOverride,
     fetchImpl,
@@ -177,6 +190,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     modrinth
   );
   orchestrator.attachFirewallService(firewall);
+  orchestrator.attachUpnpService(upnp);
   diagnostics.attachOrchestrator(orchestrator);
   diagnostics.attachConnectivity(connectivity);
   const backupScheduler = new BackupSchedulerService(db, orchestrator);
@@ -595,6 +609,96 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const inst = orchestrator.getInstance(id);
     if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
     return connectivity.runConnectivityCheck(inst);
+  });
+
+  // --- Opt-In UPnP IGD / NAT-PMP Automatic Router Port Forwarding (#52) ---
+
+  app.get('/api/network/upnp/status', { preHandler: requireAuth }, async () => {
+    return {
+      globalEnabled: upnp.isGlobalEnabled(),
+      router: upnp.getCachedRouter(),
+      activeMappings: db.listUpnpMappings(),
+    };
+  });
+
+  app.post('/api/network/upnp/discover', { preHandler: requireAuth }, async () => {
+    const router = await upnp.discoverRouter(true);
+    return {
+      globalEnabled: upnp.isGlobalEnabled(),
+      router,
+      activeMappings: db.listUpnpMappings(),
+    };
+  });
+
+  app.get('/api/instances/:id/upnp', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    return upnp.getInstanceStatus(inst);
+  });
+
+  app.patch('/api/instances/:id/upnp', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    const body = req.body as { upnpMode?: unknown } | undefined;
+    const parsed = UpnpModeSchema.safeParse(body?.upnpMode);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'upnpMode must be "inherit", "enabled", or "disabled".' });
+    }
+    const updated = db.updateInstance(inst.id, { upnpMode: parsed.data });
+    if (!updated) return reply.status(404).send({ error: 'Server instance not found.' });
+
+    const template = catalog.getTemplate(updated.gameId);
+    if (upnp.isEnabledForInstance(updated) && updated.status === 'running') {
+      await upnp.mapInstancePorts(updated, template);
+    } else if (!upnp.isEnabledForInstance(updated)) {
+      await upnp.unmapInstancePorts(updated.id);
+    }
+
+    db.addAuditLog({
+      actor: req.authUser?.username || 'admin',
+      source: 'web',
+      action: 'instance.upnp_mode',
+      instanceId: updated.id,
+      details: `Set UPnP auto-forwarding mode for ${updated.name} to "${parsed.data}"`,
+    });
+    return upnp.getInstanceStatus(updated);
+  });
+
+  app.post('/api/instances/:id/upnp/map', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    const template = catalog.getTemplate(inst.gameId);
+    const attempts = await upnp.mapInstancePorts(inst, template, { force: true });
+    db.addAuditLog({
+      actor: req.authUser?.username || 'admin',
+      source: 'web',
+      action: 'instance.upnp_mapped',
+      instanceId: inst.id,
+      details: `Requested UPnP port mappings for ${inst.name}: ${attempts.filter((a) => a.ok).length}/${attempts.length} succeeded`,
+    });
+    return upnp.getInstanceStatus(inst);
+  });
+
+  app.delete('/api/instances/:id/upnp', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Server instance not found.' });
+    const res = await upnp.unmapInstancePorts(inst.id);
+    db.addAuditLog({
+      actor: req.authUser?.username || 'admin',
+      source: 'web',
+      action: 'instance.upnp_unmapped',
+      instanceId: inst.id,
+      details: `Removed ${res.removed} UPnP router mapping(s) for ${inst.name}`,
+    });
+    return {
+      ok: true,
+      removed: res.removed,
+      status: upnp.getInstanceStatus(inst),
+    };
   });
 
   app.get('/api/audit', { preHandler: requireAuth }, async (req) => {
@@ -1653,6 +1757,8 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   const close = async () => {
     clearInterval(metricsTimer);
     network.stop();
+    upnp.stop();
+    await upnp.unmapAll().catch(() => {});
     backupScheduler.stop();
     leaseReaper.stop();
     maintenance.stop();
@@ -1678,6 +1784,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     telemetry,
     network,
     firewall,
+    upnp,
     connectivity,
     diagnostics,
     orchestrator,

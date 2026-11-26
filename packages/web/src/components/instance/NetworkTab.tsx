@@ -9,6 +9,7 @@ import {
   Globe,
   Lock,
   RefreshCw,
+  Router,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -20,6 +21,8 @@ import type {
   FirewallStatus,
   InstanceConnectivityReport,
   InstanceNetworkGuide,
+  UpnpInstanceStatus,
+  UpnpMode,
 } from '@serverforge/shared';
 import { api } from '../../api';
 import { copyTextToClipboard } from '../../utils/clipboard';
@@ -56,11 +59,13 @@ export function NetworkTab({
 }: NetworkTabProps) {
   const [guide, setGuide] = useState<InstanceNetworkGuide | null>(null);
   const [firewall, setFirewall] = useState<FirewallStatus | null>(null);
+  const [upnp, setUpnp] = useState<UpnpInstanceStatus | null>(null);
   const [report, setReport] = useState<InstanceConnectivityReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
   const [applyingFw, setApplyingFw] = useState(false);
   const [removingFw, setRemovingFw] = useState(false);
+  const [busyUpnp, setBusyUpnp] = useState(false);
   const [switchPrivate, setSwitchPrivate] = useState(true);
   const [copiedRouter, setCopiedRouter] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
@@ -70,12 +75,14 @@ export function NetworkTab({
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [g, fw] = await Promise.all([
+      const [g, fw, up] = await Promise.all([
         api.getInstanceNetworkGuide(instanceId),
         api.getInstanceFirewall(instanceId),
+        api.getInstanceUpnp(instanceId).catch(() => null),
       ]);
       setGuide(g);
       setFirewall(fw);
+      setUpnp(up);
       setSwitchPrivate(fw.publicProfileWarning);
     } catch (err) {
       onToast?.('error', err instanceof Error ? err.message : 'Failed to load network information');
@@ -170,6 +177,52 @@ export function NetworkTab({
       setTimeout(() => setCopiedScript(false), 1800);
     } else {
       onToast?.('error', 'Clipboard unavailable.');
+    }
+  };
+
+  const handleSetUpnpMode = async (mode: UpnpMode) => {
+    setBusyUpnp(true);
+    try {
+      const updated = await api.setInstanceUpnpMode(instanceId, mode);
+      setUpnp(updated);
+      onToast?.('success', `UPnP auto-forwarding set to "${mode}".`);
+    } catch (err) {
+      onToast?.('error', err instanceof Error ? err.message : 'Failed to update UPnP mode');
+    } finally {
+      setBusyUpnp(false);
+    }
+  };
+
+  const handleMapUpnp = async () => {
+    setBusyUpnp(true);
+    try {
+      const updated = await api.mapInstanceUpnp(instanceId);
+      setUpnp(updated);
+      const okCount = updated.lastAttempts.filter((a) => a.ok).length;
+      if (okCount === updated.lastAttempts.length && okCount > 0) {
+        onToast?.('success', `Mapped ${okCount} router port(s) automatically via UPnP!`);
+      } else if (okCount > 0) {
+        onToast?.('info', `Mapped ${okCount}/${updated.lastAttempts.length} ports — check warnings below.`);
+      } else {
+        onToast?.('error', updated.lastAttempts[0]?.message ?? 'Router rejected UPnP port mapping.');
+      }
+    } catch (err) {
+      onToast?.('error', err instanceof Error ? err.message : 'UPnP mapping failed');
+    } finally {
+      setBusyUpnp(false);
+    }
+  };
+
+  const handleUnmapUpnp = async () => {
+    setBusyUpnp(true);
+    try {
+      const res = await api.unmapInstanceUpnp(instanceId);
+      setUpnp(res.status);
+      onToast?.('success', `Removed ${res.removed} UPnP router mapping(s).`);
+    } catch (err) {
+      onToast?.('error', err instanceof Error ? err.message : 'Failed to remove UPnP mappings');
+    } finally {
+      setBusyUpnp(false);
     }
   };
 
@@ -570,7 +623,121 @@ export function NetworkTab({
         </section>
       )}
 
-      {/* 3. Router Port Forwarding Guide (#49) */}
+      {/* 3. Opt-In Automatic Router Port Forwarding (UPnP / NAT-PMP) (#52) */}
+      {upnp && (
+        <section className="panel">
+          <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
+            <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Router size={16} /> Automatic Router Port Forwarding (UPnP / NAT-PMP — Opt-In)
+            </h2>
+            <span
+              className={`badge ${
+                upnp.activeMappings.length > 0
+                  ? 'badge-running'
+                  : upnp.effectiveEnabled
+                    ? 'badge-starting'
+                    : 'badge-stopped'
+              }`}
+            >
+              <span className="badge-dot" />
+              {upnp.activeMappings.length > 0
+                ? `${upnp.activeMappings.length} ACTIVE LEASE(S)`
+                : upnp.effectiveEnabled
+                  ? 'ENABLED (MAPS ON START)'
+                  : 'OFF (MANUAL FORWARDING)'}
+            </span>
+          </div>
+          <div className="panel-body">
+            <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-secondary)' }}>
+              When enabled, ServerForge asks your router via <strong>UPnP IGD / NAT-PMP</strong> to open{' '}
+              <strong>only required external game ports</strong> while this server is running, renews leases automatically, and deletes them immediately when the server stops. Internal-only ports (RCON / REST) are never mapped.
+            </p>
+
+            <div className="form-grid" style={{ marginBottom: 14 }}>
+              <div className="field">
+                <label htmlFor="inst-upnp-mode">Per-Server UPnP Setting</label>
+                <select
+                  id="inst-upnp-mode"
+                  className="select"
+                  disabled={busyUpnp}
+                  value={upnp.instanceMode}
+                  onChange={(e) => void handleSetUpnpMode(e.target.value as UpnpMode)}
+                >
+                  <option value="inherit">
+                    Inherit Global Setting ({upnp.globalEnabled ? 'Currently ON' : 'Currently OFF'})
+                  </option>
+                  <option value="enabled">Enabled for This Server (Auto-map on Start)</option>
+                  <option value="disabled">Disabled (Manual Router Rules Only)</option>
+                </select>
+              </div>
+              <div className="field" style={{ justifyContent: 'flex-end' }}>
+                <div className="btn-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={busyUpnp}
+                    onClick={() => void handleMapUpnp()}
+                  >
+                    <Router size={13} /> {busyUpnp ? 'Contacting Router...' : 'Map Ports Now via UPnP'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={busyUpnp || upnp.activeMappings.length === 0}
+                    onClick={() => void handleUnmapUpnp()}
+                  >
+                    <ShieldOff size={13} /> Remove UPnP Mappings
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {upnp.lastAttempts.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+                {upnp.lastAttempts.map((a, idx) => (
+                  <div
+                    key={`upnp-att-${idx}`}
+                    className={`alert ${a.ok ? 'alert-success' : 'alert-error'}`}
+                    style={{ marginBottom: 0, padding: '8px 12px', fontSize: 12.5 }}
+                  >
+                    <strong className="mono">
+                      {a.port}/{a.protocol}
+                    </strong>{' '}
+                    ({a.label}): {a.message}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {upnp.activeMappings.length > 0 && (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Port</th>
+                    <th>Protocol</th>
+                    <th>Target LAN IP</th>
+                    <th>Lease</th>
+                    <th>Router Protocol</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {upnp.activeMappings.map((m) => (
+                    <tr key={m.id}>
+                      <td className="mono">{m.externalPort}</td>
+                      <td className="mono">{m.protocol}</td>
+                      <td className="mono">{m.internalClient}</td>
+                      <td>{m.leaseDurationSeconds === 0 ? 'Permanent (removed on stop)' : `${m.leaseDurationSeconds}s (auto-renewed)`}</td>
+                      <td className="mono">{m.protocolUsed}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* 4. Router Port Forwarding Guide (#49) */}
       {guide && (
         <section className="panel">
           <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
