@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import {
   Bot,
+  Bug,
+  Check,
   CheckCircle2,
+  Copy,
   Download,
   Eye,
   EyeOff,
@@ -15,6 +18,7 @@ import {
   Slash,
 } from 'lucide-react';
 import type {
+  AppDiagnosticLogEntry,
   AuditLogEntry,
   HostMetrics,
   MaintenanceStatus,
@@ -25,6 +29,7 @@ import type {
   WindowsRebootInspection,
 } from '@serverforge/shared';
 import { api, formatHostSourceLabel } from '../api';
+import { copyTextToClipboard } from '../utils/clipboard';
 
 interface SettingsPageProps {
   metrics: HostMetrics | null;
@@ -49,6 +54,11 @@ export function SettingsPage({
   const [allowedRolesText, setAllowedRolesText] = useState('');
   const [adminRolesText, setAdminRolesText] = useState('');
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [diagLogs, setDiagLogs] = useState<AppDiagnosticLogEntry[]>([]);
+  const [diagFilter, setDiagFilter] = useState<'warn' | 'all'>('warn');
+  const [loadingDiag, setLoadingDiag] = useState(false);
+  const [copiedSysReport, setCopiedSysReport] = useState(false);
+  const [copiedDiagLogs, setCopiedDiagLogs] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -73,12 +83,25 @@ export function SettingsPage({
 
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
+  const loadDiagnostics = async (filter: 'warn' | 'all' = diagFilter) => {
+    setLoadingDiag(true);
+    try {
+      const entries = await api.getDiagnosticsLogs(filter, 150);
+      setDiagLogs(entries);
+    } catch {
+      // Non-fatal
+    } finally {
+      setLoadingDiag(false);
+    }
+  };
+
   const loadAll = async () => {
-    const [s, logs, maint, net] = await Promise.all([
+    const [s, logs, maint, net, dLogs] = await Promise.all([
       api.getSettings(),
       api.getAuditLogs(40),
       api.getMaintenanceStatus(),
       api.getNetworkStatus().catch(() => null),
+      api.getDiagnosticsLogs(diagFilter, 150).catch(() => [] as AppDiagnosticLogEntry[]),
     ]);
     setSettings(s);
     setMaintenance(maint);
@@ -86,6 +109,35 @@ export function SettingsPage({
     setAllowedRolesText(s.discordAllowedRoleIds.join(', '));
     setAdminRolesText(s.discordAdminRoleIds.join(', '));
     setAuditLogs(logs);
+    setDiagLogs(dLogs);
+  };
+
+  const handleCopySystemDiagnostics = async () => {
+    try {
+      const report = await api.getSystemDiagnosticsReport();
+      const ok = await copyTextToClipboard(report.markdown);
+      if (ok) {
+        setCopiedSysReport(true);
+        setTimeout(() => setCopiedSysReport(false), 2200);
+      }
+    } catch (err) {
+      setNotice({ kind: 'error', text: err instanceof Error ? err.message : 'Failed to generate diagnostics report' });
+    }
+  };
+
+  const handleCopyDiagLogs = async () => {
+    if (diagLogs.length === 0) return;
+    const text = diagLogs
+      .map(
+        (e) =>
+          `[${e.timestamp}] [${e.level.toUpperCase()}] [${e.source}]${e.instanceId ? ` [${e.instanceId}]` : ''} ${e.message}${e.details ? ` — ${e.details}` : ''}`
+      )
+      .join('\n');
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedDiagLogs(true);
+      setTimeout(() => setCopiedDiagLogs(false), 2000);
+    }
   };
 
   useEffect(() => {
@@ -1014,6 +1066,89 @@ export function SettingsPage({
                   <code className="mono" style={{ color: 'var(--text-primary)' }}>/server status &lt;name&gt;</code> — Live players &amp; timer
                 </div>
               </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header" style={{ flexWrap: 'wrap', gap: 8 }}>
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Bug size={16} /> Diagnostics &amp; App Logs
+              </h2>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void handleCopySystemDiagnostics()}
+                title="Copy sanitized host, fleet, and backend error report"
+              >
+                {copiedSysReport ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+                {copiedSysReport ? 'Copied Report!' : 'Copy System Report'}
+              </button>
+            </div>
+            <div className="panel-body" style={{ padding: '10px 12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    type="button"
+                    className={`terminal-filter-btn ${diagFilter === 'warn' ? 'active' : ''}`}
+                    onClick={() => {
+                      setDiagFilter('warn');
+                      void loadDiagnostics('warn');
+                    }}
+                  >
+                    Errors &amp; Warnings
+                  </button>
+                  <button
+                    type="button"
+                    className={`terminal-filter-btn ${diagFilter === 'all' ? 'active' : ''}`}
+                    onClick={() => {
+                      setDiagFilter('all');
+                      void loadDiagnostics('all');
+                    }}
+                  >
+                    All
+                  </button>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={diagLogs.length === 0}
+                    onClick={() => void handleCopyDiagLogs()}
+                  >
+                    {copiedDiagLogs ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+                    {copiedDiagLogs ? 'Copied!' : 'Copy Logs'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={loadingDiag}
+                    onClick={() => void loadDiagnostics()}
+                  >
+                    <RefreshCw size={12} className={loadingDiag ? 'spin' : ''} />
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="diag-log-list">
+              {diagLogs.length === 0 ? (
+                <div style={{ padding: 14, color: 'var(--text-muted)' }}>
+                  No {diagFilter === 'warn' ? 'errors or warnings' : 'diagnostic logs'} recorded yet.
+                </div>
+              ) : (
+                diagLogs.map((entry) => (
+                  <div key={entry.id} className="diag-log-row">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <span className={`diag-level diag-level-${entry.level}`}>{entry.level}</span>
+                      <span style={{ color: 'var(--text-muted)' }}>{entry.timestamp.slice(11, 19)}</span>
+                      <span style={{ color: 'var(--text-secondary)' }}>[{entry.source}]</span>
+                    </div>
+                    <div style={{ color: 'var(--text-primary)', wordBreak: 'break-word' }}>{entry.message}</div>
+                    {entry.details && (
+                      <div style={{ color: 'var(--text-muted)', wordBreak: 'break-word' }}>{entry.details}</div>
+                    )}
+                  </div>
+                ))
+              )}
             </div>
           </section>
 

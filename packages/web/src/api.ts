@@ -1,4 +1,5 @@
 import type {
+  AppDiagnosticLogEntry,
   AuditLogEntry,
   BackupRecord,
   CreateInstanceInput,
@@ -11,12 +12,14 @@ import type {
   HostMetrics,
   ImportInspectionResult,
   ImportServerInput,
+  InstanceDiagnosticsReport,
   MaintenanceStatus,
   NetworkStatus,
   PublicHostSource,
   ServerInstance,
   ServerLease,
   StartInstanceInput,
+  SystemDiagnosticsReport,
   SystemSettings,
   UpdateInstanceConfigInput,
   UpdaterStatus,
@@ -41,6 +44,17 @@ export interface AuthState {
   user: { id: string; username: string; role: string } | null;
 }
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly endpoint: string
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {};
   if (init?.body !== undefined) {
@@ -57,7 +71,19 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
+    const payload = data as {
+      error?: string;
+      message?: string;
+      issues?: Array<{ path?: Array<string | number>; message?: string }>;
+    };
+    let msg = payload.error || payload.message || `Request failed (${res.status})`;
+    if (Array.isArray(payload.issues) && payload.issues.length > 0) {
+      const detail = payload.issues
+        .map((iss) => `${iss.path?.length ? `${iss.path.join('.')}: ` : ''}${iss.message ?? 'invalid'}`)
+        .join('; ');
+      msg = `${msg} — ${detail}`;
+    }
+    throw new ApiError(msg, res.status, `${init?.method || 'GET'} ${url}`);
   }
   return data as T;
 }
@@ -229,6 +255,17 @@ export const api = {
     }),
   deleteInstance: (id: string) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),
+
+  // Debugging & Diagnostics
+  getInstanceDiagnostics: (id: string) =>
+    request<InstanceDiagnosticsReport>(`/api/instances/${id}/diagnostics`),
+  getInstanceLogsDownloadUrl: (id: string) => `/api/instances/${id}/logs/download`,
+  getDiagnosticsLogs: (level: 'all' | 'warn' | 'error' = 'all', limit = 150, instanceId?: string) => {
+    const params = new URLSearchParams({ level, limit: String(limit) });
+    if (instanceId) params.set('instanceId', instanceId);
+    return request<AppDiagnosticLogEntry[]>(`/api/diagnostics/logs?${params.toString()}`);
+  },
+  getSystemDiagnosticsReport: () => request<SystemDiagnosticsReport>('/api/diagnostics/report'),
 };
 
 export function formatRemaining(isoDate: string): string {

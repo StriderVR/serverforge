@@ -27,6 +27,7 @@ import { EMBEDDED_WEB_ASSETS } from '../embedded-assets.js';
 import { QueryService } from '../query/query-service.js';
 import { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { CurseForgeService, normalizeCurseForgeApiKey } from '../services/curseforge-service.js';
+import { DiagnosticsService } from '../services/diagnostics-service.js';
 import { SmartImportService } from '../services/import-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
 import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
@@ -59,6 +60,7 @@ export interface ServerForgeApp {
   runtimeManager: RuntimeManager;
   telemetry: TelemetryService;
   network: NetworkAddressService;
+  diagnostics: DiagnosticsService;
   orchestrator: ServerOrchestrator;
   leaseReaper: LeaseReaper;
   discord: DiscordBotService;
@@ -76,6 +78,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   const auth = new AuthService(db, config.jwtSecret);
   const catalog = new CatalogService(config.catalogDir, config.customCatalogDir);
   const queryService = new QueryService();
+  const diagnostics = new DiagnosticsService(config);
 
   const getEffectiveCurseForgeKey = () => {
     const settings = db.getSettings(config.publicHost);
@@ -101,7 +104,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     detectDuckDnsDomainsImpl,
     detectLanIpImpl,
   });
-  const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry, network);
+  const orchestrator = new ServerOrchestrator(config, db, catalog, runtimeManager, telemetry, network, diagnostics);
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
   const discord = new DiscordBotService(config, db, catalog, orchestrator);
   const smartImport = new SmartImportService();
@@ -109,7 +112,62 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   const maintenance = new MaintenanceService(config, db, orchestrator, updater, osRebootExecutor);
   discordStatusFn = () => discord.getStatus();
 
+  diagnostics.record('info', 'server', `ServerForge v${config.appVersion} initialized (${config.runtimeMode} mode)`);
+
   const app = Fastify({ logger: false });
+
+  // Capture unhandled exceptions and 4xx/5xx API errors into DiagnosticsService for Web UI troubleshooting
+  app.addHook('onError', async (req, reply, err) => {
+    const instanceMatch = req.url.match(/^\/api\/instances\/([^/?]+)/);
+    const details = err.stack ? err.stack.split('\n').slice(0, 4).join(' | ') : err.message;
+    diagnostics.record(
+      'error',
+      'api',
+      `${req.method} ${req.url} -> ${reply.statusCode || 500}: ${err.message}`,
+      details,
+      instanceMatch ? instanceMatch[1] : null
+    );
+  });
+
+  app.addHook('onSend', async (req, reply, payload) => {
+    if (req.url.startsWith('/api/') && reply.statusCode >= 400) {
+      if (reply.statusCode === 401 && req.url.startsWith('/api/auth/')) {
+        return payload;
+      }
+      let summary = `HTTP ${reply.statusCode}`;
+      let detailText: string | null = null;
+      if (typeof payload === 'string' && payload.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(payload) as {
+            error?: string;
+            message?: string;
+            issues?: Array<{ path?: Array<string | number>; message?: string }>;
+          };
+          summary = parsed.error || parsed.message || summary;
+          if (Array.isArray(parsed.issues) && parsed.issues.length > 0) {
+            detailText = parsed.issues
+              .map((iss) => `${iss.path?.length ? `${iss.path.join('.')}: ` : ''}${iss.message ?? 'invalid'}`)
+              .join('; ');
+          }
+        } catch {
+          // ignore non-JSON payload
+        }
+      }
+      const instanceMatch = req.url.match(/^\/api\/instances\/([^/?]+)/);
+      const level =
+        reply.statusCode >= 500 || reply.statusCode === 400 || reply.statusCode === 409 || reply.statusCode === 422
+          ? 'error'
+          : 'warn';
+      diagnostics.record(
+        level,
+        'api',
+        `${req.method} ${req.url} (${reply.statusCode}): ${summary}`,
+        detailText,
+        instanceMatch ? instanceMatch[1] : null
+      );
+    }
+    return payload;
+  });
 
   // Gracefully allow empty bodies even if a client sends Content-Type: application/json (e.g., DELETE requests)
   app.removeContentTypeParser('application/json');
@@ -511,6 +569,45 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
   });
 
+  // --- Debugging & Diagnostics Routes ---
+
+  app.get('/api/instances/:id/diagnostics', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const template = catalog.getTemplate(inst.gameId) ?? null;
+    const logs = orchestrator.logs.getLines(inst.id);
+    return diagnostics.buildInstanceReport(inst, template, logs);
+  });
+
+  app.get('/api/instances/:id/logs/download', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    const safeSlug = inst.slug.replace(/[^a-zA-Z0-9._-]/g, '_') || 'server';
+    const text = orchestrator.logs.readFullLogText(inst.id);
+    reply.header('Content-Type', 'text/plain; charset=utf-8');
+    reply.header('Content-Disposition', `attachment; filename="${safeSlug}-console.log"`);
+    return reply.send(text || '(no console output recorded)\n');
+  });
+
+  app.get('/api/diagnostics/logs', { preHandler: requireAuth }, async (req) => {
+    const q = req.query as { level?: string; limit?: string; instanceId?: string };
+    const level = q.level === 'error' || q.level === 'warn' ? q.level : 'all';
+    const limit = Math.min(Math.max(Number(q.limit) || 200, 1), 500);
+    return diagnostics.listLogs({
+      level,
+      limit,
+      instanceId: q.instanceId || undefined,
+    });
+  });
+
+  app.get('/api/diagnostics/report', { preHandler: requireAuth }, async () => {
+    const metrics = await telemetry.getHostMetrics(orchestrator.getRunningCount());
+    const instances = orchestrator.listInstances();
+    return diagnostics.buildSystemReport(metrics, instances);
+  });
+
   // --- WebSocket Live Console & Telemetry Stream ---
 
   const wsClients = new Set<WsClient>();
@@ -874,6 +971,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     runtimeManager,
     telemetry,
     network,
+    diagnostics,
     orchestrator,
     leaseReaper,
     discord,

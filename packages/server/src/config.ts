@@ -93,6 +93,8 @@ export interface AppConfig {
   customCatalogDir: string;
   instancesDir: string;
   backupsDir: string;
+  logsDir: string;
+  instanceLogsDir: string;
   toolsDir: string;
   updatesDir: string;
   webDistDir: string;
@@ -132,10 +134,12 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const customCatalogDir = path.join(dataDir, 'custom-games');
   const instancesDir = path.join(dataDir, 'instances');
   const backupsDir = path.join(dataDir, 'backups');
+  const logsDir = path.join(dataDir, 'logs');
+  const instanceLogsDir = path.join(logsDir, 'instances');
   const toolsDir = path.join(dataDir, 'tools');
   const updatesDir = path.join(dataDir, 'updates');
 
-  for (const dir of [dataDir, customCatalogDir, instancesDir, backupsDir, toolsDir, updatesDir]) {
+  for (const dir of [dataDir, customCatalogDir, instancesDir, backupsDir, logsDir, instanceLogsDir, toolsDir, updatesDir]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
@@ -150,6 +154,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     customCatalogDir,
     instancesDir,
     backupsDir,
+    logsDir,
+    instanceLogsDir,
     toolsDir,
     updatesDir,
     webDistDir: overrides.webDistDir ?? path.join(WORKSPACE_ROOT, 'packages', 'web', 'dist'),

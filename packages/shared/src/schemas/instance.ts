@@ -349,6 +349,72 @@ export const ImportServerInputSchema = z.object({
 });
 export type ImportServerInput = z.input<typeof ImportServerInputSchema>;
 
+export type AppDiagnosticLogLevel = 'info' | 'warn' | 'error';
+
+export interface AppDiagnosticLogEntry {
+  id: string;
+  timestamp: string;
+  level: AppDiagnosticLogLevel;
+  source: string;
+  message: string;
+  details?: string | null;
+  instanceId?: string | null;
+}
+
+export interface InstanceDiagnosticsReport {
+  generatedAt: string;
+  appVersion: string;
+  platform: string;
+  nodeVersion: string;
+  instance: {
+    id: string;
+    slug: string;
+    name: string;
+    gameId: string;
+    gameName: string;
+    runtime: RuntimeKind;
+    status: InstanceStatus;
+    memoryLimitMb: number;
+    ports: Record<string, number>;
+    externalDir: string | null;
+    launchScript: string | null;
+    autoStart: boolean;
+    discordEnabled: boolean;
+    config: Record<string, string | number | boolean>;
+    createdAt: string;
+    lastStartedAt: string | null;
+  };
+  lastError: string | null;
+  totalBufferedLogs: number;
+  recentLogs: Array<{ timestamp: string; line: string }>;
+  recentAppErrors: AppDiagnosticLogEntry[];
+  markdown: string;
+}
+
+export interface SystemDiagnosticsReport {
+  generatedAt: string;
+  appVersion: string;
+  platform: string;
+  osDistro: string;
+  nodeVersion: string;
+  runtimeMode: string;
+  runtimesAvailable: {
+    docker: boolean;
+    native: boolean;
+    mock: boolean;
+  };
+  instancesSummary: Array<{
+    id: string;
+    name: string;
+    gameId: string;
+    runtime: RuntimeKind;
+    status: InstanceStatus;
+    lastError: string | null;
+  }>;
+  recentErrors: AppDiagnosticLogEntry[];
+  markdown: string;
+}
+
 export type WsServerEvent =
   | { type: 'console:line'; instanceId: string; line: string; timestamp: string }
   | { type: 'instance:update'; instance: ServerInstance }

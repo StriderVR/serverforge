@@ -23,6 +23,7 @@ import { ConsoleLogBuffer } from '../runtimes/runtime-adapter.js';
 import type { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { enableRconInServerProperties } from './import-service.js';
 import type { NetworkAddressService } from './network-service.js';
+import type { DiagnosticsService } from './diagnostics-service.js';
 import type { TelemetryService } from './telemetry-service.js';
 
 export class GuardrailError extends Error {
@@ -46,7 +47,7 @@ export interface OrchestratorEvents {
 }
 
 export class ServerOrchestrator extends EventEmitter {
-  public readonly logs = new ConsoleLogBuffer(600);
+  public readonly logs: ConsoleLogBuffer;
   private readonly statsCache = new Map<string, InstanceRuntimeStats>();
 
   constructor(
@@ -55,9 +56,11 @@ export class ServerOrchestrator extends EventEmitter {
     private readonly catalog: CatalogService,
     private readonly runtimeManager: RuntimeManager,
     private readonly telemetry: TelemetryService,
-    private readonly network?: NetworkAddressService
+    private readonly network?: NetworkAddressService,
+    private readonly diagnostics?: DiagnosticsService
   ) {
     super();
+    this.logs = new ConsoleLogBuffer(1000, config.instanceLogsDir);
   }
 
   private slugify(name: string): string {
@@ -446,6 +449,7 @@ export class ServerOrchestrator extends EventEmitter {
             nextErr = detailLine
               ? `Server exited unexpectedly with code ${exitCode}: ${detailLine.slice(0, 220)}`
               : `Server exited unexpectedly with code ${exitCode}`;
+            this.diagnostics?.record('error', 'orchestrator', `Instance "${instance.name}" exited unexpectedly`, nextErr, instance.id);
           }
           this.db.deactivateLeasesForInstance(instance.id);
           this.statsCache.delete(instance.id);
@@ -516,6 +520,7 @@ export class ServerOrchestrator extends EventEmitter {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.appendLog(instance.id, `[Error] Failed to start: ${msg}`);
+      this.diagnostics?.record('error', 'orchestrator', `Failed to start "${instance.name}"`, msg, instance.id);
       const errored = this.db.updateInstance(instance.id, {
         status: 'error',
         lastError: msg,
@@ -551,6 +556,7 @@ export class ServerOrchestrator extends EventEmitter {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.appendLog(instance.id, `[Warning] Stop encountered error: ${msg}`);
+      this.diagnostics?.record('warn', 'orchestrator', `Stop encountered error for "${instance.name}"`, msg, instance.id);
     }
 
     this.db.deactivateLeasesForInstance(instance.id);
@@ -757,7 +763,7 @@ export class ServerOrchestrator extends EventEmitter {
       }
     }
 
-    this.logs.clear(instance.id);
+    this.logs.clear(instance.id, true);
     this.statsCache.delete(instance.id);
     this.db.deleteInstance(instance.id);
     this.db.addAuditLog({

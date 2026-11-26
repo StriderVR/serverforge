@@ -1,14 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Archive,
+  ArrowDown,
   ArrowLeft,
+  Bug,
   Check,
   Clock,
   Copy,
+  Download,
   Loader2,
   Play,
   RotateCw,
   Save,
+  Search,
   Send,
   Square,
   Timer,
@@ -16,6 +21,7 @@ import {
 } from 'lucide-react';
 import type { GameTemplate, HostMetrics, RuntimeKind } from '@serverforge/shared';
 import { api, formatHostSourceLabel, formatRemaining, type InstanceDetail, type InstanceWithJoin } from '../api';
+import { copyTextToClipboard } from '../utils/clipboard';
 
 interface InstanceDetailPageProps {
   instanceId: string;
@@ -32,6 +38,15 @@ interface InstanceDetailPageProps {
 
 const PROGRESS_LINE_RE = /\[(?:Download|Java)\][^\n]*?(\d{1,3})%/;
 const PHASE_AFTER_DOWNLOAD_RE = /Extracting|Launching|Starting|Prepared|installed successfully/i;
+const ERROR_LINE_RE =
+  /\b(ERROR|FATAL|SEVERE|CRITICAL|CRASH)\b|Exception|Caused by:|Traceback|Unrecognized VM option|Could not create the Java Virtual Machine|Failed to start|\[Error\]|exited unexpectedly/i;
+const WARN_LINE_RE = /\b(WARN|WARNING)\b|\[Warning\]/i;
+
+function classifyLogLine(line: string): 'error' | 'warn' | 'normal' {
+  if (ERROR_LINE_RE.test(line)) return 'error';
+  if (WARN_LINE_RE.test(line)) return 'warn';
+  return 'normal';
+}
 
 function extractActiveDownloadPercent(logs: Array<{ timestamp: string; line: string }>): number | null {
   for (let i = logs.length - 1; i >= 0; i--) {
@@ -76,7 +91,15 @@ export function InstanceDetailPage({
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copiedLan, setCopiedLan] = useState(false);
+  const [consoleFilter, setConsoleFilter] = useState<'all' | 'issues'>('all');
+  const [consoleSearch, setConsoleSearch] = useState('');
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [copiedConsole, setCopiedConsole] = useState(false);
+  const [copiedReport, setCopiedReport] = useState(false);
+  const [copyingReport, setCopyingReport] = useState(false);
+  const [copiedErrorKey, setCopiedErrorKey] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
+  const terminalRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const autoBootTriggeredRef = useRef(false);
 
@@ -101,6 +124,9 @@ export function InstanceDetailPage({
 
   useEffect(() => {
     autoBootTriggeredRef.current = false;
+    setConsoleFilter('all');
+    setConsoleSearch('');
+    setAutoScroll(true);
     void loadDetail(true);
   }, [instanceId]);
 
@@ -165,6 +191,29 @@ export function InstanceDetailPage({
     return merged;
   }, [detail?.logs, liveLogs]);
 
+  const classifiedLogs = useMemo(
+    () =>
+      combinedLogs.map((entry) => ({
+        ...entry,
+        severity: classifyLogLine(entry.line),
+      })),
+    [combinedLogs]
+  );
+
+  const issueLogCount = useMemo(
+    () => classifiedLogs.filter((entry) => entry.severity !== 'normal').length,
+    [classifiedLogs]
+  );
+
+  const filteredLogs = useMemo(() => {
+    const q = consoleSearch.trim().toLowerCase();
+    return classifiedLogs.filter((entry) => {
+      if (consoleFilter === 'issues' && entry.severity === 'normal') return false;
+      if (q && !entry.line.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [classifiedLogs, consoleFilter, consoleSearch]);
+
   const activeDownloadPercent = useMemo(
     () => (isActiveTransition ? extractActiveDownloadPercent(combinedLogs) : null),
     [isActiveTransition, combinedLogs]
@@ -173,10 +222,74 @@ export function InstanceDetailPage({
   const latestLogLine = combinedLogs.length > 0 ? combinedLogs[combinedLogs.length - 1].line : null;
 
   useEffect(() => {
-    if (tab === 'console') {
+    if (tab === 'console' && autoScroll) {
       logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [combinedLogs.length, tab]);
+  }, [filteredLogs.length, tab, autoScroll]);
+
+  const handleTerminalScroll = () => {
+    const el = terminalRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom > 48 && autoScroll) {
+      setAutoScroll(false);
+    } else if (distanceFromBottom <= 16 && !autoScroll) {
+      setAutoScroll(true);
+    }
+  };
+
+  const handleCopyConsole = async () => {
+    const source = filteredLogs.length > 0 ? filteredLogs : classifiedLogs;
+    if (source.length === 0) return;
+    const text = source.map((entry) => `[${entry.timestamp}] ${entry.line}`).join('\n');
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedConsole(true);
+      setTimeout(() => setCopiedConsole(false), 2000);
+    }
+  };
+
+  const handleCopyDebugReport = async () => {
+    if (!detail) return;
+    setCopyingReport(true);
+    try {
+      let markdown: string;
+      try {
+        const report = await api.getInstanceDiagnostics(detail.id);
+        markdown = report.markdown;
+      } catch {
+        const tail = combinedLogs
+          .slice(-200)
+          .map((e) => `[${e.timestamp}] ${e.line}`)
+          .join('\n');
+        markdown = [
+          `## ServerForge Instance Debug Report (Client Fallback)`,
+          `- **Server:** ${detail.name} (\`${detail.slug}\`)`,
+          `- **Game / Runtime / Status:** \`${detail.gameId}\` • \`${detail.runtime}\` • \`${detail.status}\``,
+          `- **Last Error:** ${detail.lastError ?? 'none'}`,
+          '',
+          '```text',
+          tail || '(no console output)',
+          '```',
+        ].join('\n');
+      }
+      const ok = await copyTextToClipboard(markdown);
+      if (ok) {
+        setCopiedReport(true);
+        setTimeout(() => setCopiedReport(false), 2200);
+      }
+    } finally {
+      setCopyingReport(false);
+    }
+  };
+
+  const handleCopyErrorText = async (key: string, text: string) => {
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedErrorKey(key);
+      setTimeout(() => setCopiedErrorKey((prev) => (prev === key ? null : prev)), 2000);
+    }
+  };
 
   const runAction = async (fn: () => Promise<unknown>, successMsg?: string) => {
     setMessage(null);
@@ -357,7 +470,7 @@ export function InstanceDetailPage({
             type="button"
             className="copy-address"
             onClick={() => {
-              navigator.clipboard?.writeText(detail.joinAddress).catch(() => {});
+              void copyTextToClipboard(detail.joinAddress);
               setCopied(true);
               setTimeout(() => setCopied(false), 1800);
             }}
@@ -374,7 +487,7 @@ export function InstanceDetailPage({
               style={{ fontSize: 12, opacity: 0.85 }}
               title="Copy local LAN address for computers on the same home network"
               onClick={() => {
-                navigator.clipboard?.writeText(detail.localJoinAddress!).catch(() => {});
+                void copyTextToClipboard(detail.localJoinAddress!);
                 setCopiedLan(true);
                 setTimeout(() => setCopiedLan(false), 1800);
               }}
@@ -473,12 +586,58 @@ export function InstanceDetailPage({
       )}
 
       {message && (
-        <div className={`alert ${message.kind === 'error' ? 'alert-error' : 'alert-success'}`}>{message.text}</div>
+        <div
+          className={`alert ${message.kind === 'error' ? 'alert-error alert-with-actions' : 'alert-success'}`}
+        >
+          <span>{message.text}</span>
+          {message.kind === 'error' && (
+            <div className="alert-actions">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void handleCopyErrorText('msg', message.text)}
+              >
+                {copiedErrorKey === 'msg' ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+                {copiedErrorKey === 'msg' ? 'Copied' : 'Copy Error'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={copyingReport}
+                onClick={() => void handleCopyDebugReport()}
+              >
+                {copiedReport ? <Check size={12} color="var(--status-online)" /> : <Bug size={12} />}
+                {copiedReport ? 'Report Copied' : 'Copy Debug Report'}
+              </button>
+            </div>
+          )}
+        </div>
       )}
 
       {detail.lastError && (!message || message.text !== detail.lastError) && (
-        <div className="alert alert-error">
-          <strong>Last Error:</strong> {detail.lastError}
+        <div className="alert alert-error alert-with-actions">
+          <span>
+            <strong>Last Error:</strong> {detail.lastError}
+          </span>
+          <div className="alert-actions">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void handleCopyErrorText('last', detail.lastError!)}
+            >
+              {copiedErrorKey === 'last' ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+              {copiedErrorKey === 'last' ? 'Copied' : 'Copy Error'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={copyingReport}
+              onClick={() => void handleCopyDebugReport()}
+            >
+              {copiedReport ? <Check size={12} color="var(--status-online)" /> : <Bug size={12} />}
+              {copiedReport ? 'Report Copied' : 'Copy Debug Report'}
+            </button>
+          </div>
         </div>
       )}
 
@@ -496,7 +655,85 @@ export function InstanceDetailPage({
 
       {tab === 'console' && (
         <div className="terminal-box">
-          <div className="terminal-output" aria-live="polite">
+          <div className="terminal-toolbar">
+            <div className="terminal-toolbar-group">
+              <button
+                type="button"
+                className={`terminal-filter-btn ${consoleFilter === 'all' ? 'active' : ''}`}
+                onClick={() => setConsoleFilter('all')}
+              >
+                All ({combinedLogs.length})
+              </button>
+              <button
+                type="button"
+                className={`terminal-filter-btn ${consoleFilter === 'issues' ? 'active' : ''} ${issueLogCount > 0 ? 'has-errors' : ''}`}
+                onClick={() => setConsoleFilter(consoleFilter === 'issues' ? 'all' : 'issues')}
+              >
+                <AlertTriangle size={12} />
+                Errors &amp; Warnings ({issueLogCount})
+              </button>
+              <div className="terminal-search">
+                <Search size={12} />
+                <input
+                  type="text"
+                  aria-label="Filter console output"
+                  placeholder="Filter logs..."
+                  value={consoleSearch}
+                  onChange={(e) => setConsoleSearch(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="terminal-toolbar-group">
+              {!autoScroll && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setAutoScroll(true);
+                    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                >
+                  <ArrowDown size={12} /> Jump to Bottom
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={combinedLogs.length === 0}
+                title="Copy visible console lines to clipboard"
+                onClick={() => void handleCopyConsole()}
+              >
+                {copiedConsole ? <Check size={12} color="var(--status-online)" /> : <Copy size={12} />}
+                {copiedConsole ? 'Copied Console!' : 'Copy Console'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={copyingReport}
+                title="Copy sanitized Markdown debug bundle (config, version, errors, console tail)"
+                onClick={() => void handleCopyDebugReport()}
+              >
+                {copiedReport ? <Check size={12} color="var(--status-online)" /> : <Bug size={12} />}
+                {copiedReport ? 'Copied Report!' : 'Copy Debug Report'}
+              </button>
+              <a
+                className="btn btn-sm"
+                href={api.getInstanceLogsDownloadUrl(detail.id)}
+                download={`${detail.slug}-console.log`}
+                title="Download full persisted console log file"
+              >
+                <Download size={12} /> .log
+              </a>
+            </div>
+          </div>
+
+          <div
+            ref={terminalRef}
+            className="terminal-output"
+            aria-live="polite"
+            onScroll={handleTerminalScroll}
+          >
             {combinedLogs.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
                 {isActiveTransition ? (
@@ -510,9 +747,33 @@ export function InstanceDetailPage({
                   <span>No console output yet. Start the server to stream real-time logs.</span>
                 )}
               </div>
+            ) : filteredLogs.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)' }}>
+                No log lines match the current filter.{' '}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  style={{ display: 'inline-flex', padding: '2px 8px', marginLeft: 4 }}
+                  onClick={() => {
+                    setConsoleFilter('all');
+                    setConsoleSearch('');
+                  }}
+                >
+                  Clear Filter
+                </button>
+              </div>
             ) : (
-              combinedLogs.map((entry, idx) => (
-                <div key={`${entry.timestamp}-${idx}`} className="terminal-line">
+              filteredLogs.map((entry, idx) => (
+                <div
+                  key={`${entry.timestamp}-${idx}`}
+                  className={`terminal-line ${
+                    entry.severity === 'error'
+                      ? 'terminal-line-error'
+                      : entry.severity === 'warn'
+                        ? 'terminal-line-warn'
+                        : ''
+                  }`}
+                >
                   <span className="terminal-ts tabular">{entry.timestamp.slice(11, 19)}</span>
                   <span>{entry.line}</span>
                 </div>
