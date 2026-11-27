@@ -380,13 +380,27 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     };
   });
 
+  const sendSecurityDiscordAlert = (title: string, description: string, color = 0xf59e0b) => {
+    const settings = db.getSettings(config.publicHost);
+    if (!settings.discordSecurityAlertsEnabled) return;
+    void discord.sendChannelNotice(title, description, color).catch(() => {});
+  };
+
   app.post('/api/auth/setup', async (req, reply) => {
     const body = req.body as { username?: string; password?: string } | undefined;
     if (!body?.username || !body?.password) {
       return reply.status(400).send({ error: 'Username and password are required.' });
     }
     try {
-      const { user, token } = auth.setupInitialAdmin(body.username, body.password);
+      const ip = normalizeRemoteIp(req.ip);
+      const userAgent = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : '';
+      const { user, token } = auth.setupInitialAdmin(body.username, body.password, { ip, userAgent });
+      db.addAuditLog({
+        actor: user.username,
+        source: 'web',
+        action: 'auth:setup',
+        details: `Initial admin account created from ${ip}`,
+      });
       reply.setCookie(AUTH_COOKIE, token, {
         httpOnly: true,
         sameSite: 'lax',
@@ -403,14 +417,84 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   });
 
   app.post('/api/auth/login', async (req, reply) => {
-    const body = req.body as { username?: string; password?: string } | undefined;
+    const body = req.body as { username?: string; password?: string; totpCode?: string } | undefined;
     if (!body?.username || !body?.password) {
       return reply.status(400).send({ error: 'Username and password are required.' });
     }
-    const res = auth.login(body.username, body.password);
-    if (!res) {
-      return reply.status(401).send({ error: 'Invalid username or password.' });
+    const ip = normalizeRemoteIp(req.ip);
+    const userAgent = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : '';
+    const res = auth.authenticate(body.username, body.password, {
+      ip,
+      userAgent,
+      totpCode: body.totpCode,
+    });
+
+    if (!res.ok) {
+      if (res.reason === 'totp_required') {
+        return {
+          requiresTotp: true,
+        };
+      }
+      if (res.reason === 'rate_limited') {
+        reply.header('Retry-After', String(res.retryAfterSeconds));
+        return reply.status(429).send({
+          error: `Too many failed login attempts. Try again in ${res.retryAfterSeconds} seconds.`,
+          retryAfterSeconds: res.retryAfterSeconds,
+        });
+      }
+
+      db.addAuditLog({
+        actor: body.username.trim() || 'unknown',
+        source: 'web',
+        action: res.reason === 'invalid_totp' ? 'auth:totp_failed' : 'auth:login_failed',
+        details: `Failed login from ${ip} (attempts=${res.failures})`,
+      });
+
+      if (res.newlyLocked) {
+        db.addAuditLog({
+          actor: body.username.trim() || 'unknown',
+          source: 'system',
+          action: 'auth:rate_limited',
+          details: `IP ${ip} locked out for ${res.retryAfterSeconds}s after ${res.failures} failed attempts`,
+        });
+        sendSecurityDiscordAlert(
+          'Security Alert: Repeated Failed Logins',
+          `Detected **${res.failures} failed login attempts** for user \`${body.username.trim()}\` from IP \`${ip}\`. Login is temporarily locked for **${res.retryAfterSeconds}s**.`,
+          0xef4444
+        );
+      }
+
+      if (res.locked) {
+        reply.header('Retry-After', String(res.retryAfterSeconds));
+        return reply.status(429).send({
+          error: `Too many failed login attempts. Try again in ${res.retryAfterSeconds} seconds.`,
+          retryAfterSeconds: res.retryAfterSeconds,
+        });
+      }
+
+      return reply.status(401).send({
+        error:
+          res.reason === 'invalid_totp'
+            ? 'Invalid 2FA verification code or recovery code.'
+            : 'Invalid username or password.',
+      });
     }
+
+    db.addAuditLog({
+      actor: res.user.username,
+      source: 'web',
+      action: 'auth:login',
+      details: `Signed in from ${ip}${res.usedRecoveryCode ? ' (used recovery code)' : ''}`,
+    });
+
+    if (res.isNewIp) {
+      sendSecurityDiscordAlert(
+        'Security Notice: Dashboard Sign-In From New IP',
+        `Admin \`${res.user.username}\` signed into ServerForge from a new IP address \`${ip}\`.\nIf this wasn't you, open **Settings → Security** and click **Sign Out All Devices**.`,
+        0xf59e0b
+      );
+    }
+
     reply.setCookie(AUTH_COOKIE, res.token, {
       httpOnly: true,
       sameSite: 'lax',
@@ -420,12 +504,145 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     return {
       user: { id: res.user.id, username: res.user.username, role: res.user.role },
       token: res.token,
+      usedRecoveryCode: res.usedRecoveryCode,
+      recoveryCodesRemaining: res.recoveryCodesRemaining,
     };
   });
 
-  app.post('/api/auth/logout', async (_req, reply) => {
+  app.post('/api/auth/logout', async (req, reply) => {
+    const token = extractToken(req);
+    const payload = token ? auth.verifyToken(token) : null;
+    if (payload?.jti) {
+      auth.logout(payload.jti);
+      db.addAuditLog({
+        actor: payload.username,
+        source: 'web',
+        action: 'auth:logout',
+        details: `Session ${payload.jti.slice(0, 8)} signed out`,
+      });
+    }
     reply.clearCookie(AUTH_COOKIE, { path: '/' });
     return { ok: true };
+  });
+
+  app.get('/api/auth/sessions', { preHandler: requireAuth }, async (req) => {
+    return auth.listSessions(req.authUser!.sub, req.authUser!.jti);
+  });
+
+  app.delete('/api/auth/sessions/:sessionId', { preHandler: requireAuth }, async (req, reply) => {
+    const { sessionId } = req.params as { sessionId: string };
+    const revoked = auth.revokeSession(req.authUser!.sub, sessionId);
+    if (!revoked) {
+      return reply.status(404).send({ error: 'Session not found.' });
+    }
+    db.addAuditLog({
+      actor: req.authUser!.username,
+      source: 'web',
+      action: 'auth:session_revoked',
+      details: `Revoked session ${sessionId.slice(0, 8)}`,
+    });
+    if (sessionId === req.authUser!.jti) {
+      reply.clearCookie(AUTH_COOKIE, { path: '/' });
+    }
+    return { ok: true };
+  });
+
+  app.post('/api/auth/sessions/revoke-all', { preHandler: requireAuth }, async (req, reply) => {
+    const body = (req.body as { keepCurrent?: boolean } | undefined) ?? {};
+    const keepCurrent = Boolean(body.keepCurrent);
+    const revokedCount = auth.revokeAllSessions(
+      req.authUser!.sub,
+      keepCurrent ? req.authUser!.jti : undefined
+    );
+    db.addAuditLog({
+      actor: req.authUser!.username,
+      source: 'web',
+      action: 'auth:sessions_revoked_all',
+      details: `Revoked ${revokedCount} session(s) (keepCurrent=${keepCurrent})`,
+    });
+    if (!keepCurrent) {
+      reply.clearCookie(AUTH_COOKIE, { path: '/' });
+    }
+    return { ok: true, revokedCount };
+  });
+
+  app.post('/api/auth/change-password', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { currentPassword?: string; newPassword?: string } | undefined;
+    if (!body?.currentPassword || !body?.newPassword) {
+      return reply.status(400).send({ error: 'Current password and new password are required.' });
+    }
+    try {
+      const { revokedOtherSessions } = auth.changePassword(
+        req.authUser!.sub,
+        body.currentPassword,
+        body.newPassword,
+        req.authUser!.jti
+      );
+      db.addAuditLog({
+        actor: req.authUser!.username,
+        source: 'web',
+        action: 'auth:password_changed',
+        details: `Admin password rotated; revoked ${revokedOtherSessions} other session(s)`,
+      });
+      sendSecurityDiscordAlert(
+        'Security Notice: Admin Password Changed',
+        `Admin \`${req.authUser!.username}\` changed the ServerForge dashboard password and revoked **${revokedOtherSessions}** other session(s).`,
+        0x3b82f6
+      );
+      return { ok: true, revokedOtherSessions };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Password change failed' });
+    }
+  });
+
+  app.get('/api/auth/totp/status', { preHandler: requireAuth }, async (req) => {
+    return auth.getTotpStatus(req.authUser!.sub);
+  });
+
+  app.post('/api/auth/totp/enroll', { preHandler: requireAuth }, async (req, reply) => {
+    try {
+      return auth.beginTotpEnrollment(req.authUser!.sub);
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : '2FA enrollment failed' });
+    }
+  });
+
+  app.post('/api/auth/totp/enable', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { code?: string } | undefined;
+    if (!body?.code) {
+      return reply.status(400).send({ error: 'A 6-digit authenticator code is required.' });
+    }
+    try {
+      const status = auth.confirmTotpEnrollment(req.authUser!.sub, body.code);
+      db.addAuditLog({
+        actor: req.authUser!.username,
+        source: 'web',
+        action: 'auth:totp_enabled',
+        details: 'Two-factor authentication (TOTP) enabled',
+      });
+      return status;
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : '2FA verification failed' });
+    }
+  });
+
+  app.post('/api/auth/totp/disable', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as { currentPassword?: string } | undefined;
+    if (!body?.currentPassword) {
+      return reply.status(400).send({ error: 'Current password is required to disable 2FA.' });
+    }
+    try {
+      auth.disableTotp(req.authUser!.sub, body.currentPassword);
+      db.addAuditLog({
+        actor: req.authUser!.username,
+        source: 'web',
+        action: 'auth:totp_disabled',
+        details: 'Two-factor authentication (TOTP) disabled',
+      });
+      return { enabled: false, recoveryCodesRemaining: 0 };
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Failed to disable 2FA' });
+    }
   });
 
   // --- Protected API Routes ---

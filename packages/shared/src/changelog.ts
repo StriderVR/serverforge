@@ -14,6 +14,17 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.4.3',
+    title: 'Auth Hardening, Active Sessions & Opt-In 2FA',
+    summary: 'Adds brute-force login protection, revocable device sessions, in-app password changes, Discord security alerts, and optional TOTP two-factor authentication.',
+    added: [
+      'Login rate-limiting with progressive lockout (HTTP 429 + Retry-After) and optional Discord alerts on lockouts or logins from new IPs.',
+      'SQLite-tracked active sessions in Settings -> Security with per-device revocation and "Sign Out All Devices".',
+      'In-app Change Password flow with option to sign out all other devices immediately.',
+      'Opt-in RFC 6238 TOTP Two-Factor Authentication (authenticator app key + 8 hashed single-use recovery codes).',
+    ],
+  },
+  {
     version: '1.4.2',
     title: 'Strict CORS, CSRF Protection, Security Headers & IP Allowlisting',
     summary: 'Locks down the ServerForge dashboard against cross-origin browser attacks and accidental public internet exposure.',
