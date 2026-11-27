@@ -485,7 +485,8 @@ export function NetworkTab({
               </div>
             )}
 
-            <table className="data-table" style={{ marginBottom: 14 }}>
+            <div className="table-scroll" style={{ marginBottom: 14 }}>
+              <table className="data-table">
               <thead>
                 <tr>
                   <th>Port</th>
@@ -547,7 +548,8 @@ export function NetworkTab({
                   );
                 })}
               </tbody>
-            </table>
+              </table>
+            </div>
 
             {firewall.supported && firewall.publicProfileWarning && (
               <label className="checkbox-row" style={{ marginBottom: 12 }}>
@@ -710,7 +712,8 @@ export function NetworkTab({
             )}
 
             {upnp.activeMappings.length > 0 && (
-              <table className="data-table">
+              <div className="table-scroll">
+                <table className="data-table">
                 <thead>
                   <tr>
                     <th>Port</th>
@@ -731,7 +734,8 @@ export function NetworkTab({
                     </tr>
                   ))}
                 </tbody>
-              </table>
+                </table>
+              </div>
             )}
           </div>
         </section>
@@ -772,7 +776,8 @@ export function NetworkTab({
               </div>
             </div>
 
-            <table className="data-table" style={{ marginBottom: 14 }}>
+            <div className="table-scroll" style={{ marginBottom: 14 }}>
+              <table className="data-table">
               <thead>
                 <tr>
                   <th>Purpose</th>
@@ -812,7 +817,8 @@ export function NetworkTab({
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
 
             <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
               <strong style={{ display: 'block', marginBottom: 6, color: 'var(--text-primary)' }}>

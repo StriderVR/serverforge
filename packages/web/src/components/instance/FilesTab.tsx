@@ -422,7 +422,7 @@ export function FilesTab({ instanceId, onConfirm, onToast }: FilesTabProps) {
                     flexWrap: 'wrap',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 200, flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: '1 1 160px' }}>
                     {entry.isDirectory ? (
                       <Folder size={15} color="var(--accent)" />
                     ) : (

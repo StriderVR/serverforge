@@ -153,7 +153,7 @@ export function TemplatesPage({ catalog, onRefreshCatalog, onConfirm, onToast }:
         </div>
       </header>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1.25fr)', gap: 18 }}>
+      <div className="templates-grid">
         <section className="panel">
           <div className="panel-header">
             <h2>Installed Catalog ({catalog.length})</h2>

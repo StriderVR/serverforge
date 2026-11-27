@@ -2543,13 +2543,17 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
         return reply.status(404).send({ error: 'Route not found' });
       }
       const cleanPath = req.url.split('?')[0].replace(/^\/+/, '');
-      const asset = EMBEDDED_WEB_ASSETS[cleanPath] ?? EMBEDDED_WEB_ASSETS['index.html'];
+      const hasExact = cleanPath.length > 0 && Object.prototype.hasOwnProperty.call(EMBEDDED_WEB_ASSETS, cleanPath);
+      const assetKey = hasExact ? cleanPath : 'index.html';
+      const asset = EMBEDDED_WEB_ASSETS[assetKey];
       if (!asset) {
         return reply.status(404).send({ error: 'Asset not found' });
       }
       reply.header('Content-Type', asset.mimeType);
-      if (cleanPath.startsWith('assets/')) {
+      if (assetKey.startsWith('assets/')) {
         reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+      } else if (assetKey === 'index.html' || assetKey === 'sw.js' || assetKey === 'manifest.webmanifest') {
+        reply.header('Cache-Control', 'no-cache');
       }
       return reply.send(Buffer.from(asset.contentBase64, 'base64'));
     });
@@ -2557,12 +2561,26 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     await app.register(fastifyStatic, {
       root: config.webDistDir,
       prefix: '/',
+      cacheControl: false,
+      setHeaders: (res, filePath) => {
+        const normalized = filePath.replace(/\\/g, '/');
+        const base = path.basename(normalized).toLowerCase();
+        if (base === 'manifest.webmanifest') {
+          res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-cache');
+        } else if (base === 'sw.js' || base === 'index.html') {
+          res.setHeader('Cache-Control', 'no-cache');
+        } else if (normalized.includes('/assets/')) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
     });
 
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/') || req.url.startsWith('/ws')) {
         return reply.status(404).send({ error: 'Route not found' });
       }
+      reply.header('Cache-Control', 'no-cache');
       return reply.sendFile('index.html');
     });
   }

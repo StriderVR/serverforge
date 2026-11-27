@@ -212,7 +212,8 @@ export function DiagnosticsActivityTab({
               appear here automatically with secrets redacted.
             </div>
           ) : (
-            <table className="data-table">
+            <div className="table-scroll">
+              <table className="data-table">
               <thead>
                 <tr>
                   <th>Time</th>
@@ -275,7 +276,8 @@ export function DiagnosticsActivityTab({
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
         </div>
       </section>
@@ -290,7 +292,8 @@ export function DiagnosticsActivityTab({
           {auditLogs.length === 0 ? (
             <div style={{ padding: 18, color: 'var(--text-muted)' }}>No activity logged yet.</div>
           ) : (
-            <table className="data-table">
+            <div className="table-scroll">
+              <table className="data-table">
               <tbody>
                 {auditLogs.map((log) => (
                   <tr key={log.id}>
@@ -303,7 +306,8 @@ export function DiagnosticsActivityTab({
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
         </div>
       </section>

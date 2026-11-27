@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Bug, Download, FileCode2, FolderInput, LogOut, PlusCircle, Server, Settings, Sparkles, Wifi, WifiOff } from 'lucide-react';
+import { Bug, Download, FileCode2, FolderInput, LogOut, Menu, PlusCircle, Server, Settings, Sparkles, Wifi, WifiOff, X } from 'lucide-react';
 import {
   getReleaseNotesForVersion,
   normalizeReleaseVersion,
@@ -114,6 +114,16 @@ export function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const whatsNewCheckedRef = useRef(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileNavOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [mobileNavOpen]);
 
   const dismissWhatsNew = useCallback(() => {
     setWhatsNewOpen(false);
@@ -357,7 +367,36 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <header className="mobile-header">
+        <button
+          type="button"
+          className="btn btn-ghost mobile-menu-btn"
+          aria-label="Toggle navigation menu"
+          aria-expanded={mobileNavOpen}
+          onClick={() => setMobileNavOpen((open) => !open)}
+        >
+          {mobileNavOpen ? <X size={18} /> : <Menu size={18} />}
+        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <div className="brand-mark" style={{ width: 28, height: 28 }}>
+            <Server size={15} />
+          </div>
+          <span className="brand-title" style={{ fontSize: 15 }}>ServerForge</span>
+        </div>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--text-secondary)' }}>
+          {wsConnected ? <Wifi size={14} color="var(--status-online)" /> : <WifiOff size={14} />}
+        </span>
+      </header>
+
+      {mobileNavOpen && (
+        <div
+          className="sidebar-backdrop"
+          aria-hidden="true"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
+
+      <aside className={`sidebar ${mobileNavOpen ? 'mobile-open' : ''}`}>
         <div className="brand">
           <div className="brand-mark">
             <Server size={18} />
@@ -369,7 +408,10 @@ export function App() {
                 type="button"
                 className="brand-version-btn"
                 title="See what's new in ServerForge"
-                onClick={() => setWhatsNewOpen(true)}
+                onClick={() => {
+                  setWhatsNewOpen(true);
+                  setMobileNavOpen(false);
+                }}
               >
                 <Sparkles size={11} />
                 <span>v{updaterStatus.currentVersion}</span>
@@ -378,31 +420,63 @@ export function App() {
               <span className="brand-sub">Game Control Plane</span>
             )}
           </div>
+          <button
+            type="button"
+            className="btn btn-ghost sidebar-close-btn"
+            aria-label="Close navigation menu"
+            onClick={() => setMobileNavOpen(false)}
+          >
+            <X size={18} />
+          </button>
         </div>
 
         <nav className="nav-list" aria-label="Main navigation">
           <button
             className={`nav-item ${view === 'overview' || view === 'detail' ? 'active' : ''}`}
-            onClick={() => setView('overview')}
+            onClick={() => {
+              setView('overview');
+              setMobileNavOpen(false);
+            }}
           >
             <Server size={16} />
             Server Fleet
           </button>
-          <button className={`nav-item ${view === 'deploy' ? 'active' : ''}`} onClick={() => setView('deploy')}>
+          <button
+            className={`nav-item ${view === 'deploy' ? 'active' : ''}`}
+            onClick={() => {
+              setView('deploy');
+              setMobileNavOpen(false);
+            }}
+          >
             <PlusCircle size={16} />
             One-Click Deploy
           </button>
-          <button className={`nav-item ${view === 'import' ? 'active' : ''}`} onClick={() => setView('import')}>
+          <button
+            className={`nav-item ${view === 'import' ? 'active' : ''}`}
+            onClick={() => {
+              setView('import');
+              setMobileNavOpen(false);
+            }}
+          >
             <FolderInput size={16} />
             Import Server
           </button>
-          <button className={`nav-item ${view === 'templates' ? 'active' : ''}`} onClick={() => setView('templates')}>
+          <button
+            className={`nav-item ${view === 'templates' ? 'active' : ''}`}
+            onClick={() => {
+              setView('templates');
+              setMobileNavOpen(false);
+            }}
+          >
             <FileCode2 size={16} />
             Game Templates
           </button>
           <button
             className={`nav-item ${view === 'settings' ? 'active' : ''}`}
-            onClick={() => openSettings()}
+            onClick={() => {
+              openSettings();
+              setMobileNavOpen(false);
+            }}
           >
             <Settings size={16} />
             Settings &amp; Automation
@@ -415,7 +489,10 @@ export function App() {
               type="button"
               className="btn btn-primary btn-sm"
               style={{ width: '100%' }}
-              onClick={() => openSettings('updates')}
+              onClick={() => {
+                openSettings('updates');
+                setMobileNavOpen(false);
+              }}
             >
               <Download size={13} /> Update v{updaterStatus.latestVersion} Ready
             </button>
@@ -431,12 +508,13 @@ export function App() {
             type="button"
             className="btn btn-ghost btn-sm"
             style={{ justifyContent: 'flex-start' }}
-            onClick={() =>
+            onClick={() => {
               setBugReportState({
                 open: true,
                 instanceId: view === 'detail' ? selectedInstanceId : null,
-              })
-            }
+              });
+              setMobileNavOpen(false);
+            }}
           >
             <Bug size={14} />
             Report a Bug
