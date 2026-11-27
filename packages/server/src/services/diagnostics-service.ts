@@ -324,6 +324,58 @@ export class DiagnosticsService {
         `- **Watchdog Attempts:** ${instance.lastCrash.attemptCount}/${instance.lastCrash.maxAttempts} (${instance.lastCrash.halted ? 'Auto-restart halted' : 'Recovery scheduled'})`,
         `- **Reason:** ${redactSecrets(instance.lastCrash.reason, secrets)}`
       );
+
+      if (instance.lastCrash.analysis) {
+        const a = instance.lastCrash.analysis;
+        lines.push(
+          ``,
+          `### Minecraft Crash Analysis`,
+          `- **Category:** \`${a.category}\``,
+          `- **Headline:** ${redactSecrets(a.headline, secrets)}`,
+          `- **Summary:** ${redactSecrets(a.summary, secrets)}`,
+          `- **Recommended Fix:** ${redactSecrets(a.recommendedFix, secrets)}`
+        );
+        if (a.requiredJavaMajor) {
+          lines.push(`- **Required Java Major:** Java ${a.requiredJavaMajor}`);
+        }
+        if (a.crashReportFile) {
+          lines.push(`- **Crash Report File:** \`${redactSecrets(a.crashReportFile, secrets)}\``);
+        }
+        if (a.missingDependencies.length > 0) {
+          const depList = a.missingDependencies
+            .map((d) => {
+              const parts = [`\`${redactSecrets(d.modId, secrets)}\``];
+              if (d.versionRange) parts.push(`(${redactSecrets(d.versionRange, secrets)})`);
+              if (d.requiredBy) parts.push(`required by \`${redactSecrets(d.requiredBy, secrets)}\``);
+              return parts.join(' ');
+            })
+            .join(', ');
+          lines.push(`- **Missing Dependencies:** ${depList}`);
+        }
+        if (a.suspectedMods.length > 0) {
+          const modList = a.suspectedMods
+            .map((m) => {
+              const name = m.modName || m.modId || m.jarFile || 'unknown';
+              const extra = [
+                m.modId && m.modId !== name ? `id=\`${m.modId}\`` : null,
+                m.jarFile && m.jarFile !== name ? `jar=\`${m.jarFile}\`` : null,
+                m.reason ? m.reason : null,
+              ]
+                .filter(Boolean)
+                .join('; ');
+              return extra ? `${redactSecrets(name, secrets)} (${redactSecrets(extra, secrets)})` : redactSecrets(name, secrets);
+            })
+            .join(', ');
+          lines.push(`- **Suspected Mods/Plugins:** ${modList}`);
+        }
+        if (a.evidenceLines.length > 0) {
+          lines.push(`- **Evidence:**`, '```text');
+          for (const ev of a.evidenceLines) {
+            lines.push(redactSecrets(ev, secrets));
+          }
+          lines.push('```');
+        }
+      }
     }
 
     if (this.connectivity) {

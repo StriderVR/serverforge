@@ -1687,6 +1687,19 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
   });
 
+  // --- Minecraft Crash Report Analyzer Route (Issue #129) ---
+
+  app.get('/api/instances/:id/minecraft/crash-analysis', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    if (!isMinecraftInstance(inst)) {
+      return reply.status(400).send({ error: 'Minecraft crash analyzer is only available for Minecraft instances.' });
+    }
+    const analysis = orchestrator.analyzeMinecraftCrash(inst.id);
+    return { analysis };
+  });
+
   // --- Modrinth & Minecraft Mods / Plugins Manager Routes (Issue #14) ---
 
   app.get('/api/modrinth/search', { preHandler: requireAuth }, async (req, reply) => {

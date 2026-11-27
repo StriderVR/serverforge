@@ -427,6 +427,55 @@ pre,
   border-color: hsla(38, 92%, 56%, 0.4);
 }
 
+.crash-analysis-box {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid hsla(0, 74%, 58%, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.crash-analysis-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.crash-analysis-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.crash-analysis-label {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.crash-culprit-chip {
+  background: hsla(0, 74%, 58%, 0.18);
+  border: 1px solid hsla(0, 74%, 58%, 0.45);
+  color: hsl(0, 92%, 82%);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+}
+
+.crash-analysis-fix {
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: hsla(217, 91%, 60%, 0.12);
+  border-left: 3px solid var(--accent);
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+
 .crash-tail-pre {
   margin: 0;
   padding: 10px 12px;

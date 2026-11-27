@@ -796,19 +796,88 @@ export function InstanceDetailPage({
                 <button
                   type="button"
                   className="btn btn-sm btn-primary"
-                  onClick={() =>
+                  onClick={() => {
+                    const analysis = detail.lastCrash?.analysis;
+                    const analysisLines = analysis
+                      ? [
+                          `Minecraft Crash Analysis (${analysis.category}): ${analysis.headline}`,
+                          analysis.suspectedMods.length > 0
+                            ? `Suspected mods/plugins: ${analysis.suspectedMods
+                                .map((m) => m.jarFile || m.modName || m.modId)
+                                .filter(Boolean)
+                                .join(', ')}`
+                            : null,
+                          analysis.missingDependencies.length > 0
+                            ? `Missing dependencies: ${analysis.missingDependencies.map((d) => d.modId).join(', ')}`
+                            : null,
+                          `Recommended fix: ${analysis.recommendedFix}`,
+                        ]
+                          .filter(Boolean)
+                          .join('\n')
+                      : null;
                     onReportBug({
                       instanceId: detail.id,
-                      title: `${detail.name} (${detail.gameId}) crashed unexpectedly`,
-                      description: `Crash reason: ${detail.lastCrash!.reason}`,
-                    })
-                  }
+                      title: analysis
+                        ? `${detail.name}: ${analysis.headline}`
+                        : `${detail.name} (${detail.gameId}) crashed unexpectedly`,
+                      description: analysisLines
+                        ? `Crash reason: ${detail.lastCrash!.reason}\n\n${analysisLines}`
+                        : `Crash reason: ${detail.lastCrash!.reason}`,
+                    });
+                  }}
                 >
                   <Bug size={13} /> Report Issue
                 </button>
               )}
             </div>
           </div>
+          {detail.lastCrash.analysis && (
+            <div className="crash-analysis-box">
+              <div className="crash-analysis-head">
+                <span className="badge badge-error" style={{ textTransform: 'uppercase', fontSize: 10.5 }}>
+                  {detail.lastCrash.analysis.category.replace(/_/g, ' ')}
+                </span>
+                <strong>{detail.lastCrash.analysis.headline}</strong>
+                {detail.lastCrash.analysis.crashReportFile && (
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)', marginLeft: 'auto' }}>
+                    {detail.lastCrash.analysis.crashReportFile}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                {detail.lastCrash.analysis.summary}
+              </div>
+              {detail.lastCrash.analysis.suspectedMods.length > 0 && (
+                <div className="crash-analysis-chips">
+                  <span className="crash-analysis-label">Suspected:</span>
+                  {detail.lastCrash.analysis.suspectedMods.map((mod, idx) => (
+                    <span key={idx} className="crash-culprit-chip mono">
+                      {mod.jarFile || mod.modName || mod.modId}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {detail.lastCrash.analysis.missingDependencies.length > 0 && (
+                <div className="crash-analysis-chips">
+                  <span className="crash-analysis-label">Missing Dependencies:</span>
+                  {detail.lastCrash.analysis.missingDependencies.map((dep, idx) => (
+                    <span key={idx} className="crash-culprit-chip mono">
+                      {dep.modId}
+                      {dep.versionRange ? ` (${dep.versionRange})` : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {detail.lastCrash.analysis.requiredJavaMajor && (
+                <div style={{ fontSize: 12, color: 'hsl(38, 95%, 76%)' }}>
+                  Required Java runtime: <strong className="mono">Java {detail.lastCrash.analysis.requiredJavaMajor}</strong>
+                </div>
+              )}
+              <div className="crash-analysis-fix">
+                <strong>Recommended fix:</strong> {detail.lastCrash.analysis.recommendedFix}
+              </div>
+            </div>
+          )}
           {showCrashTail && detail.lastCrash.logTail.length > 0 && (
             <pre className="crash-tail-pre">{detail.lastCrash.logTail.join('\n')}</pre>
           )}
