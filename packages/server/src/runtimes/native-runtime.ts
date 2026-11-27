@@ -1635,8 +1635,8 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
       settingsArg,
       '--port',
       String(portGame),
-      '--rcon-port',
-      String(portRcon),
+      '--rcon-bind',
+      `127.0.0.1:${portRcon}`,
     ];
     if (rconPass) {
       serverArgs.push('--rcon-password', rconPass);

@@ -52,6 +52,11 @@ import { ModrinthService } from '../services/modrinth-service.js';
 import { NetworkAddressService, normalizeDuckDnsDomain } from '../services/network-service.js';
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
 import {
+  buildSecurityHealthReport,
+  detectProcessElevation,
+  isPathInsideDir,
+} from '../security/host-security.js';
+import {
   SECURITY_HEADERS,
   isCsrfOriginValid,
   isIpAllowedByPolicy,
@@ -92,6 +97,7 @@ export interface CreateAppOptions extends Partial<AppConfig> {
   natPmpRequestImpl?: (gatewayIp: string, packet: Buffer) => Promise<Buffer | null>;
   dpapiProtectImpl?: (plainKeyBase64: string) => string;
   dpapiUnprotectImpl?: (protectedBase64: string) => string;
+  elevatedAdminOverride?: boolean;
 }
 
 export interface ServerForgeApp {
@@ -135,9 +141,15 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     natPmpRequestImpl,
     dpapiProtectImpl,
     dpapiUnprotectImpl,
+    elevatedAdminOverride,
     ...configOverrides
   } = overrides;
   const config = loadConfig(configOverrides);
+  const isElevatedAdmin = detectProcessElevation({
+    platform: platformOverride,
+    disableOsExec: config.runtimeMode === 'mock',
+    elevatedOverride: elevatedAdminOverride,
+  });
   const secretVault = new SecretVault({
     dataDir: config.dataDir,
     platform: platformOverride,
@@ -689,6 +701,19 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const previous = db.getSettings(config.publicHost);
     const patch = { ...parsed.data };
 
+    // Host lockdown toggles require password confirmation via POST /api/security/lockdown
+    if (
+      (patch.lockHostFsBrowsing !== undefined && patch.lockHostFsBrowsing !== previous.lockHostFsBrowsing) ||
+      (patch.blockExecutableUploads !== undefined &&
+        patch.blockExecutableUploads !== previous.blockExecutableUploads)
+    ) {
+      return reply.status(403).send({
+        error: 'Changing Host Lockdown switches requires current password confirmation via Settings -> Security & Audit.',
+      });
+    }
+    delete patch.lockHostFsBrowsing;
+    delete patch.blockExecutableUploads;
+
     // Write-only secret handling: preserve stored encrypted secrets unless explicitly replaced or cleared
     if (clearCurseforgeApiKey) {
       patch.curseforgeApiKey = '';
@@ -744,6 +769,48 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       discord.scheduleStatusPanelUpdate();
     }
 
+    return secretVault.sanitizeSettingsForApi(updated);
+  });
+
+  app.get('/api/security/health', { preHandler: requireAuth }, async (req) => {
+    const settings = db.getSettings(config.publicHost);
+    const totpStatus = auth.getTotpStatus(req.authUser!.sub);
+    return buildSecurityHealthReport({
+      settings,
+      vaultStatus: secretVault.getStatus(),
+      totpStatus,
+      isElevatedAdmin,
+      platform: platformOverride ?? process.platform,
+      httpsEnabled: req.protocol === 'https',
+      recentFailedLogins24h: auth.getRecentFailedLoginCount(),
+    });
+  });
+
+  app.post('/api/security/lockdown', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as
+      | { currentPassword?: string; lockHostFsBrowsing?: boolean; blockExecutableUploads?: boolean }
+      | undefined;
+    if (!body?.currentPassword) {
+      return reply.status(400).send({ error: 'Current admin password is required to change Host Lockdown settings.' });
+    }
+    const user = db.findUserById(req.authUser!.sub);
+    if (!user || !auth.verifyPassword(body.currentPassword, user.passwordHash)) {
+      return reply.status(401).send({ error: 'Current password is incorrect.' });
+    }
+    const patch: Partial<import('@serverforge/shared').SystemSettings> = {};
+    if (typeof body.lockHostFsBrowsing === 'boolean') {
+      patch.lockHostFsBrowsing = body.lockHostFsBrowsing;
+    }
+    if (typeof body.blockExecutableUploads === 'boolean') {
+      patch.blockExecutableUploads = body.blockExecutableUploads;
+    }
+    const updated = db.saveSettings(patch, config.publicHost);
+    db.addAuditLog({
+      actor: req.authUser!.username,
+      source: 'web',
+      action: 'security:lockdown_updated',
+      details: `lockHostFsBrowsing=${updated.lockHostFsBrowsing}, blockExecutableUploads=${updated.blockExecutableUploads}`,
+    });
     return secretVault.sanitizeSettingsForApi(updated);
   });
 
@@ -1037,6 +1104,25 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const q = req.query as { limit?: string };
     const limit = Math.min(Math.max(Number(q.limit) || 50, 1), 250);
     return db.listAuditLogs(limit);
+  });
+
+  app.get('/api/audit-logs', { preHandler: requireAuth }, async (req) => {
+    const query = req.query as {
+      action?: string;
+      actor?: string;
+      source?: 'web' | 'discord' | 'system';
+      q?: string;
+      limit?: string;
+      offset?: string;
+    };
+    return db.queryAuditLogs({
+      action: query.action,
+      actor: query.actor,
+      source: query.source,
+      q: query.q,
+      limit: query.limit ? Number(query.limit) : 50,
+      offset: query.offset ? Number(query.offset) : 0,
+    });
   });
 
   // --- Game Catalog ---
@@ -1407,8 +1493,11 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       return reply.status(400).send({ error: 'Binary upload body (application/octet-stream) is required.' });
     }
     try {
+      const settings = db.getSettings(config.publicHost);
       const rootDir = orchestrator.getServerContentDir(inst);
-      const entry = fileService.uploadFile(rootDir, dir, filename, buffer);
+      const entry = fileService.uploadFile(rootDir, dir, filename, buffer, {
+        blockExecutables: settings.blockExecutableUploads,
+      });
       db.addAuditLog({
         actor: req.authUser?.username || 'admin',
         source: 'web',
@@ -1958,12 +2047,35 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
 
   // --- Smart Server Import Routes ---
 
+  const assertHostFsAllowed = (
+    targetPath: string | undefined,
+    actor: string,
+    endpoint: string
+  ): string | null => {
+    const settings = db.getSettings(config.publicHost);
+    if (!settings.lockHostFsBrowsing) return null;
+    if (!targetPath?.trim() || !isPathInsideDir(config.dataDir, targetPath)) {
+      db.addAuditLog({
+        actor,
+        source: 'web',
+        action: 'security:lockdown_blocked',
+        details: `Blocked ${endpoint} for "${targetPath || '<root>'}" while Lock Host Filesystem Browsing is enabled`,
+      });
+      return 'Host filesystem browsing is locked by Security Lockdown. Unlock it in Settings -> Security & Audit to import folders outside ServerForge data.';
+    }
+    return null;
+  };
+
   app.get('/api/import/discover', { preHandler: requireAuth }, async () => {
     return smartImport.discoverRunningServers();
   });
 
   app.get('/api/import/browse', { preHandler: requireAuth }, async (req, reply) => {
     const q = req.query as { dir?: string };
+    const blockedMsg = assertHostFsAllowed(q.dir, req.authUser?.username || 'admin', '/api/import/browse');
+    if (blockedMsg) {
+      return reply.status(403).send({ error: blockedMsg });
+    }
     try {
       return smartImport.browseDirectory(q.dir);
     } catch (err) {
@@ -1971,8 +2083,20 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
   });
 
-  app.post('/api/import/pick-folder', { preHandler: requireAuth }, async (req) => {
+  app.post('/api/import/pick-folder', { preHandler: requireAuth }, async (req, reply) => {
     const body = req.body as { initialDir?: string } | undefined;
+    const settings = db.getSettings(config.publicHost);
+    if (settings.lockHostFsBrowsing) {
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'security:lockdown_blocked',
+        details: 'Blocked /api/import/pick-folder while Lock Host Filesystem Browsing is enabled',
+      });
+      return reply.status(403).send({
+        error: 'Host filesystem browsing is locked by Security Lockdown. Unlock it in Settings -> Security & Audit first.',
+      });
+    }
     return smartImport.pickNativeFolder(body?.initialDir);
   });
 
@@ -1980,6 +2104,14 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const body = req.body as { folderPath?: string } | undefined;
     if (!body?.folderPath?.trim()) {
       return reply.status(400).send({ error: 'folderPath is required.' });
+    }
+    const blockedMsg = assertHostFsAllowed(
+      body.folderPath,
+      req.authUser?.username || 'admin',
+      '/api/import/inspect'
+    );
+    if (blockedMsg) {
+      return reply.status(403).send({ error: blockedMsg });
     }
     try {
       return smartImport.inspectDirectory(body.folderPath);
@@ -1992,6 +2124,14 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const parsed = ImportServerInputSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: 'Invalid import configuration', issues: parsed.error.issues });
+    }
+    const blockedMsg = assertHostFsAllowed(
+      parsed.data.folderPath,
+      req.authUser?.username || 'admin',
+      '/api/import/execute'
+    );
+    if (blockedMsg) {
+      return reply.status(403).send({ error: blockedMsg });
     }
     try {
       const imported = orchestrator.importInstance(parsed.data, req.authUser?.username || 'admin');

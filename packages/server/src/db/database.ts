@@ -869,6 +869,63 @@ export class AppDatabase {
     }));
   }
 
+  queryAuditLogs(filters: {
+    action?: string;
+    actor?: string;
+    source?: 'web' | 'discord' | 'system';
+    q?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): { items: AuditLogEntry[]; total: number; limit: number; offset: number } {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (filters.action?.trim()) {
+      where.push('lower(action) LIKE ?');
+      params.push(`%${filters.action.trim().toLowerCase()}%`);
+    }
+    if (filters.actor?.trim()) {
+      where.push('lower(actor) LIKE ?');
+      params.push(`%${filters.actor.trim().toLowerCase()}%`);
+    }
+    if (filters.source && ['web', 'discord', 'system'].includes(filters.source)) {
+      where.push('source = ?');
+      params.push(filters.source);
+    }
+    if (filters.q?.trim()) {
+      const needle = `%${filters.q.trim().toLowerCase()}%`;
+      where.push('(lower(action) LIKE ? OR lower(actor) LIKE ? OR lower(COALESCE(details, \'\')) LIKE ?)');
+      params.push(needle, needle, needle);
+    }
+
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const limit = Math.max(1, Math.min(500, Math.floor(filters.limit ?? 50)));
+    const offset = Math.max(0, Math.floor(filters.offset ?? 0));
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) as total FROM audit_logs ${whereSql}`)
+      .get(...params) as { total: number };
+
+    const rows = this.db
+      .prepare(`SELECT * FROM audit_logs ${whereSql} ORDER BY timestamp DESC LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as Record<string, unknown>[];
+
+    return {
+      items: rows.map((r) => ({
+        id: String(r.id),
+        timestamp: String(r.timestamp),
+        actor: String(r.actor),
+        source: String(r.source) as 'web' | 'discord' | 'system',
+        action: String(r.action),
+        instanceId: r.instance_id ? String(r.instance_id) : null,
+        details: r.details ? String(r.details) : null,
+      })),
+      total: Number(totalRow?.total ?? 0),
+      limit,
+      offset,
+    };
+  }
+
   // --- UPnP Mappings (Crash-Recovery Tracking) ---
 
   private mapUpnpRow(r: Record<string, unknown>): UpnpMappingRecord {

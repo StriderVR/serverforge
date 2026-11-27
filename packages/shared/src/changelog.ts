@@ -14,6 +14,19 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.4.5',
+    title: 'Security & Audit Dashboard, Host Lockdown & Loopback RCON',
+    summary: 'Adds a live security health checklist, searchable audit log viewer with export, password-confirmed host lockdown switches, and strict localhost binding for internal management ports.',
+    added: [
+      'Live Security Health Checklist in Settings -> Security & Audit, including Windows Administrator elevation warning, IP allowlist, Vault, 2FA, HTTPS, and failed-login checks.',
+      'Password-confirmed Host Lockdown switches to disable host drive browsing outside ServerForge data and block executable/script web uploads (.exe, .bat, .cmd, .ps1, .dll, .vbs, .msi, .sh).',
+      'Searchable, filterable Audit Log viewer backed by GET /api/audit-logs with one-click JSON and CSV export.',
+    ],
+    changed: [
+      'Docker internal-only management ports (RCON / REST API) now bind strictly to 127.0.0.1, and native Factorio RCON binds strictly to 127.0.0.1.',
+    ],
+  },
+  {
     version: '1.4.4',
     title: 'Encrypted Secret Vault & Masked API Responses',
     summary: 'Encrypts stored tokens and server passwords at rest with AES-256-GCM + Windows DPAPI and stops sending raw secrets back to the browser.',
