@@ -116,6 +116,7 @@ export const GameTemplateSchema = z.object({
   description: z.string().min(1),
   accentColor: z.string().optional(),
   joinHint: z.string().optional(),
+  connectSteps: z.array(z.string().trim().min(1)).optional(),
   resources: GameResourcesSchema,
   ports: z.array(PortSpecSchema).min(1),
   runtimes: z

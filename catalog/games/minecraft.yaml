@@ -11,6 +11,10 @@ category: sandbox
 description: "Dedicated Minecraft Java Edition server supporting Vanilla, Paper, Fabric, Forge, NeoForge, and Modrinth/CurseForge modpacks."
 accentColor: "#22c55e"
 joinHint: "Multiplayer -> Add Server -> {{HOST}}:{{PORT_GAME}}"
+connectSteps:
+  - "Open Minecraft: Java Edition using the matching game version (and loader/mods if modded)."
+  - "Click Multiplayer -> Add Server (or Direct Connection)."
+  - "Enter {address} as the Server Address and click Join Server."
 resources:
   minRamGb: 2
   recommendedRamGb: 4

@@ -10,6 +10,44 @@ export interface CatalogTemplateEntry {
   isCustom: boolean;
 }
 
+export const DEFAULT_BUILTIN_CONNECT_STEPS: Readonly<Record<string, readonly string[]>> = {
+  'ark-survival-ascended': [
+    'Launch Ark: Survival Ascended and wait for any server mods to finish syncing if prompted.',
+    'Open the in-game console (~) and run: open {address}',
+    'Alternatively, go to Join Game -> Unofficial (enable Show Player Servers) and search for the server name.',
+  ],
+  factorio: [
+    'Launch Factorio (make sure your game version matches the server).',
+    'Click Multiplayer -> Connect to address.',
+    'Enter {address} and click Connect (sync mods if prompted).',
+  ],
+  minecraft: [
+    'Open Minecraft: Java Edition using the matching game version (and loader/mods if modded).',
+    'Click Multiplayer -> Add Server (or Direct Connection).',
+    'Enter {address} as the Server Address and click Join Server.',
+  ],
+  'minecraft-curseforge': [
+    'Install the matching CurseForge modpack and version using the CurseForge App (or Prism Launcher).',
+    'Launch Minecraft through that modpack profile.',
+    'Go to Multiplayer -> Add Server, enter {address}, and click Join Server.',
+  ],
+  'minecraft-modrinth': [
+    'Install the matching Modrinth modpack and version using the Modrinth App (or Prism Launcher).',
+    'Launch Minecraft through that modpack profile.',
+    'Go to Multiplayer -> Add Server, enter {address}, and click Join Server.',
+  ],
+  palworld: [
+    'Launch Palworld and click Join Multiplayer Game.',
+    'At the bottom of the server browser, enter {address} into the direct-connect field.',
+    'If the server requires a join password, check Enter Password and click Connect.',
+  ],
+  satisfactory: [
+    'Launch Satisfactory and open Server Manager from the main menu.',
+    'Click Add Server, enter {host} as the Address and {port} as the Port, then confirm.',
+    'Accept the server certificate prompt if shown, select the server, and click Join Game.',
+  ],
+};
+
 export class CatalogService {
   private templates = new Map<string, CatalogTemplateEntry>();
 
@@ -121,6 +159,12 @@ export class CatalogService {
               internalOnly: false,
               primary: false,
             });
+          }
+        }
+        if (!isCustom && (!template.connectSteps || template.connectSteps.length === 0)) {
+          const defaultSteps = DEFAULT_BUILTIN_CONNECT_STEPS[template.id];
+          if (defaultSteps) {
+            template.connectSteps = [...defaultSteps];
           }
         }
         this.templates.set(template.id, { template, rawYaml, filePath, isCustom });

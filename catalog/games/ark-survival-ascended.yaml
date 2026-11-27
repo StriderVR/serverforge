@@ -5,6 +5,10 @@ category: survival
 description: "Unreal Engine 5 Ark: Survival Ascended dedicated server. Prefers Native Windows SteamCMD on Windows 11 for lowest RAM overhead."
 accentColor: "#14b8a6"
 joinHint: "In-Game Console (~) -> open {{HOST}}:{{PORT_GAME}} (or search '{{SESSION_NAME}}')"
+connectSteps:
+  - "Launch Ark: Survival Ascended and wait for any server mods to finish syncing if prompted."
+  - "Open the in-game console (~) and run: open {address}"
+  - "Alternatively, go to Join Game -> Unofficial (enable Show Player Servers) and search for the server name."
 resources:
   minRamGb: 12
   recommendedRamGb: 16

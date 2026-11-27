@@ -10,6 +10,10 @@ category: sandbox
 description: "Dedicated modded Minecraft server built directly from any Modrinth modpack (.mrpack) with zero API key required and automatic Java 8/17/21/25 runtime selection."
 accentColor: "#1bd96a"
 joinHint: "Launch matching Modrinth pack -> Multiplayer -> {{HOST}}:{{PORT_GAME}}"
+connectSteps:
+  - "Install the matching Modrinth modpack and version using the Modrinth App (or Prism Launcher)."
+  - "Launch Minecraft through that modpack profile."
+  - "Go to Multiplayer -> Add Server, enter {address}, and click Join Server."
 resources:
   minRamGb: 4
   recommendedRamGb: 6
