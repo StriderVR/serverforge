@@ -222,7 +222,7 @@ export function SettingsPage({
           onClick={() => onTabChange('security')}
         >
           <KeyRound size={14} />
-          <span>Security</span>
+          <span>Security &amp; Audit</span>
         </button>
 
         <button
@@ -284,6 +284,7 @@ export function SettingsPage({
         <SecurityTab
           settings={settings}
           onChange={patchSettings}
+          onSyncSavedSetting={syncSavedSetting}
           onConfirm={onConfirm}
           onToast={onToast}
         />

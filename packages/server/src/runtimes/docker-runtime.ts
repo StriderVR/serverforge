@@ -6,6 +6,33 @@ import { buildTemplateVariables, renderTemplateString } from '../catalog/catalog
 import type { QueryService } from '../query/query-service.js';
 import type { RuntimeAdapter, RuntimeStartResult } from './runtime-adapter.js';
 
+export function buildDockerPortBindings(
+  instance: Pick<ServerInstance, 'ports'>,
+  template: Pick<GameTemplate, 'ports'>
+): {
+  exposedPorts: Record<string, Record<string, never>>;
+  portBindings: Record<string, Array<{ HostIp?: string; HostPort: string }>>;
+} {
+  const exposedPorts: Record<string, Record<string, never>> = {};
+  const portBindings: Record<string, Array<{ HostIp?: string; HostPort: string }>> = {};
+
+  for (const portSpec of template.ports) {
+    const allocatedPort = instance.ports[portSpec.key] ?? portSpec.defaultPort;
+    const protocols = portSpec.protocol === 'both' ? ['tcp', 'udp'] : [portSpec.protocol];
+    for (const proto of protocols) {
+      const containerKey = `${allocatedPort}/${proto}`;
+      exposedPorts[containerKey] = {};
+      portBindings[containerKey] = [
+        portSpec.internalOnly
+          ? { HostIp: '127.0.0.1', HostPort: String(allocatedPort) }
+          : { HostPort: String(allocatedPort) },
+      ];
+    }
+  }
+
+  return { exposedPorts, portBindings };
+}
+
 export class DockerRuntimeAdapter implements RuntimeAdapter {
   public readonly kind = 'docker' as const;
   private readonly docker: Docker;
@@ -122,18 +149,7 @@ export class DockerRuntimeAdapter implements RuntimeAdapter {
       binds.push(`${hostPath}:${vol.containerPath}`);
     }
 
-    const exposedPorts: Record<string, Record<string, never>> = {};
-    const portBindings: Record<string, Array<{ HostPort: string }>> = {};
-
-    for (const portSpec of template.ports) {
-      const allocatedPort = instance.ports[portSpec.key] ?? portSpec.defaultPort;
-      const protocols = portSpec.protocol === 'both' ? ['tcp', 'udp'] : [portSpec.protocol];
-      for (const proto of protocols) {
-        const containerKey = `${allocatedPort}/${proto}`;
-        exposedPorts[containerKey] = {};
-        portBindings[containerKey] = [{ HostPort: String(allocatedPort) }];
-      }
-    }
+    const { exposedPorts, portBindings } = buildDockerPortBindings(instance, template);
 
     // Remove previous stopped container with the same name so config/ports stay fresh
     const name = this.containerName(instance);

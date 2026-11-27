@@ -10,6 +10,22 @@ import type {
 export const MAX_EDITABLE_FILE_BYTES = 1024 * 1024; // 1 MB safeguard for inline config editing
 export const MAX_UPLOAD_FILE_BYTES = 100 * 1024 * 1024; // 100 MB safeguard for mods/world uploads
 
+export const BLOCKED_EXECUTABLE_EXTENSIONS = new Set([
+  '.exe',
+  '.bat',
+  '.cmd',
+  '.ps1',
+  '.dll',
+  '.vbs',
+  '.msi',
+  '.sh',
+]);
+
+export function isBlockedExecutableFilename(filename: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
+  return BLOCKED_EXECUTABLE_EXTENSIONS.has(ext);
+}
+
 const BINARY_EXTENSIONS = new Set([
   '.jar',
   '.zip',
@@ -310,13 +326,24 @@ export class FileService {
     return { path: relPosix };
   }
 
-  uploadFile(rootDir: string, targetDirRel: string, rawFilename: string, buffer: Buffer): InstanceFileEntry {
+  uploadFile(
+    rootDir: string,
+    targetDirRel: string,
+    rawFilename: string,
+    buffer: Buffer,
+    options?: { blockExecutables?: boolean }
+  ): InstanceFileEntry {
     if (buffer.length > MAX_UPLOAD_FILE_BYTES) {
       throw new FileValidationError(
         `Uploaded file exceeds the ${Math.round(MAX_UPLOAD_FILE_BYTES / (1024 * 1024))} MB upload limit.`
       );
     }
     const filename = sanitizeUploadFilename(rawFilename);
+    if (options?.blockExecutables && isBlockedExecutableFilename(filename)) {
+      throw new FileSecurityError(
+        `Upload blocked by Host Lockdown: executable/script file "${filename}" is not allowed while Block Executable Uploads is enabled.`
+      );
+    }
     const dirResolved = resolveSandboxedPath(rootDir, targetDirRel);
     fs.mkdirSync(dirResolved.absPath, { recursive: true });
 

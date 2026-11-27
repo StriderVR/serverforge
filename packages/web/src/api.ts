@@ -2,6 +2,7 @@ import type {
   AddonUpdateCandidate,
   AppDiagnosticEvent,
   AuditLogEntry,
+  AuditLogQueryResult,
   AuthSessionSummary,
   BackupPolicy,
   BackupRecord,
@@ -36,6 +37,7 @@ import type {
   ModrinthVersionSummary,
   NetworkStatus,
   PublicHostSource,
+  SecurityHealthReport,
   ServerInstance,
   ServerLease,
   StartInstanceInput,
@@ -184,6 +186,34 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   getAuditLogs: (limit = 60) => request<AuditLogEntry[]>(`/api/audit?limit=${limit}`),
+  queryAuditLogs: (params: {
+    action?: string;
+    actor?: string;
+    source?: 'web' | 'discord' | 'system' | '';
+    q?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.action) qs.set('action', params.action);
+    if (params.actor) qs.set('actor', params.actor);
+    if (params.source) qs.set('source', params.source);
+    if (params.q) qs.set('q', params.q);
+    if (params.limit !== undefined) qs.set('limit', String(params.limit));
+    if (params.offset !== undefined) qs.set('offset', String(params.offset));
+    const query = qs.toString();
+    return request<AuditLogQueryResult>(`/api/audit-logs${query ? `?${query}` : ''}`);
+  },
+  getSecurityHealth: () => request<SecurityHealthReport>('/api/security/health'),
+  updateSecurityLockdown: (payload: {
+    currentPassword: string;
+    lockHostFsBrowsing?: boolean;
+    blockExecutableUploads?: boolean;
+  }) =>
+    request<SystemSettingsResponse>('/api/security/lockdown', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   // Updater
   getUpdaterStatus: (refresh = false) =>

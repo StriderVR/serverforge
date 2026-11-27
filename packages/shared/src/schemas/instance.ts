@@ -201,8 +201,35 @@ export const SystemSettingsSchema = z.object({
   dashboardAccessMode: DashboardAccessModeSchema.default('lan_and_tailscale'),
   trustedCidrs: z.array(z.string()).default([]),
   discordSecurityAlertsEnabled: z.boolean().default(true),
+  lockHostFsBrowsing: z.boolean().default(false),
+  blockExecutableUploads: z.boolean().default(false),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
+
+export interface SecurityHealthCheckItem {
+  id: string;
+  title: string;
+  status: 'pass' | 'warn' | 'fail';
+  detail: string;
+  recommendation?: string;
+}
+
+export interface SecurityHealthReport {
+  score: number;
+  maxScore: number;
+  isElevatedAdmin: boolean;
+  platform: string;
+  httpsEnabled: boolean;
+  recentFailedLogins24h: number;
+  checks: SecurityHealthCheckItem[];
+}
+
+export interface AuditLogQueryResult {
+  items: AuditLogEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
 
 export const SECRET_MASK_SENTINEL = '••••••••';
 
