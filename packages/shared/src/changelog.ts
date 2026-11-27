@@ -14,6 +14,22 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.5.0',
+    title: 'Mobile LAN PWA, Discord Friend Guides & Minecraft Power Tools',
+    summary:
+      'Completes Milestones #16 and #22: makes ServerForge a mobile-friendly installable LAN PWA, adds Discord /server guide friend join cards, and ships Minecraft 5-loader switching, plugin & world datapack management, and automatic crash report culprit highlighting.',
+    added: [
+      'Discord /server guide command & "How to Connect" Live Status Panel buttons with per-game connectSteps, live status, modpack/loader details, and strict secret redaction (#109).',
+      'Mobile-Responsive Dashboard Polish (slide-in navigation drawer, scrollable pill tabs, >=44px touch targets, and .table-scroll wrappers across all tables) and Installable LAN-Only PWA (manifest, network-first service worker bypassing /api/* and /ws, crisp icons, and SEA embedding) (#107, #108).',
+      'Minecraft Server Loader Switcher supporting Vanilla, Paper, Fabric, Forge, and NeoForge with live version discovery, automatic pre-switch safety backups, exact Java 8/17/21/25 upgrade & downgrade, targeted stale-loader cleanup, Deploy quick picker, and a new Version & Updates tab (#127).',
+      'Minecraft Plugin & Datapack Manager detecting Paper/Spigot/Purpur/Folia/Bukkit servers, resolving sandboxed <level-name>/datapacks/ folders, and supporting Modrinth plugin & datapack search, 1-click install, .zip upload, enable/disable toggling, and update checks (#128).',
+      'Minecraft Crash Report & latest.log Culprit Analyzer highlighting missing dependencies, client-only mods, Java version mismatches, OOM, port conflicts, and plugin/mod errors right inside the crash banner and Bug Reporter (#129).',
+    ],
+    changed: [
+      'Static and standalone EXE (SEA) asset handlers now serve index.html, sw.js, and manifest.webmanifest with Cache-Control: no-cache and hashed /assets/* with immutable caching while keeping the strict LAN-only IP allowlist.',
+    ],
+  },
+  {
     version: '1.4.7',
     title: 'Version Selector & Rollback, Hybrid Bug Reporter & QA Gate',
     summary: 'Adds an in-app version selector with Experimental channel & rollback, prevents updates before ServerForge.exe is uploaded, adds a hybrid in-built GitHub bug reporter, and introduces the Manual QA & Pre-Release Gate.',

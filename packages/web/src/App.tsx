@@ -655,7 +655,7 @@ export function App() {
 
       <WhatsNewModal
         open={whatsNewOpen}
-        currentVersion={updaterStatus?.currentVersion ?? '1.4.7'}
+        currentVersion={updaterStatus?.currentVersion ?? '1.5.0'}
         onClose={dismissWhatsNew}
       />
 
