@@ -162,6 +162,9 @@ export interface NetworkStatus {
   lastCheckedAt: string | null;
 }
 
+export const DashboardAccessModeSchema = z.enum(['lan_and_tailscale', 'localhost_only', 'custom']);
+export type DashboardAccessMode = z.infer<typeof DashboardAccessModeSchema>;
+
 export const SystemSettingsSchema = z.object({
   publicHost: z.string().default('localhost'),
   publicHostMode: PublicHostModeSchema.default('auto'),
@@ -195,6 +198,8 @@ export const SystemSettingsSchema = z.object({
   lastSeenReleaseVersion: z.string().default(''),
   lastKnownLanIp: z.string().default(''),
   upnpEnabled: z.boolean().default(false),
+  dashboardAccessMode: DashboardAccessModeSchema.default('lan_and_tailscale'),
+  trustedCidrs: z.array(z.string()).default([]),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
 
