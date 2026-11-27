@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { UpdaterStatus } from '@serverforge/shared';
+import type { UpdaterReleaseOption, UpdaterStatus } from '@serverforge/shared';
 import { isSeaExecutable, WORKSPACE_ROOT, type AppConfig } from '../config.js';
 import type { AppDatabase } from '../db/database.js';
 import type { ServerOrchestrator } from './orchestrator.js';
@@ -32,24 +32,32 @@ export type UpdaterProgressCallback = (event: {
 }) => void;
 
 /**
- * Compares two dot-separated version strings (ignoring leading 'v' and prerelease suffix).
- * Supports both standard 3-part semver (1.1.8) and 4-part outlier versions (1.1.8.1).
+ * Compares two dot-separated version strings (ignoring leading 'v').
+ * Supports 3-part semver (1.1.8), 4-part outlier versions (1.1.8.1), and prerelease suffixes (1.4.7-rc.1 < 1.4.7).
  * Returns: -1 if a < b, 0 if a === b, 1 if a > b.
  */
 export function compareSemver(a: string, b: string): number {
-  const parse = (raw: string) => {
-    const clean = raw.trim().replace(/^v/i, '').split('-')[0];
-    return clean.split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const splitVer = (raw: string) => {
+    const trimmed = raw.trim().replace(/^v/i, '');
+    const dashIdx = trimmed.indexOf('-');
+    const core = dashIdx === -1 ? trimmed : trimmed.slice(0, dashIdx);
+    const pre = dashIdx === -1 ? '' : trimmed.slice(dashIdx + 1);
+    const nums = core.split('.').map((n) => Number.parseInt(n, 10) || 0);
+    return { nums, pre };
   };
-  const aParts = parse(a);
-  const bParts = parse(b);
-  const len = Math.max(aParts.length, bParts.length, 3);
+  const pa = splitVer(a);
+  const pb = splitVer(b);
+  const len = Math.max(pa.nums.length, pb.nums.length, 3);
   for (let i = 0; i < len; i++) {
-    const av = aParts[i] ?? 0;
-    const bv = bParts[i] ?? 0;
+    const av = pa.nums[i] ?? 0;
+    const bv = pb.nums[i] ?? 0;
     if (av !== bv) return av < bv ? -1 : 1;
   }
-  return 0;
+  if (!pa.pre && !pb.pre) return 0;
+  if (!pa.pre && pb.pre) return 1; // stable > prerelease
+  if (pa.pre && !pb.pre) return -1;
+  if (pa.pre === pb.pre) return 0;
+  return pa.pre.localeCompare(pb.pre, undefined, { numeric: true, sensitivity: 'base' }) < 0 ? -1 : 1;
 }
 
 export function buildWindowsSwapScript(params: {
@@ -152,6 +160,8 @@ interface GitHubReleaseResponse {
   body?: string;
   html_url?: string;
   published_at?: string;
+  draft?: boolean;
+  prerelease?: boolean;
   assets?: Array<{
     name: string;
     browser_download_url: string;
@@ -161,14 +171,20 @@ interface GitHubReleaseResponse {
 
 export class UpdaterService {
   private cachedStatus: { fetchedAt: number; status: UpdaterStatus } | null = null;
+  private cachedReleases: { fetchedAt: number; repo: string; releases: UpdaterReleaseOption[] } | null = null;
   private updating = false;
 
   constructor(
     private readonly config: AppConfig,
     private readonly db: AppDatabase,
     private readonly orchestrator: ServerOrchestrator,
-    private readonly fetchImpl: typeof fetch = fetch
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly installModeOverride?: 'exe' | 'source'
   ) {}
+
+  private getInstallMode(): 'exe' | 'source' {
+    return this.installModeOverride ?? (isSeaExecutable() ? 'exe' : 'source');
+  }
 
   getResumeStatePath(): string {
     return path.join(this.config.updatesDir, 'resume-state.json');
@@ -298,10 +314,84 @@ export class UpdaterService {
     };
   }
 
+  private mapReleaseOption(data: GitHubReleaseResponse): UpdaterReleaseOption | null {
+    const tag = (data.tag_name || '').trim();
+    if (!tag || data.draft) return null;
+    const version = tag.replace(/^v/i, '');
+    const exeAsset = (data.assets ?? []).find((a) => a.name.toLowerCase() === 'serverforge.exe');
+    const isPrerelease = Boolean(data.prerelease) || version.includes('-');
+    return {
+      tag,
+      version,
+      name: data.name || tag,
+      prerelease: isPrerelease,
+      publishedAt: data.published_at || null,
+      releaseUrl: data.html_url || null,
+      releaseNotes: data.body || null,
+      hasExeAsset: Boolean(exeAsset?.browser_download_url),
+      exeDownloadUrl: exeAsset?.browser_download_url || null,
+      exeSizeBytes: exeAsset?.size ?? null,
+      isCurrent: compareSemver(this.config.appVersion, version) === 0,
+    };
+  }
+
+  async listReleases(forceRefresh = false): Promise<UpdaterReleaseOption[]> {
+    const settings = this.db.getSettings(this.config.publicHost);
+    const repo = (settings.githubRepo || 'StriderVR/serverforge').trim();
+
+    if (
+      !forceRefresh &&
+      this.cachedReleases &&
+      this.cachedReleases.repo === repo &&
+      Date.now() - this.cachedReleases.fetchedAt < 5 * 60_000
+    ) {
+      return this.cachedReleases.releases;
+    }
+
+    const apiBase = (process.env.UPDATER_API_BASE_URL || 'https://api.github.com').replace(/\/+$/, '');
+    const reqHeaders = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': `ServerForge/${this.config.appVersion}`,
+    };
+
+    let rawList: GitHubReleaseResponse[] = [];
+    const listRes = await this.fetchImpl(`${apiBase}/repos/${repo}/releases?per_page=30`, {
+      headers: reqHeaders,
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (listRes.ok) {
+      const json = (await listRes.json()) as GitHubReleaseResponse | GitHubReleaseResponse[];
+      rawList = Array.isArray(json) ? json : [json];
+    } else if (listRes.status === 404) {
+      // Fallback for mocks or endpoints that only implement /releases/latest
+      const latestRes = await this.fetchImpl(`${apiBase}/repos/${repo}/releases/latest`, {
+        headers: reqHeaders,
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!latestRes.ok) {
+        throw new Error(`GitHub Releases API returned HTTP ${latestRes.status}`);
+      }
+      const single = (await latestRes.json()) as GitHubReleaseResponse;
+      rawList = [single];
+    } else {
+      throw new Error(`GitHub Releases API returned HTTP ${listRes.status}`);
+    }
+
+    const mapped = rawList
+      .map((r) => this.mapReleaseOption(r))
+      .filter((r): r is UpdaterReleaseOption => Boolean(r))
+      .sort((a, b) => compareSemver(b.version, a.version));
+
+    this.cachedReleases = { fetchedAt: Date.now(), repo, releases: mapped };
+    return mapped;
+  }
+
   async checkForUpdates(forceRefresh = false): Promise<UpdaterStatus> {
     const settings = this.db.getSettings(this.config.publicHost);
     const repo = (settings.githubRepo || 'StriderVR/serverforge').trim();
-    const installMode: 'exe' | 'source' = isSeaExecutable() ? 'exe' : 'source';
+    const channel: 'stable' | 'experimental' = settings.updateChannel ?? 'stable';
+    const installMode = this.getInstallMode();
     const runningServers = this.orchestrator.listRunningInstances().map((i) => ({
       id: i.id,
       name: i.name,
@@ -312,28 +402,33 @@ export class UpdaterService {
       !forceRefresh &&
       this.cachedStatus &&
       Date.now() - this.cachedStatus.fetchedAt < 5 * 60_000 &&
-      this.cachedStatus.status.githubRepo === repo
+      this.cachedStatus.status.githubRepo === repo &&
+      this.cachedStatus.status.channel === channel
     ) {
       return { ...this.cachedStatus.status, runningServers };
     }
 
     try {
-      const apiBase = (process.env.UPDATER_API_BASE_URL || 'https://api.github.com').replace(/\/+$/, '');
-      const res = await this.fetchImpl(`${apiBase}/repos/${repo}/releases/latest`, {
-        headers: {
-          Accept: 'application/vnd.github+json',
-          'User-Agent': `ServerForge/${this.config.appVersion}`,
-        },
-        signal: AbortSignal.timeout(10_000),
-      });
+      const releases = await this.listReleases(forceRefresh);
+      const channelReleases =
+        channel === 'experimental' ? releases : releases.filter((r) => !r.prerelease);
 
-      if (!res.ok) {
-        throw new Error(`GitHub Releases API returned HTTP ${res.status}`);
-      }
+      const newestInChannel = channelReleases[0] ?? null;
+      // Fix #69: In standalone .exe mode, never advertise an update until ServerForge.exe is attached
+      const newestInstallable =
+        installMode === 'exe'
+          ? channelReleases.find((r) => r.hasExeAsset) ?? null
+          : newestInChannel;
 
-      const data = (await res.json()) as GitHubReleaseResponse;
-      const latestVersion = (data.tag_name || '').replace(/^v/i, '') || null;
-      const exeAsset = (data.assets ?? []).find((a) => a.name.toLowerCase() === 'serverforge.exe');
+      const pendingExeBuild = Boolean(
+        installMode === 'exe' &&
+          newestInChannel &&
+          !newestInChannel.hasExeAsset &&
+          compareSemver(this.config.appVersion, newestInChannel.version) < 0
+      );
+
+      const chosen = newestInstallable ?? newestInChannel;
+      const latestVersion = newestInstallable?.version ?? null;
       const updateAvailable = latestVersion
         ? compareSemver(this.config.appVersion, latestVersion) < 0
         : false;
@@ -342,12 +437,17 @@ export class UpdaterService {
         currentVersion: this.config.appVersion,
         latestVersion,
         updateAvailable,
-        releaseName: data.name || data.tag_name || null,
-        releaseNotes: data.body || null,
-        releaseUrl: data.html_url || null,
-        publishedAt: data.published_at || null,
-        exeDownloadUrl: exeAsset?.browser_download_url || null,
-        exeSizeBytes: exeAsset?.size ?? null,
+        channel,
+        targetTag: newestInstallable?.tag ?? null,
+        isPrerelease: newestInstallable?.prerelease ?? false,
+        pendingExeBuild,
+        pendingVersion: pendingExeBuild ? newestInChannel?.version ?? null : null,
+        releaseName: chosen?.name ?? null,
+        releaseNotes: chosen?.releaseNotes ?? null,
+        releaseUrl: chosen?.releaseUrl ?? null,
+        publishedAt: chosen?.publishedAt ?? null,
+        exeDownloadUrl: newestInstallable?.exeDownloadUrl ?? null,
+        exeSizeBytes: newestInstallable?.exeSizeBytes ?? null,
         installMode,
         githubRepo: repo,
         runningServers,
@@ -361,6 +461,11 @@ export class UpdaterService {
         currentVersion: this.config.appVersion,
         latestVersion: null,
         updateAvailable: false,
+        channel,
+        targetTag: null,
+        isPrerelease: false,
+        pendingExeBuild: false,
+        pendingVersion: null,
         releaseName: null,
         releaseNotes: null,
         releaseUrl: null,
@@ -377,6 +482,7 @@ export class UpdaterService {
 
   async applyUpdate(options: {
     resumeRunningServers?: boolean;
+    targetTag?: string;
     actor?: string;
     onProgress?: UpdaterProgressCallback;
     onShutdownRequested: () => Promise<void>;
@@ -408,13 +514,55 @@ export class UpdaterService {
     };
 
     try {
-      const status = await this.checkForUpdates(true);
-      if (status.error) {
-        throw new Error(status.error);
+      const installMode = this.getInstallMode();
+      let targetVersion: string | null = null;
+      let exeDownloadUrl: string | null = null;
+      let exeSizeBytes: number | null = null;
+
+      if (options.targetTag?.trim()) {
+        const wanted = options.targetTag.trim();
+        const wantedClean = wanted.replace(/^v/i, '');
+        const releases = await this.listReleases(true);
+        const match = releases.find(
+          (r) =>
+            r.tag.toLowerCase() === wanted.toLowerCase() ||
+            r.version.toLowerCase() === wantedClean.toLowerCase()
+        );
+        if (!match) {
+          throw new Error(`Release "${wanted}" was not found on GitHub.`);
+        }
+        if (installMode === 'exe' && !match.exeDownloadUrl) {
+          throw new Error(
+            `Release ${match.tag} does not have a ServerForge.exe binary attached yet.`
+          );
+        }
+        targetVersion = match.version;
+        exeDownloadUrl = match.exeDownloadUrl;
+        exeSizeBytes = match.exeSizeBytes;
+      } else {
+        const status = await this.checkForUpdates(true);
+        if (status.error) {
+          throw new Error(status.error);
+        }
+        if (!status.latestVersion) {
+          if (status.pendingExeBuild && status.pendingVersion) {
+            throw new Error(
+              `Release v${status.pendingVersion} is still building ServerForge.exe on GitHub Actions. Try again in a couple of minutes.`
+            );
+          }
+          throw new Error('No GitHub Release found to update to.');
+        }
+        targetVersion = status.latestVersion;
+        exeDownloadUrl = status.exeDownloadUrl;
+        exeSizeBytes = status.exeSizeBytes;
       }
-      if (!status.latestVersion) {
-        throw new Error('No GitHub Release found to update to.');
-      }
+
+      const status = {
+        installMode,
+        latestVersion: targetVersion,
+        exeDownloadUrl,
+        exeSizeBytes,
+      };
 
       const resumeRunning = options.resumeRunningServers ?? true;
 

@@ -13,7 +13,12 @@ export const ENC_PREFIX = 'enc:v1:';
 export const SENSITIVE_CONFIG_KEY_RE =
   /(password|passwd|secret|token|api[_-]?key|auth|cookie|credential|private[_-]?key)/i;
 
-const SETTINGS_SECRET_FIELDS = ['discordBotToken', 'duckdnsToken', 'curseforgeApiKey'] as const;
+const SETTINGS_SECRET_FIELDS = [
+  'discordBotToken',
+  'duckdnsToken',
+  'curseforgeApiKey',
+  'githubIssueToken',
+] as const;
 type SettingsSecretField = (typeof SETTINGS_SECRET_FIELDS)[number];
 
 export function isSensitiveConfigKey(key: string): boolean {
@@ -300,18 +305,22 @@ export class SecretVault {
     const discord = mapField('discordBotToken');
     const duck = mapField('duckdnsToken');
     const cf = mapField('curseforgeApiKey');
+    const gh = mapField('githubIssueToken');
 
     return {
       ...settings,
       discordBotToken: '',
       duckdnsToken: '',
       curseforgeApiKey: '',
+      githubIssueToken: '',
       hasDiscordBotToken: discord.has,
       discordBotTokenPreview: discord.preview,
       hasDuckdnsToken: duck.has,
       duckdnsTokenPreview: duck.preview,
       hasCurseforgeApiKey: cf.has,
       curseforgeApiKeyPreview: cf.preview,
+      hasGithubIssueToken: gh.has,
+      githubIssueTokenPreview: gh.preview,
       secretVaultStatus: this.getStatus(),
     };
   }

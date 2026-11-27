@@ -33,6 +33,7 @@ interface SettingsPageProps {
   onSaved: () => void;
   onRefreshUpdater: (force?: boolean) => Promise<void>;
   onStartReconnecting: (label: string, expectedVersion?: string) => void;
+  onOpenBugReporter: () => void;
   onConfirm: (opts: ConfirmDialogOptions) => Promise<boolean>;
   onToast: PushToastFn;
 }
@@ -53,6 +54,7 @@ export function SettingsPage({
   onSaved,
   onRefreshUpdater,
   onStartReconnecting,
+  onOpenBugReporter,
   onConfirm,
   onToast,
 }: SettingsPageProps) {
@@ -330,6 +332,7 @@ export function SettingsPage({
           updaterStatus={updaterStatus}
           updaterProgress={updaterProgress}
           onChange={patchSettings}
+          onSyncSavedSetting={syncSavedSetting}
           onRefreshUpdater={onRefreshUpdater}
           onStartReconnecting={onStartReconnecting}
           onConfirm={onConfirm}
@@ -339,10 +342,14 @@ export function SettingsPage({
 
       {activeTab === 'diagnostics' && (
         <DiagnosticsActivityTab
+          settings={settings}
           diagLogs={diagLogs}
           diagFilter={diagFilter}
           loadingDiag={loadingDiag}
           auditLogs={auditLogs}
+          onChange={patchSettings}
+          onSyncSavedSetting={syncSavedSetting}
+          onOpenBugReporter={onOpenBugReporter}
           onFilterChange={(level) => {
             setDiagFilter(level);
             void loadDiagnostics(level);

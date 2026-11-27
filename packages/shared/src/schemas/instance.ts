@@ -207,8 +207,45 @@ export const SystemSettingsSchema = z.object({
   httpsCertMode: z.enum(['self_signed', 'custom']).default('self_signed'),
   httpsCertPath: z.string().default(''),
   httpsKeyPath: z.string().default(''),
+  updateChannel: z.enum(['stable', 'experimental']).default('stable'),
+  githubIssueToken: z.string().default(''),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
+
+export type BugReportCategory =
+  | 'networking'
+  | 'game_template'
+  | 'updater'
+  | 'web_ui'
+  | 'discord'
+  | 'security'
+  | 'other';
+
+export interface BugReportInput {
+  title: string;
+  category: BugReportCategory;
+  description: string;
+  stepsToReproduce?: string;
+  instanceId?: string | null;
+  includeDiagnostics?: boolean;
+}
+
+export interface BugReportPreviewResult {
+  title: string;
+  labels: string[];
+  markdown: string;
+  githubNewIssueUrl: string;
+  truncatedForUrl: boolean;
+  hasDirectToken: boolean;
+  githubRepo: string;
+}
+
+export interface BugReportSubmitResult {
+  ok: boolean;
+  issueNumber: number;
+  issueUrl: string;
+  title: string;
+}
 
 export interface TlsStatus {
   enabled: boolean;
@@ -264,6 +301,8 @@ export interface SystemSettingsResponse extends SystemSettings {
   duckdnsTokenPreview?: string;
   hasCurseforgeApiKey?: boolean;
   curseforgeApiKeyPreview?: string;
+  hasGithubIssueToken?: boolean;
+  githubIssueTokenPreview?: string;
   secretVaultStatus?: SecretVaultStatus;
 }
 
@@ -271,6 +310,7 @@ export type SystemSettingsUpdatePayload = Partial<SystemSettings> & {
   clearDiscordBotToken?: boolean;
   clearDuckdnsToken?: boolean;
   clearCurseforgeApiKey?: boolean;
+  clearGithubIssueToken?: boolean;
 };
 
 export interface AuthSessionSummary {
@@ -379,10 +419,29 @@ export const AuditLogEntrySchema = z.object({
 });
 export type AuditLogEntry = z.infer<typeof AuditLogEntrySchema>;
 
+export interface UpdaterReleaseOption {
+  tag: string;
+  version: string;
+  name: string;
+  prerelease: boolean;
+  publishedAt: string | null;
+  releaseUrl: string | null;
+  releaseNotes: string | null;
+  hasExeAsset: boolean;
+  exeDownloadUrl: string | null;
+  exeSizeBytes: number | null;
+  isCurrent: boolean;
+}
+
 export interface UpdaterStatus {
   currentVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean;
+  channel?: 'stable' | 'experimental';
+  targetTag?: string | null;
+  isPrerelease?: boolean;
+  pendingExeBuild?: boolean;
+  pendingVersion?: string | null;
   releaseName: string | null;
   releaseNotes: string | null;
   releaseUrl: string | null;

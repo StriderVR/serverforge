@@ -6,6 +6,9 @@ import type {
   AuthSessionSummary,
   BackupPolicy,
   BackupRecord,
+  BugReportInput,
+  BugReportPreviewResult,
+  BugReportSubmitResult,
   ConsolidatedPortMapEntry,
   CreateInstanceInput,
   CurseForgeModpackFile,
@@ -49,6 +52,7 @@ import type {
   TotpEnrollmentPayload,
   TotpStatus,
   UpdateInstanceConfigInput,
+  UpdaterReleaseOption,
   UpdaterStatus,
   UpnpInstanceStatus,
   UpnpMappingRecord,
@@ -225,15 +229,27 @@ export const api = {
   // Updater
   getUpdaterStatus: (refresh = false) =>
     request<UpdaterStatus>(`/api/updater/status${refresh ? '?refresh=1' : ''}`),
+  getUpdaterReleases: (refresh = false) =>
+    request<UpdaterReleaseOption[]>(`/api/updater/releases${refresh ? '?refresh=1' : ''}`),
   getUpdaterLog: () => request<{ log: string | null }>('/api/updater/log'),
-  applyUpdate: (resumeRunningServers = true) =>
+  applyUpdate: (resumeRunningServers = true, targetTag?: string) =>
     request<{ ok: boolean; accepted?: boolean; restarting: boolean; targetVersion: string; rememberedServers: number }>(
       '/api/updater/apply',
       {
         method: 'POST',
-        body: JSON.stringify({ resumeRunningServers }),
+        body: JSON.stringify({ resumeRunningServers, ...(targetTag ? { targetTag } : {}) }),
       }
     ),
+  previewBugReport: (input: BugReportInput) =>
+    request<BugReportPreviewResult>('/api/diagnostics/bug-report/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  submitBugReport: (input: BugReportInput) =>
+    request<BugReportSubmitResult>('/api/diagnostics/bug-report/submit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
 
   // Maintenance & Daily Reboot
   getMaintenanceStatus: () => request<MaintenanceStatus>('/api/maintenance/status'),

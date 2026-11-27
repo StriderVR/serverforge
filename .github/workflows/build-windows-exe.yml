@@ -55,21 +55,28 @@ jobs:
           const exePath = process.argv[2];
           const exeSize = fs.statSync(exePath).size;
           const server = http.createServer((req, res) => {
+            const releaseObj = {
+              tag_name: 'v9.9.9',
+              name: 'ServerForge v9.9.9 (CI Self-Update Test)',
+              body: 'Automated end-to-end Windows self-updater verification',
+              html_url: 'http://127.0.0.1:3098/release/v9.9.9',
+              published_at: new Date().toISOString(),
+              draft: false,
+              prerelease: false,
+              assets: [{
+                name: 'ServerForge.exe',
+                browser_download_url: 'http://127.0.0.1:3098/download/ServerForge.exe',
+                size: exeSize,
+              }],
+            };
             if (req.url && req.url.includes('/releases/latest')) {
-              const payload = JSON.stringify({
-                tag_name: 'v9.9.9',
-                name: 'ServerForge v9.9.9 (CI Self-Update Test)',
-                body: 'Automated end-to-end Windows self-updater verification',
-                html_url: 'http://127.0.0.1:3098/release/v9.9.9',
-                published_at: new Date().toISOString(),
-                assets: [{
-                  name: 'ServerForge.exe',
-                  browser_download_url: 'http://127.0.0.1:3098/download/ServerForge.exe',
-                  size: exeSize,
-                }],
-              });
               res.writeHead(200, { 'content-type': 'application/json' });
-              res.end(payload);
+              res.end(JSON.stringify(releaseObj));
+              return;
+            }
+            if (req.url && req.url.includes('/releases')) {
+              res.writeHead(200, { 'content-type': 'application/json' });
+              res.end(JSON.stringify([releaseObj]));
               return;
             }
             if (req.url === '/download/ServerForge.exe') {
@@ -200,6 +207,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist-exe/ServerForge.exe
+          prerelease: ${{ contains(github.ref, '-') }}
           generate_release_notes: true
           body: |
             ## ServerForge for Windows 11 (Standalone `.exe`)

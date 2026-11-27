@@ -1,16 +1,26 @@
 import React, { useState } from 'react';
-import { Activity, AlertTriangle, Bug, Check, Copy, RefreshCw, Trash2 } from 'lucide-react';
-import type { AppDiagnosticEvent, AuditLogEntry, DiagnosticLevel } from '@serverforge/shared';
+import { Activity, AlertTriangle, Bug, Check, Copy, Eye, EyeOff, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
+import type {
+  AppDiagnosticEvent,
+  AuditLogEntry,
+  DiagnosticLevel,
+  SystemSettings,
+  SystemSettingsResponse,
+} from '@serverforge/shared';
 import { api } from '../../api';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import type { ConfirmDialogOptions } from '../ConfirmModal';
 import type { PushToastFn } from '../ToastStack';
 
 interface DiagnosticsActivityTabProps {
+  settings: SystemSettingsResponse;
   diagLogs: AppDiagnosticEvent[];
   diagFilter: 'all' | DiagnosticLevel;
   loadingDiag: boolean;
   auditLogs: AuditLogEntry[];
+  onChange: (patch: Partial<SystemSettings>) => void;
+  onSyncSavedSetting: (patch: Partial<SystemSettingsResponse>) => void;
+  onOpenBugReporter: () => void;
   onFilterChange: (level: 'all' | DiagnosticLevel) => void;
   onRefreshDiagnostics: () => void;
   onClearedDiagnostics: () => void;
@@ -19,10 +29,14 @@ interface DiagnosticsActivityTabProps {
 }
 
 export function DiagnosticsActivityTab({
+  settings,
   diagLogs,
   diagFilter,
   loadingDiag,
   auditLogs,
+  onChange,
+  onSyncSavedSetting,
+  onOpenBugReporter,
   onFilterChange,
   onRefreshDiagnostics,
   onClearedDiagnostics,
@@ -31,6 +45,7 @@ export function DiagnosticsActivityTab({
 }: DiagnosticsActivityTabProps) {
   const [copiedDiagReport, setCopiedDiagReport] = useState(false);
   const [copiedDiagId, setCopiedDiagId] = useState<string | null>(null);
+  const [showGhToken, setShowGhToken] = useState(false);
 
   const handleCopySystemReport = async () => {
     try {
@@ -66,6 +81,77 @@ export function DiagnosticsActivityTab({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {/* Hybrid In-Built Bug Reporter & Optional GitHub PAT */}
+      <section className="panel">
+        <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <KeyRound size={16} /> In-Built Bug Reporter (GitHub Integration)
+          </h2>
+          <button type="button" className="btn btn-sm btn-primary" onClick={onOpenBugReporter}>
+            <Bug size={13} /> Open Bug Reporter
+          </button>
+        </div>
+        <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <p className="muted" style={{ margin: 0, fontSize: 12.5 }}>
+            Reporting bugs works out-of-the-box with zero tokens via 1-click pre-filled GitHub Issue links. Optionally paste a fine-grained GitHub Personal Access Token (<code>Issues: Read and write</code> on <code>{settings.githubRepo}</code>) to enable 1-click direct submission right from the modal.
+          </p>
+          <div className="field">
+            <label htmlFor="set-gh-issue-token">
+              Optional GitHub Personal Access Token (for direct in-app submission)
+              {settings.hasGithubIssueToken && (
+                <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
+                  Encrypted &amp; saved ({settings.githubIssueTokenPreview || '••••••••'})
+                </span>
+              )}
+            </label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <input
+                id="set-gh-issue-token"
+                type={showGhToken ? 'text' : 'password'}
+                className="input mono"
+                style={{ flex: 1, minWidth: 220 }}
+                value={settings.githubIssueToken}
+                onChange={(e) => onChange({ githubIssueToken: e.target.value })}
+                placeholder={
+                  settings.hasGithubIssueToken
+                    ? `Saved (${settings.githubIssueTokenPreview || '••••••••'}) — paste a new token to replace`
+                    : 'github_pat_... (stored encrypted in Secret Vault)'
+                }
+              />
+              <button
+                type="button"
+                className="btn btn-sm"
+                title={showGhToken ? 'Hide token' : 'Show token'}
+                onClick={() => setShowGhToken((v) => !v)}
+              >
+                {showGhToken ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+              {settings.hasGithubIssueToken && (
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  onClick={async () => {
+                    try {
+                      const saved = await api.saveSettings({ clearGithubIssueToken: true });
+                      onSyncSavedSetting({
+                        githubIssueToken: '',
+                        hasGithubIssueToken: saved.hasGithubIssueToken ?? false,
+                        githubIssueTokenPreview: saved.githubIssueTokenPreview ?? '',
+                      });
+                      onToast('info', 'Saved GitHub Bug Reporter token cleared.');
+                    } catch (err) {
+                      onToast('error', err instanceof Error ? err.message : 'Failed to clear token');
+                    }
+                  }}
+                >
+                  Clear Token
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="panel">
         <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
