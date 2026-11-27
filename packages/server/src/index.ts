@@ -29,13 +29,14 @@ async function main() {
 
   await sf.app.listen({ host: sf.config.host, port: sf.config.port });
 
-  const localUrl = `http://${sf.config.host === '0.0.0.0' ? 'localhost' : sf.config.host}:${sf.config.port}`;
+  const scheme = sf.httpsActive ? 'https' : 'http';
+  const localUrl = `${scheme}://${sf.config.host === '0.0.0.0' ? 'localhost' : sf.config.host}:${sf.config.port}`;
   const netStatus = sf.network.getStatusSync();
 
   console.log('');
   console.log('======================================================');
   console.log(`  ServerForge v${sf.config.appVersion} Control Plane is ONLINE`);
-  console.log(`  Dashboard:    ${localUrl}`);
+  console.log(`  Dashboard:    ${localUrl}${sf.httpsActive ? ' (HTTPS/TLS active)' : ''}`);
   console.log(`  Public Host:  ${netStatus.effectiveHost} (${netStatus.effectiveHostSource})`);
   console.log(`  Data Folder:  ${WORKSPACE_ROOT}`);
   console.log(`  Runtime Mode: ${sf.config.runtimeMode}`);

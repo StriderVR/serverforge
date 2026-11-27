@@ -45,6 +45,7 @@ import type {
   SystemSettings,
   SystemSettingsResponse,
   SystemSettingsUpdatePayload,
+  TlsStatus,
   TotpEnrollmentPayload,
   TotpStatus,
   UpdateInstanceConfigInput,
@@ -213,6 +214,12 @@ export const api = {
     request<SystemSettingsResponse>('/api/security/lockdown', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+  getTlsStatus: () => request<TlsStatus>('/api/security/tls/status'),
+  regenerateTlsCert: () =>
+    request<TlsStatus>('/api/security/tls/regenerate', {
+      method: 'POST',
+      body: '{}',
     }),
 
   // Updater

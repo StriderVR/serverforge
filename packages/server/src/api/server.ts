@@ -63,6 +63,7 @@ import {
   isOriginAllowedForHost,
   normalizeRemoteIp,
 } from '../security/http-security.js';
+import { TlsService } from '../security/tls-service.js';
 import { SecretVault, maskSecretPreview } from '../services/secret-vault.js';
 import { TelemetryService } from '../services/telemetry-service.js';
 import { UpdaterService } from '../services/updater-service.js';
@@ -105,6 +106,8 @@ export interface ServerForgeApp {
   config: AppConfig;
   db: AppDatabase;
   secretVault: SecretVault;
+  tls: TlsService;
+  httpsActive: boolean;
   auth: AuthService;
   catalog: CatalogService;
   runtimeManager: RuntimeManager;
@@ -241,7 +244,25 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   const maintenance = new MaintenanceService(config, db, orchestrator, updater, osRebootExecutor);
   discordStatusFn = () => discord.getStatus();
 
-  const app = Fastify({ logger: false, bodyLimit: MAX_UPLOAD_FILE_BYTES });
+  const tls = new TlsService(config.dataDir);
+  const startupSettings = db.getSettings(config.publicHost);
+  const startupTls = tls.resolveStartupTls(startupSettings, network.getStatusSync().lanIp);
+  const httpsActive = Boolean(startupTls.httpsOptions);
+  if (startupTls.status.fallbackReason) {
+    diagnostics.record({
+      level: 'warn',
+      source: 'system',
+      message: startupTls.status.fallbackReason,
+    });
+  }
+
+  const app: FastifyInstance = startupTls.httpsOptions
+    ? (Fastify({
+        logger: false,
+        bodyLimit: MAX_UPLOAD_FILE_BYTES,
+        https: startupTls.httpsOptions,
+      }) as unknown as FastifyInstance)
+    : Fastify({ logger: false, bodyLimit: MAX_UPLOAD_FILE_BYTES });
 
   // Gracefully allow empty bodies even if a client sends Content-Type: application/json (e.g., DELETE requests)
   app.removeContentTypeParser('application/json');
@@ -437,6 +458,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       reply.setCookie(AUTH_COOKIE, token, {
         httpOnly: true,
         sameSite: 'lax',
+        secure: httpsActive || req.protocol === 'https',
         path: '/',
         maxAge: 60 * 60 * 24 * 7,
       });
@@ -531,6 +553,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     reply.setCookie(AUTH_COOKIE, res.token, {
       httpOnly: true,
       sameSite: 'lax',
+      secure: httpsActive || req.protocol === 'https',
       path: '/',
       maxAge: 60 * 60 * 24 * 7,
     });
@@ -781,9 +804,40 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       totpStatus,
       isElevatedAdmin,
       platform: platformOverride ?? process.platform,
-      httpsEnabled: req.protocol === 'https',
+      httpsEnabled: httpsActive || req.protocol === 'https',
       recentFailedLogins24h: auth.getRecentFailedLoginCount(),
     });
+  });
+
+  app.get('/api/security/tls/status', { preHandler: requireAuth }, async () => {
+    const settings = db.getSettings(config.publicHost);
+    return tls.getStatus(settings);
+  });
+
+  app.post('/api/security/tls/regenerate', { preHandler: requireAuth }, async (req) => {
+    const lanIp = network.getStatusSync().lanIp;
+    tls.regenerateLocalCertificate(lanIp);
+    db.addAuditLog({
+      actor: req.authUser!.username,
+      source: 'web',
+      action: 'security:tls_cert_regenerated',
+      details: `Regenerated local TLS certificate (LAN IP=${lanIp ?? 'none'})`,
+    });
+    return tls.getStatus(db.getSettings(config.publicHost));
+  });
+
+  app.get('/api/security/tls/cert', { preHandler: requireAuth }, async (_req, reply) => {
+    const settings = db.getSettings(config.publicHost);
+    try {
+      const pem = tls.getCertificatePemForDownload(settings, network.getStatusSync().lanIp);
+      reply.header('Content-Type', 'application/x-x509-ca-cert');
+      reply.header('Content-Disposition', 'attachment; filename="serverforge-local.crt"');
+      return reply.send(pem);
+    } catch (err) {
+      return reply.status(400).send({
+        error: err instanceof Error ? err.message : 'Unable to read TLS certificate',
+      });
+    }
   });
 
   app.post('/api/security/lockdown', { preHandler: requireAuth }, async (req, reply) => {
@@ -2272,6 +2326,8 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     config,
     db,
     secretVault,
+    tls,
+    httpsActive,
     auth,
     catalog,
     runtimeManager,

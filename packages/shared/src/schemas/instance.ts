@@ -203,8 +203,26 @@ export const SystemSettingsSchema = z.object({
   discordSecurityAlertsEnabled: z.boolean().default(true),
   lockHostFsBrowsing: z.boolean().default(false),
   blockExecutableUploads: z.boolean().default(false),
+  httpsEnabled: z.boolean().default(false),
+  httpsCertMode: z.enum(['self_signed', 'custom']).default('self_signed'),
+  httpsCertPath: z.string().default(''),
+  httpsKeyPath: z.string().default(''),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
+
+export interface TlsStatus {
+  enabled: boolean;
+  active: boolean;
+  mode: 'self_signed' | 'custom';
+  certPath: string | null;
+  keyPath: string | null;
+  fingerprint256: string | null;
+  validFrom: string | null;
+  validTo: string | null;
+  sans: string[];
+  fallbackReason: string | null;
+  restartRequired: boolean;
+}
 
 export interface SecurityHealthCheckItem {
   id: string;
