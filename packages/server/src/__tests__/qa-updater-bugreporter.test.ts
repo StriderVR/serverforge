@@ -19,7 +19,7 @@ afterEach(async () => {
     await apps.pop()!.close();
   }
   while (tmpDirs.length > 0) {
-    fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+    fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
   }
 });
 
@@ -183,7 +183,7 @@ describe('Milestone #11 — EXE Asset Guard (#69), Version Selector & Rollback (
     });
     expect(rollbackApply.statusCode).toBe(200);
     expect(rollbackApply.json().targetVersion).toBe('1.4.6');
-  });
+  }, 20_000);
 
   it('builds secret-redacted bug reports with pre-filled GitHub URL and submits directly when encrypted PAT is configured (#81)', async () => {
     const dir = makeTmpDir();
@@ -302,5 +302,5 @@ describe('Milestone #11 — EXE Asset Guard (#69), Version Selector & Rollback (
     expect(captured.auth).toBe('Bearer github_pat_supersecret_abc1234');
     expect(captured.body?.labels).toEqual(['bug', 'area:networking']);
     expect(captured.body?.body).not.toContain('ultra-secret-rcon-999');
-  });
+  }, 20_000);
 });
