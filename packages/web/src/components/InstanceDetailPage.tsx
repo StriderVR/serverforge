@@ -986,7 +986,7 @@ export function InstanceDetailPage({
               Server Properties
             </button>
             <button className={`tab-btn ${tab === 'mods' ? 'active' : ''}`} onClick={() => setTab('mods')}>
-              Mods / Plugins
+              Mods / Plugins / Datapacks
             </button>
           </>
         )}

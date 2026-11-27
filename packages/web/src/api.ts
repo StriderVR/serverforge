@@ -546,8 +546,14 @@ export const api = {
       }
     ),
 
-  // Modrinth & Mods/Plugins Manager (#14)
-  searchModrinth: (opts: { q?: string; type: 'modpack' | 'mod' | 'plugin'; loader?: string; version?: string; limit?: number }) => {
+  // Modrinth & Mods/Plugins/Datapacks Manager (#14, #128)
+  searchModrinth: (opts: {
+    q?: string;
+    type: 'modpack' | 'mod' | 'plugin' | 'datapack';
+    loader?: string;
+    version?: string;
+    limit?: number;
+  }) => {
     const params = new URLSearchParams({ type: opts.type });
     if (opts.q) params.set('q', opts.q);
     if (opts.loader) params.set('loader', opts.loader);
@@ -568,7 +574,13 @@ export const api = {
     request<InstalledAddonsResponse>(`/api/instances/${encodeURIComponent(id)}/addons`),
   installInstanceAddon: (
     id: string,
-    payload: { projectId: string; versionId?: string; folder?: 'mods' | 'plugins'; loader?: string; gameVersion?: string }
+    payload: {
+      projectId: string;
+      versionId?: string;
+      folder?: 'mods' | 'plugins' | 'datapacks';
+      loader?: string;
+      gameVersion?: string;
+    }
   ) =>
     request<{ ok: boolean; installed: InstalledAddonEntry[]; dependenciesInstalled: string[] }>(
       `/api/instances/${encodeURIComponent(id)}/addons/install`,
@@ -577,7 +589,7 @@ export const api = {
         body: JSON.stringify(payload),
       }
     ),
-  toggleInstanceAddon: (id: string, folder: 'mods' | 'plugins', filename: string) =>
+  toggleInstanceAddon: (id: string, folder: 'mods' | 'plugins' | 'datapacks', filename: string) =>
     request<{ ok: boolean; filename: string; enabled: boolean }>(
       `/api/instances/${encodeURIComponent(id)}/addons/toggle`,
       {
@@ -585,11 +597,28 @@ export const api = {
         body: JSON.stringify({ folder, filename }),
       }
     ),
-  deleteInstanceAddon: (id: string, folder: 'mods' | 'plugins', filename: string) =>
+  deleteInstanceAddon: (id: string, folder: 'mods' | 'plugins' | 'datapacks', filename: string) =>
     request<{ ok: boolean }>(
       `/api/instances/${encodeURIComponent(id)}/addons?folder=${encodeURIComponent(folder)}&filename=${encodeURIComponent(filename)}`,
       { method: 'DELETE' }
     ),
+  uploadInstanceDatapack: async (id: string, file: File): Promise<InstanceFileEntry> => {
+    const params = new URLSearchParams({ filename: file.name });
+    const res = await fetch(
+      `/api/instances/${encodeURIComponent(id)}/addons/datapacks/upload?${params.toString()}`,
+      {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error((data as { error?: string }).error || `Upload failed (${res.status})`);
+    }
+    return data as InstanceFileEntry;
+  },
   checkInstanceAddonUpdates: (id: string) =>
     request<{ updates: AddonUpdateCandidate[] }>(`/api/instances/${encodeURIComponent(id)}/addons/updates`),
 

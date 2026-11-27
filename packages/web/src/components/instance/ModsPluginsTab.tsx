@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowUpCircle,
   Download,
@@ -8,8 +8,10 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Upload,
 } from 'lucide-react';
 import type {
+  AddonFolder,
   AddonUpdateCandidate,
   InstalledAddonEntry,
   InstalledAddonsResponse,
@@ -36,13 +38,16 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [folderFilter, setFolderFilter] = useState<'all' | AddonFolder>('all');
+  const [uploadingDatapack, setUploadingDatapack] = useState(false);
+  const datapackInputRef = useRef<HTMLInputElement | null>(null);
 
   const [updates, setUpdates] = useState<AddonUpdateCandidate[]>([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   // Modrinth search panel
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchType, setSearchType] = useState<'mod' | 'plugin'>('mod');
+  const [searchType, setSearchType] = useState<'mod' | 'plugin' | 'datapack'>('mod');
   const [loaderFilter, setLoaderFilter] = useState('');
   const [mcVersionFilter, setMcVersionFilter] = useState('');
   const [searchResults, setSearchResults] = useState<ModrinthProjectSummary[]>([]);
@@ -54,11 +59,14 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
     try {
       const res = await api.listInstanceAddons(instanceId);
       setData(res);
-      setSearchType(res.defaultFolder === 'plugins' ? 'plugin' : 'mod');
+      setSearchType((prev) => {
+        if (prev === 'datapack') return prev;
+        return res.defaultFolder === 'plugins' ? 'plugin' : 'mod';
+      });
       if (res.detectedLoader && !loaderFilter) setLoaderFilter(res.detectedLoader);
       if (res.detectedMcVersion && !mcVersionFilter) setMcVersionFilter(res.detectedMcVersion);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load installed mods/plugins');
+      setError(err instanceof Error ? err.message : 'Failed to load installed mods/plugins/datapacks');
     } finally {
       setLoading(false);
     }
@@ -76,7 +84,7 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
       const res = await api.searchModrinth({
         q: searchQuery,
         type: searchType,
-        loader: loaderFilter || undefined,
+        loader: searchType === 'datapack' ? undefined : loaderFilter || undefined,
         version: mcVersionFilter || undefined,
         limit: 12,
       });
@@ -88,29 +96,54 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
     }
   };
 
-  const handleInstall = async (projectId: string, title: string, versionId?: string) => {
+  const handleInstall = async (
+    projectId: string,
+    title: string,
+    versionId?: string,
+    explicitFolder?: AddonFolder
+  ) => {
     setBusyKey(`install:${projectId}`);
     setError(null);
     try {
-      const targetFolder = searchType === 'plugin' ? 'plugins' : 'mods';
+      const targetFolder: AddonFolder =
+        explicitFolder ??
+        (searchType === 'plugin' ? 'plugins' : searchType === 'datapack' ? 'datapacks' : 'mods');
       const res = await api.installInstanceAddon(instanceId, {
         projectId,
         versionId,
         folder: targetFolder,
-        loader: loaderFilter || undefined,
+        loader: targetFolder === 'datapacks' ? 'datapack' : loaderFilter || undefined,
         gameVersion: mcVersionFilter || undefined,
       });
       const depNote =
         res.dependenciesInstalled.length > 0
           ? ` (+ dependencies: ${res.dependenciesInstalled.join(', ')})`
           : '';
-      onToast?.('success', `Installed ${title} into ${targetFolder}/${depNote}`);
+      const destLabel = targetFolder === 'datapacks' ? data?.datapacksRelDir ?? 'world/datapacks' : `${targetFolder}/`;
+      onToast?.('success', `Installed ${title} into ${destLabel}${depNote}`);
       await loadAddons();
       setUpdates((prev) => prev.filter((u) => u.projectId !== projectId));
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to install ${title}`);
     } finally {
       setBusyKey(null);
+    }
+  };
+
+  const handleUploadDatapack = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setUploadingDatapack(true);
+    setError(null);
+    try {
+      await api.uploadInstanceDatapack(instanceId, file);
+      onToast?.('success', `Uploaded datapack ${file.name} to ${data?.datapacksRelDir ?? 'world/datapacks'}`);
+      await loadAddons();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Datapack upload failed');
+    } finally {
+      setUploadingDatapack(false);
     }
   };
 
@@ -131,7 +164,7 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
   const handleRemove = async (addon: InstalledAddonEntry) => {
     const ok = onConfirm
       ? await onConfirm({
-          title: 'Remove Mod / Plugin?',
+          title: 'Remove Addon?',
           message: `Delete "${addon.folder}/${addon.filename}" from this server?`,
           confirmLabel: 'Remove',
           tone: 'danger',
@@ -161,7 +194,7 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
         'info',
         res.updates.length > 0
           ? `${res.updates.length} Modrinth update(s) available.`
-          : 'All tracked Modrinth mods/plugins are up to date.'
+          : 'All tracked Modrinth mods, plugins & datapacks are up to date.'
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Update check failed');
@@ -171,6 +204,14 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
   };
 
   const updateMap = new Map(updates.map((u) => [u.projectId, u]));
+  const allAddons = data?.addons ?? [];
+  const filteredAddons = folderFilter === 'all' ? allAddons : allAddons.filter((a) => a.folder === folderFilter);
+  const counts = {
+    all: allAddons.length,
+    mods: allAddons.filter((a) => a.folder === 'mods').length,
+    plugins: allAddons.filter((a) => a.folder === 'plugins').length,
+    datapacks: allAddons.filter((a) => a.folder === 'datapacks').length,
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -178,41 +219,53 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
 
       {/* Modrinth Search & 1-Click Install */}
       <section className="panel">
-        <div className="panel-header">
+        <div className="panel-header" style={{ flexWrap: 'wrap', gap: 8 }}>
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Download size={16} color="#1bd96a" /> Install Mods &amp; Plugins from Modrinth
+            <Download size={16} color="#1bd96a" /> Install Mods, Plugins &amp; Datapacks from Modrinth
           </h2>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Zero API key • Auto-installs required dependencies</span>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Zero API key • Auto-installs required dependencies
+            {data?.detectedLoader ? ` • Detected: ${data.detectedLoader}` : ''}
+          </span>
         </div>
         <div className="panel-body">
           <form onSubmit={handleSearch} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
             <select
               className="select"
-              style={{ width: 120 }}
+              style={{ width: 135 }}
               value={searchType}
-              onChange={(e) => setSearchType(e.target.value as 'mod' | 'plugin')}
+              onChange={(e) => setSearchType(e.target.value as 'mod' | 'plugin' | 'datapack')}
             >
               <option value="mod">Mods</option>
               <option value="plugin">Plugins</option>
+              <option value="datapack">Datapacks</option>
             </select>
             <input
               className="input"
               style={{ flex: '2 1 220px' }}
-              placeholder={searchType === 'plugin' ? 'Search Paper/Spigot plugins (e.g. EssentialsX, LuckPerms)...' : 'Search Fabric/NeoForge/Forge mods (e.g. Lithium, Sodium, Create)...'}
+              placeholder={
+                searchType === 'plugin'
+                  ? 'Search Paper/Spigot/Purpur plugins (e.g. LuckPerms, EssentialsX)...'
+                  : searchType === 'datapack'
+                    ? 'Search world datapacks (e.g. Terralith, Tectonic, BlazeandCave)...'
+                    : 'Search Fabric/NeoForge/Forge mods (e.g. Lithium, Sodium, Create)...'
+              }
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
+            {searchType !== 'datapack' && (
+              <input
+                className="input"
+                style={{ width: 120 }}
+                placeholder={searchType === 'plugin' ? 'Loader (paper)' : 'Loader (fabric)'}
+                value={loaderFilter}
+                onChange={(e) => setLoaderFilter(e.target.value)}
+              />
+            )}
             <input
               className="input"
               style={{ width: 120 }}
-              placeholder="Loader (fabric)"
-              value={loaderFilter}
-              onChange={(e) => setLoaderFilter(e.target.value)}
-            />
-            <input
-              className="input"
-              style={{ width: 120 }}
-              placeholder="MC (1.21.1)"
+              placeholder="MC (1.21.4)"
               value={mcVersionFilter}
               onChange={(e) => setMcVersionFilter(e.target.value)}
             />
@@ -222,7 +275,7 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
           </form>
 
           {searchResults.length > 0 && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
               {searchResults.map((item) => {
                 const installing = busyKey === `install:${item.projectId}`;
                 return (
@@ -281,13 +334,33 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
         </div>
       </section>
 
-      {/* Installed Mods / Plugins List */}
+      {/* Installed Mods / Plugins / Datapacks List */}
       <section className="panel">
         <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
-          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Package size={16} /> Installed Mods &amp; Plugins ({data?.addons.length ?? 0})
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <Package size={16} /> Installed Addons ({allAddons.length})
+            {data?.datapacksRelDir && (
+              <span className="mono" style={{ fontSize: 11.5, fontWeight: 400, color: 'var(--text-muted)' }}>
+                Datapacks dir: {data.datapacksRelDir}
+              </span>
+            )}
           </h2>
           <div className="btn-row">
+            <input
+              ref={datapackInputRef}
+              type="file"
+              accept=".zip"
+              style={{ display: 'none' }}
+              onChange={(e) => void handleUploadDatapack(e)}
+            />
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={uploadingDatapack}
+              onClick={() => datapackInputRef.current?.click()}
+            >
+              <Upload size={13} /> {uploadingDatapack ? 'Uploading...' : 'Upload Datapack (.zip)'}
+            </button>
             <button
               type="button"
               className="btn btn-sm"
@@ -302,15 +375,36 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
           </div>
         </div>
         <div className="panel-body">
-          {!data || data.addons.length === 0 ? (
+          <div className="btn-row" style={{ marginBottom: 12 }}>
+            {(['all', 'mods', 'plugins', 'datapacks'] as const).map((key) => (
+              <button
+                key={key}
+                type="button"
+                className={`btn btn-sm ${folderFilter === key ? 'btn-primary' : ''}`}
+                onClick={() => setFolderFilter(key)}
+              >
+                {key === 'all'
+                  ? `All (${counts.all})`
+                  : key === 'mods'
+                    ? `Mods (${counts.mods})`
+                    : key === 'plugins'
+                      ? `Plugins (${counts.plugins})`
+                      : `Datapacks (${counts.datapacks})`}
+              </button>
+            ))}
+          </div>
+
+          {!data || filteredAddons.length === 0 ? (
             <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-              No <code>.jar</code> files found in <code>mods/</code> or <code>plugins/</code> yet. Search Modrinth above
-              or drag-and-drop <code>.jar</code> files in the <strong>Files</strong> tab.
+              No {folderFilter === 'all' ? 'mods, plugins, or datapacks' : folderFilter} found yet. Search Modrinth above,
+              upload a <code>.zip</code> datapack, or drop files in the <strong>Files</strong> tab.
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {data.addons.map((addon) => {
+              {filteredAddons.map((addon) => {
                 const availUpdate = addon.modrinthProjectId ? updateMap.get(addon.modrinthProjectId) : undefined;
+                const folderLabel =
+                  addon.folder === 'datapacks' ? `${data.datapacksRelDir ?? 'world/datapacks'}/` : `${addon.folder}/`;
                 return (
                   <div
                     key={`${addon.folder}:${addon.filename}`}
@@ -327,10 +421,12 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
                       flexWrap: 'wrap',
                     }}
                   >
-                    <div style={{ minWidth: 200, flex: 1 }}>
+                    <div style={{ minWidth: 0, flex: '1 1 200px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <strong style={{ fontSize: 13 }}>{addon.modrinthTitle ?? addon.baseName}</strong>
-                        <span className="badge badge-stopped">{addon.folder}/</span>
+                        <strong style={{ fontSize: 13, wordBreak: 'break-word' }}>
+                          {addon.modrinthTitle ?? addon.baseName}
+                        </strong>
+                        <span className="badge badge-stopped">{folderLabel}</span>
                         <span className={`badge ${addon.enabled ? 'badge-running' : 'badge-stopped'}`}>
                           {addon.enabled ? 'ENABLED' : 'DISABLED'}
                         </span>
@@ -340,7 +436,7 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
                           </span>
                         )}
                       </div>
-                      <div className="mono" style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 2 }}>
+                      <div className="mono" style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 2, wordBreak: 'break-all' }}>
                         {addon.filename} • {formatSize(addon.sizeBytes)}
                       </div>
                     </div>
@@ -355,7 +451,8 @@ export function ModsPluginsTab({ instanceId, onConfirm, onToast }: ModsPluginsTa
                             void handleInstall(
                               availUpdate.projectId,
                               availUpdate.title,
-                              availUpdate.latestVersionId
+                              availUpdate.latestVersionId,
+                              addon.folder
                             )
                           }
                         >

@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
+  AddonFolder,
   AddonUpdateCandidate,
   InstalledAddonEntry,
   InstalledAddonsResponse,
   ModrinthProjectSummary,
+  ModrinthProjectType,
   ModrinthVersionSummary,
   ServerInstance,
 } from '@serverforge/shared';
@@ -50,7 +52,7 @@ interface ModrinthVersionApi {
 
 interface TrackedModrinthAddon {
   filename: string;
-  folder: 'mods' | 'plugins';
+  folder: AddonFolder;
   projectId: string;
   slug?: string;
   title: string;
@@ -89,23 +91,138 @@ const KNOWN_LOADERS = new Set([
   'bukkit',
   'folia',
   'velocity',
+  'datapack',
 ]);
+
+const PLUGIN_LOADERS = new Set(['paper', 'spigot', 'purpur', 'bukkit', 'folia']);
+
+/**
+ * Safely resolves `level-name` from `<serverDir>/server.properties` to determine
+ * `<level-name>/datapacks`, strictly sandboxed inside `serverDir` (fallback: `'world'`).
+ */
+export function resolveWorldDatapacksDir(serverDir: string): { worldName: string; datapacksRelDir: string } {
+  let rawLevelName = '';
+  const propsPath = path.join(serverDir, 'server.properties');
+  if (fs.existsSync(propsPath)) {
+    try {
+      const content = fs.readFileSync(propsPath, 'utf8');
+      for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+        const eqIdx = line.indexOf('=');
+        if (eqIdx === -1) continue;
+        const key = line.slice(0, eqIdx).trim();
+        if (key === 'level-name') {
+          rawLevelName = line.slice(eqIdx + 1).trim();
+          break;
+        }
+      }
+    } catch {
+      rawLevelName = '';
+    }
+  }
+
+  let worldName = 'world';
+  if (rawLevelName) {
+    const normalized = rawLevelName.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const hasUnsafe =
+      !normalized ||
+      normalized.includes('..') ||
+      normalized.includes(':') ||
+      normalized.includes('\0') ||
+      path.isAbsolute(rawLevelName);
+
+    if (!hasUnsafe) {
+      try {
+        const resolved = resolveSandboxedPath(serverDir, `${normalized}/datapacks`);
+        if (resolved.relPosix && !resolved.relPosix.startsWith('..') && !resolved.relPosix.includes('..')) {
+          worldName = normalized;
+        }
+      } catch {
+        worldName = 'world';
+      }
+    }
+  }
+
+  return {
+    worldName,
+    datapacksRelDir: `${worldName}/datapacks`,
+  };
+}
+
+function assertSafeAddonFilename(filename: string): string {
+  const trimmed = filename.trim();
+  if (
+    !trimmed ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\') ||
+    trimmed.includes('..') ||
+    trimmed.includes('\0') ||
+    path.basename(trimmed) !== trimmed
+  ) {
+    throw new Error('Invalid addon filename: path separators and traversal segments are not allowed.');
+  }
+  return trimmed;
+}
+
+function detectPluginLoaderFromDisk(serverDir: string): string | null {
+  if (!fs.existsSync(serverDir)) return null;
+  try {
+    const entries = fs.readdirSync(serverDir, { withFileTypes: true });
+    const filesLower = entries.filter((e) => e.isFile()).map((e) => e.name.toLowerCase());
+
+    if (filesLower.some((f) => f.startsWith('purpur') && f.endsWith('.jar')) || filesLower.includes('purpur.yml')) {
+      return 'purpur';
+    }
+    if (filesLower.some((f) => f.startsWith('folia') && f.endsWith('.jar'))) {
+      return 'folia';
+    }
+    if (
+      filesLower.some((f) => f.startsWith('paper') && f.endsWith('.jar')) ||
+      filesLower.includes('paper.yml') ||
+      fs.existsSync(path.join(serverDir, 'config', 'paper-global.yml'))
+    ) {
+      return 'paper';
+    }
+    if (filesLower.some((f) => f.startsWith('spigot') && f.endsWith('.jar')) || filesLower.includes('spigot.yml')) {
+      return 'spigot';
+    }
+    if (
+      filesLower.some((f) => (f.startsWith('craftbukkit') || f.startsWith('bukkit')) && f.endsWith('.jar')) ||
+      filesLower.includes('bukkit.yml')
+    ) {
+      return 'bukkit';
+    }
+  } catch {
+    // ignore read errors
+  }
+  return null;
+}
 
 export function detectMinecraftAddonEnvironment(
   serverDir: string,
   instance: ServerInstance
-): { defaultFolder: 'mods' | 'plugins'; availableFolders: Array<'mods' | 'plugins'>; loader: string | null; mcVersion: string | null } {
+): {
+  defaultFolder: AddonFolder;
+  availableFolders: AddonFolder[];
+  loader: string | null;
+  mcVersion: string | null;
+  worldName: string;
+  datapacksRelDir: string;
+} {
   const serverType = String(instance.config.SERVER_TYPE ?? '').trim().toUpperCase();
   const hasPlugins = fs.existsSync(path.join(serverDir, 'plugins'));
   const hasMods = fs.existsSync(path.join(serverDir, 'mods'));
+  const diskPluginLoader = detectPluginLoaderFromDisk(serverDir);
+  const { worldName, datapacksRelDir } = resolveWorldDatapacksDir(serverDir);
 
-  let defaultFolder: 'mods' | 'plugins' = 'mods';
+  let defaultFolder: AddonFolder = 'mods';
   let loader: string | null = null;
 
   if (instance.gameId === 'minecraft') {
-    if (serverType === 'PAPER') {
+    if (serverType === 'PAPER' || serverType === 'PURPUR' || serverType === 'SPIGOT' || serverType === 'BUKKIT' || serverType === 'FOLIA') {
       defaultFolder = 'plugins';
-      loader = 'paper';
+      loader = diskPluginLoader ?? serverType.toLowerCase();
     } else if (serverType === 'FABRIC') {
       defaultFolder = 'mods';
       loader = 'fabric';
@@ -115,37 +232,56 @@ export function detectMinecraftAddonEnvironment(
     } else if (serverType === 'NEOFORGE') {
       defaultFolder = 'mods';
       loader = 'neoforge';
+    } else if (diskPluginLoader) {
+      defaultFolder = 'plugins';
+      loader = diskPluginLoader;
     } else if (hasPlugins && !hasMods) {
       defaultFolder = 'plugins';
       loader = 'paper';
-    }
-  } else {
-    defaultFolder = hasPlugins && !hasMods ? 'plugins' : 'mods';
-    // Inspect serverDir for loader hints
-    if (fs.existsSync(path.join(serverDir, '.fabric'))) {
+    } else if (fs.existsSync(path.join(serverDir, '.fabric'))) {
+      defaultFolder = 'mods';
       loader = 'fabric';
     } else if (fs.existsSync(path.join(serverDir, 'libraries', 'net', 'neoforged'))) {
+      defaultFolder = 'mods';
       loader = 'neoforge';
     } else if (fs.existsSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge'))) {
+      defaultFolder = 'mods';
       loader = 'forge';
+    }
+  } else {
+    if (diskPluginLoader) {
+      defaultFolder = 'plugins';
+      loader = diskPluginLoader;
+    } else {
+      defaultFolder = hasPlugins && !hasMods ? 'plugins' : 'mods';
+      if (fs.existsSync(path.join(serverDir, '.fabric'))) {
+        loader = 'fabric';
+      } else if (fs.existsSync(path.join(serverDir, 'libraries', 'net', 'neoforged'))) {
+        loader = 'neoforge';
+      } else if (fs.existsSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge'))) {
+        loader = 'forge';
+      } else if (defaultFolder === 'plugins') {
+        loader = 'paper';
+      }
     }
   }
 
-  const folders = new Set<'mods' | 'plugins'>([defaultFolder]);
+  const folders = new Set<AddonFolder>([defaultFolder]);
   if (hasMods) folders.add('mods');
   if (hasPlugins) folders.add('plugins');
-  const availableFolders: Array<'mods' | 'plugins'> = Array.from(folders);
+  folders.add('datapacks');
+  const availableFolders: AddonFolder[] = Array.from(folders);
 
   const rawMcVer = String(instance.config.MC_VERSION ?? '').trim();
   const mcVersion = rawMcVer && rawMcVer.toUpperCase() !== 'LATEST' ? rawMcVer : null;
 
-  return { defaultFolder, availableFolders, loader, mcVersion };
+  return { defaultFolder, availableFolders, loader, mcVersion, worldName, datapacksRelDir };
 }
 
 export class ModrinthService {
   constructor(
     private readonly fetchImpl: typeof fetch = globalThis.fetch,
-    private readonly appVersion = '1.3.2'
+    private readonly appVersion = '1.5.0'
   ) {}
 
   private buildHeaders(): Record<string, string> {
@@ -169,7 +305,7 @@ export class ModrinthService {
 
   async searchProjects(options: {
     query?: string;
-    projectType: 'modpack' | 'mod' | 'plugin';
+    projectType: ModrinthProjectType;
     loader?: string;
     gameVersion?: string;
     limit?: number;
@@ -178,11 +314,13 @@ export class ModrinthService {
     if (options.projectType === 'plugin') {
       facets.push(['project_type:mod']);
       const loader = options.loader?.trim().toLowerCase();
-      if (loader) {
+      if (loader && PLUGIN_LOADERS.has(loader)) {
         facets.push([`categories:${loader}`]);
       } else {
         facets.push(['categories:paper', 'categories:spigot', 'categories:purpur', 'categories:bukkit']);
       }
+    } else if (options.projectType === 'datapack') {
+      facets.push(['project_type:datapack']);
     } else {
       facets.push([`project_type:${options.projectType}`]);
       if (options.loader?.trim()) {
@@ -210,6 +348,14 @@ export class ModrinthService {
       const cats = hit.categories ?? [];
       const loaders = cats.filter((c) => KNOWN_LOADERS.has(c.toLowerCase()));
       const versions = (hit.versions ?? []).slice(-8).reverse();
+      const urlKind =
+        options.projectType === 'modpack'
+          ? 'modpack'
+          : options.projectType === 'datapack'
+            ? 'datapack'
+            : options.projectType === 'plugin'
+              ? 'plugin'
+              : 'mod';
       return {
         projectId: hit.project_id,
         slug: hit.slug,
@@ -221,7 +367,7 @@ export class ModrinthService {
         categories: cats,
         loaders,
         gameVersions: versions,
-        websiteUrl: `https://modrinth.com/${options.projectType === 'modpack' ? 'modpack' : options.projectType}/${hit.slug}`,
+        websiteUrl: `https://modrinth.com/${urlKind}/${hit.slug}`,
         recommendedJavaTag: recommendJavaTag(versions),
       };
     });
@@ -317,6 +463,13 @@ export class ModrinthService {
     fs.writeFileSync(path.join(serverDir, TRACKING_MANIFEST_NAME), JSON.stringify(manifest, null, 2), 'utf8');
   }
 
+  private resolveFolderRelDir(serverDir: string, folder: AddonFolder): string {
+    if (folder === 'datapacks') {
+      return resolveWorldDatapacksDir(serverDir).datapacksRelDir;
+    }
+    return folder;
+  }
+
   listInstalledAddons(serverDir: string, instance: ServerInstance): InstalledAddonsResponse {
     const env = detectMinecraftAddonEnvironment(serverDir, instance);
     const manifest = this.readManifest(serverDir);
@@ -326,6 +479,8 @@ export class ModrinthService {
     }
 
     const addons: InstalledAddonEntry[] = [];
+
+    // 1. Scan mods/ and plugins/ for .jar / .jar.disabled
     for (const folder of ['mods', 'plugins'] as const) {
       const dirPath = path.join(serverDir, folder);
       if (!fs.existsSync(dirPath)) continue;
@@ -356,6 +511,36 @@ export class ModrinthService {
       }
     }
 
+    // 2. Scan <level-name>/datapacks/ for .zip / .zip.disabled
+    const { absPath: datapacksDir } = resolveSandboxedPath(serverDir, env.datapacksRelDir);
+    if (fs.existsSync(datapacksDir)) {
+      for (const entry of fs.readdirSync(datapacksDir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const lower = entry.name.toLowerCase();
+        const isEnabledZip = lower.endsWith('.zip');
+        const isDisabledZip = lower.endsWith('.zip.disabled');
+        if (!isEnabledZip && !isDisabledZip) continue;
+        const st = fs.statSync(path.join(datapacksDir, entry.name));
+        const baseName = isDisabledZip ? entry.name.slice(0, -'.disabled'.length) : entry.name;
+        const tracked =
+          trackedByKey.get(`datapacks:${entry.name.toLowerCase()}`) ??
+          trackedByKey.get(`datapacks:${baseName.toLowerCase()}`);
+
+        addons.push({
+          filename: entry.name,
+          baseName,
+          folder: 'datapacks',
+          enabled: isEnabledZip,
+          sizeBytes: st.size,
+          updatedAt: st.mtime.toISOString(),
+          modrinthProjectId: tracked?.projectId ?? null,
+          modrinthVersionId: tracked?.versionId ?? null,
+          modrinthTitle: tracked?.title ?? null,
+          modrinthVersionNumber: tracked?.versionNumber ?? null,
+        });
+      }
+    }
+
     addons.sort((a, b) => a.baseName.localeCompare(b.baseName, undefined, { sensitivity: 'base' }));
 
     return {
@@ -363,30 +548,46 @@ export class ModrinthService {
       availableFolders: env.availableFolders,
       detectedLoader: env.loader,
       detectedMcVersion: env.mcVersion,
+      worldName: env.worldName,
+      datapacksRelDir: env.datapacksRelDir,
       addons,
     };
   }
 
-  toggleAddon(serverDir: string, folder: 'mods' | 'plugins', filename: string): { filename: string; enabled: boolean } {
-    const clean = path.basename(filename);
-    const { absPath } = resolveSandboxedPath(serverDir, `${folder}/${clean}`);
+  toggleAddon(serverDir: string, folder: AddonFolder, filename: string): { filename: string; enabled: boolean } {
+    const clean = assertSafeAddonFilename(filename);
+    const relDir = this.resolveFolderRelDir(serverDir, folder);
+    const { absPath } = resolveSandboxedPath(serverDir, `${relDir}/${clean}`);
     if (!fs.existsSync(absPath)) {
-      throw new Error(`Addon file not found: ${folder}/${clean}`);
+      throw new Error(`Addon file not found: ${relDir}/${clean}`);
     }
     const lower = clean.toLowerCase();
     let nextName: string;
     let enabled: boolean;
-    if (lower.endsWith('.jar.disabled')) {
-      nextName = clean.slice(0, -'.disabled'.length);
-      enabled = true;
-    } else if (lower.endsWith('.jar')) {
-      nextName = `${clean}.disabled`;
-      enabled = false;
+
+    if (folder === 'datapacks') {
+      if (lower.endsWith('.zip.disabled')) {
+        nextName = clean.slice(0, -'.disabled'.length);
+        enabled = true;
+      } else if (lower.endsWith('.zip')) {
+        nextName = `${clean}.disabled`;
+        enabled = false;
+      } else {
+        throw new Error('Only .zip and .zip.disabled datapack files can be toggled.');
+      }
     } else {
-      throw new Error('Only .jar and .jar.disabled files can be toggled.');
+      if (lower.endsWith('.jar.disabled')) {
+        nextName = clean.slice(0, -'.disabled'.length);
+        enabled = true;
+      } else if (lower.endsWith('.jar')) {
+        nextName = `${clean}.disabled`;
+        enabled = false;
+      } else {
+        throw new Error('Only .jar and .jar.disabled files can be toggled.');
+      }
     }
 
-    const { absPath: nextPath } = resolveSandboxedPath(serverDir, `${folder}/${nextName}`);
+    const { absPath: nextPath } = resolveSandboxedPath(serverDir, `${relDir}/${nextName}`);
     fs.renameSync(absPath, nextPath);
 
     const manifest = this.readManifest(serverDir);
@@ -401,11 +602,12 @@ export class ModrinthService {
     return { filename: nextName, enabled };
   }
 
-  removeAddon(serverDir: string, folder: 'mods' | 'plugins', filename: string): void {
-    const clean = path.basename(filename);
-    const { absPath } = resolveSandboxedPath(serverDir, `${folder}/${clean}`);
+  removeAddon(serverDir: string, folder: AddonFolder, filename: string): void {
+    const clean = assertSafeAddonFilename(filename);
+    const relDir = this.resolveFolderRelDir(serverDir, folder);
+    const { absPath } = resolveSandboxedPath(serverDir, `${relDir}/${clean}`);
     if (!fs.existsSync(absPath)) {
-      throw new Error(`Addon file not found: ${folder}/${clean}`);
+      throw new Error(`Addon file not found: ${relDir}/${clean}`);
     }
     fs.rmSync(absPath, { force: true });
 
@@ -438,14 +640,18 @@ export class ModrinthService {
     options: {
       projectId: string;
       versionId?: string;
-      folder?: 'mods' | 'plugins';
+      folder?: AddonFolder;
       loader?: string;
       gameVersion?: string;
     }
   ): Promise<{ installed: InstalledAddonEntry[]; dependenciesInstalled: string[] }> {
     const env = detectMinecraftAddonEnvironment(serverDir, instance);
-    const targetFolder = options.folder ?? env.defaultFolder;
-    const loader = options.loader ?? env.loader ?? undefined;
+    const targetFolder: AddonFolder = options.folder ?? env.defaultFolder;
+    const targetRelDir = this.resolveFolderRelDir(serverDir, targetFolder);
+    const loader =
+      targetFolder === 'datapacks'
+        ? 'datapack'
+        : (options.loader ?? (targetFolder === 'plugins' ? (env.loader && PLUGIN_LOADERS.has(env.loader) ? env.loader : 'paper') : env.loader) ?? undefined);
     const gameVersion = options.gameVersion ?? env.mcVersion ?? undefined;
 
     const manifest = this.readManifest(serverDir);
@@ -478,17 +684,20 @@ export class ModrinthService {
         throw new Error(`No downloadable file found on Modrinth for "${project.title}".`);
       }
 
-      // Remove any older tracked jar for this same projectId in targetFolder before installing the new one
+      // Remove any older tracked file for this same projectId in targetFolder before installing the new one
       const previous = manifest.addons.find((a) => a.folder === targetFolder && a.projectId === project.id);
       if (previous && previous.filename !== version.primaryFile.filename) {
-        const oldPath = path.join(serverDir, targetFolder, path.basename(previous.filename));
+        const { absPath: oldPath } = resolveSandboxedPath(
+          serverDir,
+          `${targetRelDir}/${path.basename(previous.filename)}`
+        );
         if (fs.existsSync(oldPath)) {
           fs.rmSync(oldPath, { force: true });
         }
       }
 
       const safeFilename = path.basename(version.primaryFile.filename);
-      const { absPath: destPath } = resolveSandboxedPath(serverDir, `${targetFolder}/${safeFilename}`);
+      const { absPath: destPath } = resolveSandboxedPath(serverDir, `${targetRelDir}/${safeFilename}`);
       await this.downloadFile(version.primaryFile.url, destPath);
       const st = fs.statSync(destPath);
 
@@ -545,8 +754,16 @@ export class ModrinthService {
 
     for (const item of manifest.addons) {
       try {
+        const loader =
+          item.folder === 'datapacks'
+            ? 'datapack'
+            : item.folder === 'plugins'
+              ? env.loader && PLUGIN_LOADERS.has(env.loader)
+                ? env.loader
+                : 'paper'
+              : (env.loader ?? undefined);
         const versions = await this.getProjectVersions(item.projectId, {
-          loader: env.loader ?? undefined,
+          loader,
           gameVersion: env.mcVersion ?? undefined,
         });
         const latest = versions[0];
