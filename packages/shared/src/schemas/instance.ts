@@ -53,6 +53,46 @@ export const BackupPolicySchema = z.object({
 });
 export type BackupPolicy = z.infer<typeof BackupPolicySchema>;
 
+export const MinecraftCrashCategorySchema = z.enum([
+  'missing_dependency',
+  'client_only_mod',
+  'java_version_mismatch',
+  'out_of_memory',
+  'port_in_use',
+  'mod_error',
+  'plugin_error',
+  'unknown',
+]);
+export type MinecraftCrashCategory = z.infer<typeof MinecraftCrashCategorySchema>;
+
+export const MinecraftCrashSuspectedModSchema = z.object({
+  modId: z.string().optional(),
+  modName: z.string().optional(),
+  jarFile: z.string().optional(),
+  reason: z.string().optional(),
+});
+export type MinecraftCrashSuspectedMod = z.infer<typeof MinecraftCrashSuspectedModSchema>;
+
+export const MinecraftCrashMissingDependencySchema = z.object({
+  modId: z.string(),
+  requiredBy: z.string().optional(),
+  versionRange: z.string().optional(),
+});
+export type MinecraftCrashMissingDependency = z.infer<typeof MinecraftCrashMissingDependencySchema>;
+
+export const MinecraftCrashAnalysisSchema = z.object({
+  category: MinecraftCrashCategorySchema,
+  headline: z.string(),
+  summary: z.string(),
+  recommendedFix: z.string(),
+  suspectedMods: z.array(MinecraftCrashSuspectedModSchema).default([]),
+  missingDependencies: z.array(MinecraftCrashMissingDependencySchema).default([]),
+  requiredJavaMajor: z.number().int().nullable().optional(),
+  crashReportFile: z.string().nullable().optional(),
+  evidenceLines: z.array(z.string()).default([]),
+});
+export type MinecraftCrashAnalysis = z.infer<typeof MinecraftCrashAnalysisSchema>;
+
 export const CrashSummarySchema = z.object({
   crashedAt: z.string(),
   exitCode: z.number().int().nullable(),
@@ -62,6 +102,7 @@ export const CrashSummarySchema = z.object({
   halted: z.boolean().default(false),
   reason: z.string(),
   logTail: z.array(z.string()).default([]),
+  analysis: MinecraftCrashAnalysisSchema.nullable().optional(),
 });
 export type CrashSummary = z.infer<typeof CrashSummarySchema>;
 

@@ -13,6 +13,7 @@ import type {
   InstanceRuntimeStats,
   InstanceUpdateCheckResult,
   InstanceUpdateResult,
+  MinecraftCrashAnalysis,
   PublicHostSource,
   RuntimeKind,
   ServerInstance,
@@ -32,6 +33,8 @@ import { parseCurseForgeUrl, type CurseForgeService } from './curseforge-service
 import type { DiagnosticsService } from './diagnostics-service.js';
 import type { FirewallService } from './firewall-service.js';
 import { enableRconInServerProperties } from './import-service.js';
+import { analyzeMinecraftCrashDir, redactCrashAnalysis } from './minecraft-crash-analyzer.js';
+import { isMinecraftInstance } from './minecraft-properties-service.js';
 import type { ModrinthService } from './modrinth-service.js';
 import type { NetworkAddressService } from './network-service.js';
 import type { TelemetryService } from './telemetry-service.js';
@@ -529,6 +532,47 @@ export class ServerOrchestrator extends EventEmitter {
     return path.join(this.config.instancesDir, instanceId);
   }
 
+  private collectCrashSecrets(instance: ServerInstance): string[] {
+    const secrets: string[] = [];
+    const sensitiveKeyRe = /(password|passwd|secret|token|api[_-]?key|auth|cookie|credential|private[_-]?key)/i;
+    for (const [k, v] of Object.entries(instance.config)) {
+      if (sensitiveKeyRe.test(k) && typeof v === 'string' && v.trim().length >= 6) {
+        secrets.push(v.trim());
+      }
+    }
+    if (this.config.jwtSecret) secrets.push(this.config.jwtSecret);
+    if (this.config.discordToken) secrets.push(this.config.discordToken);
+    if (this.config.curseforgeApiKey) secrets.push(this.config.curseforgeApiKey);
+    try {
+      const settings = this.db.getSettings(this.config.publicHost);
+      if (settings.curseforgeApiKey) secrets.push(settings.curseforgeApiKey);
+      if (settings.duckdnsToken) secrets.push(settings.duckdnsToken);
+      if (settings.discordBotToken) secrets.push(settings.discordBotToken);
+      if (settings.githubIssueToken) secrets.push(settings.githubIssueToken);
+    } catch {
+      // ignore if DB unavailable
+    }
+    return secrets;
+  }
+
+  /**
+   * Runs bounded on-demand crash analysis for a Minecraft instance (newest crash-reports/*.txt,
+   * bounded <= 64 KB tail of logs/latest.log, and console tail), falling back to persisted lastCrash.analysis.
+   */
+  analyzeMinecraftCrash(instanceId: string): MinecraftCrashAnalysis | null {
+    const inst = this.db.getInstanceById(instanceId);
+    if (!inst || !isMinecraftInstance(inst)) return null;
+    const serverDir = this.getServerContentDir(inst);
+    const consoleTail = this.logs.getLines(instanceId).slice(-80).map((entry) => entry.line);
+    const extraSecrets = this.collectCrashSecrets(inst);
+    const diskAnalysis = analyzeMinecraftCrashDir(serverDir, { consoleTail, extraSecrets });
+    if (diskAnalysis) return diskAnalysis;
+    if (inst.lastCrash?.analysis) {
+      return redactCrashAnalysis(inst.lastCrash.analysis, extraSecrets);
+    }
+    return null;
+  }
+
   private appendLog(instanceId: string, line: string): void {
     const entry = this.logs.append(instanceId, line);
     this.emit('console:line', { instanceId, line: entry.line, timestamp: entry.timestamp });
@@ -565,10 +609,23 @@ export class ServerOrchestrator extends EventEmitter {
       ? `Server crashed unexpectedly (${exitLabel}): ${detailLine.slice(0, 220)}`
       : `Server crashed unexpectedly (${exitLabel})`;
 
+    // For Minecraft instances, inspect newest crash-reports/*.txt + bounded logs/latest.log + console tail
+    let crashAnalysis: MinecraftCrashAnalysis | null = null;
+    if (isMinecraftInstance(cur)) {
+      try {
+        crashAnalysis = analyzeMinecraftCrashDir(this.getServerContentDir(cur), {
+          consoleTail: logTail,
+          extraSecrets: this.collectCrashSecrets(cur),
+        });
+      } catch {
+        crashAnalysis = null;
+      }
+    }
+
     // Detect JVM class-file version mismatch (e.g. class file version 69.0 requiring Java 25)
     // and automatically upgrade JAVA_IMAGE_TAG before recovery restart so it doesn't crash-loop.
     let updatedConfig: Record<string, string | number | boolean> | undefined;
-    const neededJava = parseRequiredJavaFromCrashLogs(logTail);
+    const neededJava = parseRequiredJavaFromCrashLogs(logTail) ?? crashAnalysis?.requiredJavaMajor ?? null;
     if (
       neededJava !== null &&
       (cur.gameId === 'minecraft-curseforge' || 'JAVA_IMAGE_TAG' in cur.config)
@@ -626,6 +683,7 @@ export class ServerOrchestrator extends EventEmitter {
         halted: false,
         reason: baseReason,
         logTail,
+        ...(crashAnalysis ? { analysis: crashAnalysis } : {}),
       };
 
       const updated = this.db.updateInstance(instanceId, {
@@ -680,6 +738,7 @@ export class ServerOrchestrator extends EventEmitter {
         halted: true,
         reason: haltReason,
         logTail,
+        ...(crashAnalysis ? { analysis: crashAnalysis } : {}),
       };
 
       const updated = this.db.updateInstance(instanceId, {

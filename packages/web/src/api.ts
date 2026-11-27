@@ -35,6 +35,7 @@ import type {
   InstanceUpdateCheckResult,
   InstanceUpdateResult,
   MaintenanceStatus,
+  MinecraftCrashAnalysis,
   MinecraftPropertiesResponse,
   ModrinthProjectSummary,
   ModrinthVersionSummary,
@@ -603,6 +604,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  getMinecraftCrashAnalysis: (id: string) =>
+    request<{ analysis: MinecraftCrashAnalysis | null }>(
+      `/api/instances/${encodeURIComponent(id)}/minecraft/crash-analysis`
+    ),
 
   deleteInstance: (id: string) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),
