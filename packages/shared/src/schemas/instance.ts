@@ -200,8 +200,30 @@ export const SystemSettingsSchema = z.object({
   upnpEnabled: z.boolean().default(false),
   dashboardAccessMode: DashboardAccessModeSchema.default('lan_and_tailscale'),
   trustedCidrs: z.array(z.string()).default([]),
+  discordSecurityAlertsEnabled: z.boolean().default(true),
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
+
+export interface AuthSessionSummary {
+  id: string;
+  ip: string;
+  userAgent: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  isCurrent: boolean;
+}
+
+export interface TotpStatus {
+  enabled: boolean;
+  recoveryCodesRemaining: number;
+}
+
+export interface TotpEnrollmentPayload {
+  secret: string;
+  otpAuthUri: string;
+  recoveryCodes: string[];
+}
 
 export interface DiscordGuildSummary {
   id: string;

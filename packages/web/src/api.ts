@@ -2,6 +2,7 @@ import type {
   AddonUpdateCandidate,
   AppDiagnosticEvent,
   AuditLogEntry,
+  AuthSessionSummary,
   BackupPolicy,
   BackupRecord,
   ConsolidatedPortMapEntry,
@@ -40,6 +41,8 @@ import type {
   StartInstanceInput,
   SystemDiagnosticsReport,
   SystemSettings,
+  TotpEnrollmentPayload,
+  TotpStatus,
   UpdateInstanceConfigInput,
   UpdaterStatus,
   UpnpInstanceStatus,
@@ -106,12 +109,46 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
-  login: (username: string, password: string) =>
-    request<{ user: { id: string; username: string } }>('/api/auth/login', {
+  login: (username: string, password: string, totpCode?: string) =>
+    request<{
+      user?: { id: string; username: string };
+      requiresTotp?: boolean;
+      usedRecoveryCode?: boolean;
+      recoveryCodesRemaining?: number;
+    }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, ...(totpCode ? { totpCode } : {}) }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  getAuthSessions: () => request<AuthSessionSummary[]>('/api/auth/sessions'),
+  revokeAuthSession: (sessionId: string) =>
+    request<{ ok: boolean }>(`/api/auth/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }),
+  revokeAllAuthSessions: (keepCurrent = false) =>
+    request<{ ok: boolean; revokedCount: number }>('/api/auth/sessions/revoke-all', {
+      method: 'POST',
+      body: JSON.stringify({ keepCurrent }),
+    }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: boolean; revokedOtherSessions: number }>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+  getTotpStatus: () => request<TotpStatus>('/api/auth/totp/status'),
+  beginTotpEnrollment: () =>
+    request<TotpEnrollmentPayload>('/api/auth/totp/enroll', {
+      method: 'POST',
+      body: '{}',
+    }),
+  enableTotp: (code: string) =>
+    request<TotpStatus>('/api/auth/totp/enable', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+  disableTotp: (currentPassword: string) =>
+    request<TotpStatus>('/api/auth/totp/disable', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword }),
+    }),
 
   getHostMetrics: () => request<HostMetrics>('/api/host/metrics'),
   getSettings: () => request<SystemSettings>('/api/settings'),

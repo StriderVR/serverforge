@@ -22,6 +22,20 @@ export interface UserRecord {
   passwordHash: string;
   role: 'admin';
   createdAt: string;
+  totpSecret: string | null;
+  totpEnabled: boolean;
+  recoveryCodes: string[];
+}
+
+export interface SessionRecord {
+  id: string;
+  userId: string;
+  ip: string;
+  userAgent: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  revoked: boolean;
 }
 
 export class AppDatabase {
@@ -41,8 +55,24 @@ export class AppDatabase {
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'admin',
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        totp_secret TEXT,
+        totp_enabled INTEGER NOT NULL DEFAULT 0,
+        recovery_codes_json TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        ip TEXT NOT NULL DEFAULT '',
+        user_agent TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, revoked);
 
       CREATE TABLE IF NOT EXISTS instances (
         id TEXT PRIMARY KEY,
@@ -129,7 +159,19 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_upnp_mappings_inst ON upnp_mappings(instance_id);
     `);
 
-    // Safe additive column migrations for existing v1.0/v1.1 SQLite databases
+    // Safe additive column migrations for existing SQLite databases
+    const userCols = this.db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+    const userColNames = new Set(userCols.map((c) => c.name));
+    if (!userColNames.has('totp_secret')) {
+      this.db.exec('ALTER TABLE users ADD COLUMN totp_secret TEXT;');
+    }
+    if (!userColNames.has('totp_enabled')) {
+      this.db.exec('ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!userColNames.has('recovery_codes_json')) {
+      this.db.exec('ALTER TABLE users ADD COLUMN recovery_codes_json TEXT;');
+    }
+
     const cols = this.db.prepare('PRAGMA table_info(instances)').all() as Array<{ name: string }>;
     const colNames = new Set(cols.map((c) => c.name));
     if (!colNames.has('external_dir')) {
@@ -156,7 +198,44 @@ export class AppDatabase {
     this.db.close();
   }
 
-  // --- Users ---
+  // --- Users & Sessions ---
+
+  private mapUserRow(row: Record<string, unknown>): UserRecord {
+    let recoveryCodes: string[] = [];
+    if (row.recovery_codes_json) {
+      try {
+        const parsed = JSON.parse(String(row.recovery_codes_json));
+        if (Array.isArray(parsed)) {
+          recoveryCodes = parsed.filter((v): v is string => typeof v === 'string');
+        }
+      } catch {
+        recoveryCodes = [];
+      }
+    }
+    return {
+      id: String(row.id),
+      username: String(row.username),
+      passwordHash: String(row.password_hash),
+      role: 'admin',
+      createdAt: String(row.created_at),
+      totpSecret: row.totp_secret ? String(row.totp_secret) : null,
+      totpEnabled: Boolean(row.totp_enabled),
+      recoveryCodes,
+    };
+  }
+
+  private mapSessionRow(row: Record<string, unknown>): SessionRecord {
+    return {
+      id: String(row.id),
+      userId: String(row.user_id),
+      ip: String(row.ip ?? ''),
+      userAgent: String(row.user_agent ?? ''),
+      createdAt: String(row.created_at),
+      lastSeenAt: String(row.last_seen_at),
+      expiresAt: String(row.expires_at),
+      revoked: Boolean(row.revoked),
+    };
+  }
 
   countUsers(): number {
     const row = this.db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
@@ -165,30 +244,22 @@ export class AppDatabase {
 
   findUserByUsername(username: string): UserRecord | null {
     const row = this.db
-      .prepare('SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?')
-      .get(username) as Record<string, string> | undefined;
+      .prepare(
+        'SELECT id, username, password_hash, role, created_at, totp_secret, totp_enabled, recovery_codes_json FROM users WHERE username = ?'
+      )
+      .get(username) as Record<string, unknown> | undefined;
     if (!row) return null;
-    return {
-      id: row.id,
-      username: row.username,
-      passwordHash: row.password_hash,
-      role: 'admin',
-      createdAt: row.created_at,
-    };
+    return this.mapUserRow(row);
   }
 
   findUserById(id: string): UserRecord | null {
     const row = this.db
-      .prepare('SELECT id, username, password_hash, role, created_at FROM users WHERE id = ?')
-      .get(id) as Record<string, string> | undefined;
+      .prepare(
+        'SELECT id, username, password_hash, role, created_at, totp_secret, totp_enabled, recovery_codes_json FROM users WHERE id = ?'
+      )
+      .get(id) as Record<string, unknown> | undefined;
     if (!row) return null;
-    return {
-      id: row.id,
-      username: row.username,
-      passwordHash: row.password_hash,
-      role: 'admin',
-      createdAt: row.created_at,
-    };
+    return this.mapUserRow(row);
   }
 
   createUser(username: string, passwordHash: string): UserRecord {
@@ -198,11 +269,112 @@ export class AppDatabase {
       passwordHash,
       role: 'admin',
       createdAt: new Date().toISOString(),
+      totpSecret: null,
+      totpEnabled: false,
+      recoveryCodes: [],
     };
     this.db
-      .prepare('INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)')
+      .prepare(
+        'INSERT INTO users (id, username, password_hash, role, created_at, totp_secret, totp_enabled, recovery_codes_json) VALUES (?, ?, ?, ?, ?, NULL, 0, NULL)'
+      )
       .run(user.id, user.username, user.passwordHash, user.role, user.createdAt);
     return user;
+  }
+
+  updateUserPassword(userId: string, passwordHash: string): void {
+    this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, userId);
+  }
+
+  updateUserTotp(
+    userId: string,
+    totpSecret: string | null,
+    totpEnabled: boolean,
+    recoveryCodes: string[]
+  ): void {
+    this.db
+      .prepare('UPDATE users SET totp_secret = ?, totp_enabled = ?, recovery_codes_json = ? WHERE id = ?')
+      .run(totpSecret, totpEnabled ? 1 : 0, JSON.stringify(recoveryCodes), userId);
+  }
+
+  createSession(input: {
+    userId: string;
+    ip: string;
+    userAgent: string;
+    expiresAt: string;
+  }): SessionRecord {
+    const now = new Date().toISOString();
+    const session: SessionRecord = {
+      id: crypto.randomUUID(),
+      userId: input.userId,
+      ip: input.ip,
+      userAgent: input.userAgent.slice(0, 240),
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: input.expiresAt,
+      revoked: false,
+    };
+    this.db
+      .prepare(
+        'INSERT INTO sessions (id, user_id, ip, user_agent, created_at, last_seen_at, expires_at, revoked) VALUES (?, ?, ?, ?, ?, ?, ?, 0)'
+      )
+      .run(
+        session.id,
+        session.userId,
+        session.ip,
+        session.userAgent,
+        session.createdAt,
+        session.lastSeenAt,
+        session.expiresAt
+      );
+    return session;
+  }
+
+  getSessionById(sessionId: string): SessionRecord | null {
+    const row = this.db
+      .prepare(
+        'SELECT id, user_id, ip, user_agent, created_at, last_seen_at, expires_at, revoked FROM sessions WHERE id = ?'
+      )
+      .get(sessionId) as Record<string, unknown> | undefined;
+    return row ? this.mapSessionRow(row) : null;
+  }
+
+  listActiveSessions(userId: string): SessionRecord[] {
+    const nowIso = new Date().toISOString();
+    const rows = this.db
+      .prepare(
+        'SELECT id, user_id, ip, user_agent, created_at, last_seen_at, expires_at, revoked FROM sessions WHERE user_id = ? AND revoked = 0 AND expires_at > ? ORDER BY last_seen_at DESC'
+      )
+      .all(userId, nowIso) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapSessionRow(r));
+  }
+
+  touchSession(sessionId: string, nowIso = new Date().toISOString()): void {
+    this.db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').run(nowIso, sessionId);
+  }
+
+  revokeSession(sessionId: string, userId?: string): boolean {
+    const res = userId
+      ? this.db.prepare('UPDATE sessions SET revoked = 1 WHERE id = ? AND user_id = ?').run(sessionId, userId)
+      : this.db.prepare('UPDATE sessions SET revoked = 1 WHERE id = ?').run(sessionId);
+    return Number(res.changes ?? 0) > 0;
+  }
+
+  revokeAllSessionsForUser(userId: string, exceptSessionId?: string): number {
+    const res = exceptSessionId
+      ? this.db
+          .prepare('UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0 AND id != ?')
+          .run(userId, exceptSessionId)
+      : this.db.prepare('UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0').run(userId);
+    return Number(res.changes ?? 0);
+  }
+
+  hasSeenUserIp(userId: string, ip: string): boolean {
+    const trimmed = ip.trim();
+    if (!trimmed) return true;
+    const row = this.db
+      .prepare('SELECT 1 as found FROM sessions WHERE user_id = ? AND ip = ? LIMIT 1')
+      .get(userId, trimmed) as { found?: number } | undefined;
+    return Boolean(row?.found);
   }
 
   // --- Settings ---
@@ -573,11 +745,20 @@ export class AppDatabase {
 
   // --- Audit Logs ---
 
-  addAuditLog(entry: Omit<AuditLogEntry, 'id' | 'timestamp'>): AuditLogEntry {
+  addAuditLog(
+    entry: Omit<AuditLogEntry, 'id' | 'timestamp' | 'instanceId' | 'details'> & {
+      instanceId?: string | null;
+      details?: string | null;
+    }
+  ): AuditLogEntry {
     const record: AuditLogEntry = {
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
-      ...entry,
+      actor: entry.actor,
+      source: entry.source,
+      action: entry.action,
+      instanceId: entry.instanceId ?? null,
+      details: entry.details ?? null,
     };
     this.db
       .prepare(

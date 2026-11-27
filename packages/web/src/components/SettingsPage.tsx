@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Bot, Bug, Download, Globe, RotateCcw, Save, Shield } from 'lucide-react';
+import { Bot, Bug, Download, Globe, KeyRound, RotateCcw, Save, Shield } from 'lucide-react';
 import type {
   AppDiagnosticEvent,
   AuditLogEntry,
@@ -18,9 +18,10 @@ import { DiagnosticsActivityTab } from './settings/DiagnosticsActivityTab';
 import { DiscordBotTab } from './settings/DiscordBotTab';
 import { GeneralGuardrailsTab } from './settings/GeneralGuardrailsTab';
 import { NetworkingIntegrationsTab } from './settings/NetworkingIntegrationsTab';
+import { SecurityTab } from './settings/SecurityTab';
 import { UpdatesMaintenanceTab } from './settings/UpdatesMaintenanceTab';
 
-export type SettingsTabId = 'general' | 'networking' | 'discord' | 'updates' | 'diagnostics';
+export type SettingsTabId = 'general' | 'security' | 'networking' | 'discord' | 'updates' | 'diagnostics';
 
 interface SettingsPageProps {
   metrics: HostMetrics | null;
@@ -207,6 +208,17 @@ export function SettingsPage({
         <button
           type="button"
           role="tab"
+          aria-selected={activeTab === 'security'}
+          className={`tab-btn ${activeTab === 'security' ? 'active' : ''}`}
+          onClick={() => onTabChange('security')}
+        >
+          <KeyRound size={14} />
+          <span>Security</span>
+        </button>
+
+        <button
+          type="button"
+          role="tab"
           aria-selected={activeTab === 'networking'}
           className={`tab-btn ${activeTab === 'networking' ? 'active' : ''}`}
           onClick={() => onTabChange('networking')}
@@ -258,6 +270,15 @@ export function SettingsPage({
       </div>
 
       {activeTab === 'general' && <GeneralGuardrailsTab settings={settings} onChange={patchSettings} />}
+
+      {activeTab === 'security' && (
+        <SecurityTab
+          settings={settings}
+          onChange={patchSettings}
+          onConfirm={onConfirm}
+          onToast={onToast}
+        />
+      )}
 
       {activeTab === 'networking' && (
         <NetworkingIntegrationsTab
