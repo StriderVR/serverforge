@@ -21,6 +21,7 @@ import type {
   SecurityHealthReport,
   SystemSettings,
   SystemSettingsResponse,
+  TlsStatus,
   TotpEnrollmentPayload,
   TotpStatus,
 } from '@serverforge/shared';
@@ -78,6 +79,9 @@ export function SecurityTab({
   const [health, setHealth] = useState<SecurityHealthReport | null>(null);
   const [loadingHealth, setLoadingHealth] = useState(false);
 
+  const [tlsStatus, setTlsStatus] = useState<TlsStatus | null>(null);
+  const [regeneratingTls, setRegeneratingTls] = useState(false);
+
   const [sessions, setSessions] = useState<AuthSessionSummary[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
 
@@ -127,18 +131,33 @@ export function SecurityTab({
   const loadSecurityData = async () => {
     setLoadingSessions(true);
     try {
-      const [sess, totp, report] = await Promise.all([
+      const [sess, totp, report, tls] = await Promise.all([
         api.getAuthSessions(),
         api.getTotpStatus(),
         api.getSecurityHealth(),
+        api.getTlsStatus().catch(() => null),
       ]);
       setSessions(sess);
       setTotpStatus(totp);
       setHealth(report);
+      if (tls) setTlsStatus(tls);
     } catch (err) {
       onToast('error', err instanceof Error ? err.message : 'Failed to load security data');
     } finally {
       setLoadingSessions(false);
+    }
+  };
+
+  const handleRegenerateTls = async () => {
+    setRegeneratingTls(true);
+    try {
+      const next = await api.regenerateTlsCert();
+      setTlsStatus(next);
+      onToast('success', 'Regenerated local TLS certificate with current LAN IP & hostname. Restart ServerForge to apply.');
+    } catch (err) {
+      onToast('error', err instanceof Error ? err.message : 'Failed to regenerate TLS certificate');
+    } finally {
+      setRegeneratingTls(false);
     }
   };
 
@@ -475,6 +494,125 @@ export function SecurityTab({
               </button>
             </div>
           </form>
+        </div>
+      </section>
+
+      {/* Built-In HTTPS / TLS (Encrypted LAN Access) */}
+      <section className="panel">
+        <div className="panel-header">
+          <div className="panel-title">
+            <Lock size={15} /> Built-In HTTPS / TLS (Encrypted LAN &amp; Wi-Fi Access)
+          </div>
+          {tlsStatus?.active ? (
+            <span className="badge badge-running">
+              <ShieldCheck size={12} /> HTTPS Active
+            </span>
+          ) : tlsStatus?.fallbackReason ? (
+            <span className="badge badge-error">Fallback to HTTP</span>
+          ) : settings.httpsEnabled ? (
+            <span className="badge badge-starting">Pending Save &amp; Restart</span>
+          ) : (
+            <span className="badge badge-stopped">HTTP (Default)</span>
+          )}
+        </div>
+        <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {tlsStatus?.fallbackReason && (
+            <div className="alert alert-error" style={{ marginBottom: 0 }}>
+              <strong>HTTPS Fallback Notice:</strong> {tlsStatus.fallbackReason}
+            </div>
+          )}
+
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer', fontSize: 13 }}>
+            <input
+              type="checkbox"
+              checked={settings.httpsEnabled}
+              onChange={(e) => onChange({ httpsEnabled: e.target.checked })}
+              style={{ marginTop: 3 }}
+            />
+            <span>
+              <strong>Enable Built-In HTTPS / TLS</strong>
+              <div className="muted" style={{ fontSize: 12 }}>
+                Encrypts dashboard sign-ins, session cookies (with <code>Secure</code> flag), and live console WebSockets (<code>wss://</code>) over Wi-Fi and LAN. Click <strong>Save Changes</strong> and restart ServerForge to apply.
+              </div>
+            </span>
+          </label>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            <div className="field">
+              <label htmlFor="sec-tls-mode">Certificate Mode</label>
+              <select
+                id="sec-tls-mode"
+                className="input"
+                value={settings.httpsCertMode}
+                onChange={(e) => onChange({ httpsCertMode: e.target.value as 'self_signed' | 'custom' })}
+              >
+                <option value="self_signed">Auto-Generated Local Certificate (Recommended)</option>
+                <option value="custom">Custom PEM Certificate &amp; Key Files</option>
+              </select>
+            </div>
+
+            {settings.httpsCertMode === 'custom' && (
+              <>
+                <div className="field">
+                  <label htmlFor="sec-tls-cert-path">Custom Certificate Path (.crt / .pem)</label>
+                  <input
+                    id="sec-tls-cert-path"
+                    className="input mono"
+                    value={settings.httpsCertPath}
+                    onChange={(e) => onChange({ httpsCertPath: e.target.value })}
+                    placeholder="C:\\certs\\serverforge.crt"
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="sec-tls-key-path">Custom Private Key Path (.key / .pem)</label>
+                  <input
+                    id="sec-tls-key-path"
+                    className="input mono"
+                    value={settings.httpsKeyPath}
+                    onChange={(e) => onChange({ httpsKeyPath: e.target.value })}
+                    placeholder="C:\\certs\\serverforge.key"
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            <a
+              href="/api/security/tls/cert"
+              download="serverforge-local.crt"
+              className="btn btn-sm"
+              style={{ textDecoration: 'none' }}
+            >
+              <Download size={13} /> Download Local Certificate (.crt)
+            </a>
+            {settings.httpsCertMode === 'self_signed' && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={regeneratingTls}
+                onClick={() => void handleRegenerateTls()}
+              >
+                <RefreshCw size={13} /> {regeneratingTls ? 'Regenerating...' : 'Regenerate Local Certificate'}
+              </button>
+            )}
+          </div>
+
+          {tlsStatus?.fingerprint256 && (
+            <div style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-subtle)', background: 'var(--bg-elevated)', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div><strong>SHA-256 Fingerprint:</strong> <code>{tlsStatus.fingerprint256}</code></div>
+              {tlsStatus.sans.length > 0 && (
+                <div><strong>Covered Hosts / IPs (SANs):</strong> <code>{tlsStatus.sans.join(', ')}</code></div>
+              )}
+              {tlsStatus.validTo && (
+                <div className="muted">Valid until {new Date(tlsStatus.validTo).toLocaleDateString()}</div>
+              )}
+            </div>
+          )}
+
+          <div className="muted" style={{ fontSize: 12 }}>
+            <strong>Optional browser trust tip:</strong> Download <code>serverforge-local.crt</code>, double-click it on Windows -&gt; <em>Install Certificate</em> -&gt; <em>Current User</em> -&gt; <em>Trusted Root Certification Authorities</em> (or install via iOS/Android profile) for a clean green lock with zero browser warnings.
+          </div>
         </div>
       </section>
 

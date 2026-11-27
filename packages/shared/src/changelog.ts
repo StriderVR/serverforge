@@ -14,6 +14,19 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.4.6',
+    title: 'Opt-In Built-In HTTPS / TLS for Encrypted LAN Access',
+    summary: 'Adds optional built-in HTTPS with zero-dependency local TLS certificate generation, custom PEM cert support, automatic Secure auth cookies, wss:// WebSockets, and safe HTTP fallback.',
+    added: [
+      'Opt-in HTTPS / TLS toggle in Settings -> Security & Audit supporting auto-generated local X.509 certificates (with localhost, LAN IP, and .local hostname SANs) or custom .crt/.key paths.',
+      'One-click Download Local Certificate (.crt) and Regenerate Certificate controls with brief Windows/mobile trust steps.',
+      'Safe automatic fallback to HTTP with a clear diagnostic alert if a custom certificate or key file fails to load.',
+    ],
+    changed: [
+      'Auth session cookies automatically enable Secure when running over HTTPS and WebSockets connect over wss://.',
+    ],
+  },
+  {
     version: '1.4.5',
     title: 'Security & Audit Dashboard, Host Lockdown & Loopback RCON',
     summary: 'Adds a live security health checklist, searchable audit log viewer with export, password-confirmed host lockdown switches, and strict localhost binding for internal management ports.',
