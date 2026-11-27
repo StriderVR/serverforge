@@ -700,12 +700,15 @@ export interface MinecraftPropertiesResponse {
   restartRequired: boolean;
 }
 
+export type ModrinthProjectType = 'modpack' | 'mod' | 'plugin' | 'datapack';
+export type AddonFolder = 'mods' | 'plugins' | 'datapacks';
+
 export interface ModrinthProjectSummary {
   projectId: string;
   slug: string;
   title: string;
   description: string;
-  projectType: 'modpack' | 'mod' | 'plugin';
+  projectType: ModrinthProjectType;
   iconUrl: string | null;
   downloads: number;
   categories: string[];
@@ -741,7 +744,7 @@ export interface ModrinthVersionSummary {
 export interface InstalledAddonEntry {
   filename: string;
   baseName: string;
-  folder: 'mods' | 'plugins';
+  folder: AddonFolder;
   enabled: boolean;
   sizeBytes: number;
   updatedAt: string;
@@ -752,16 +755,18 @@ export interface InstalledAddonEntry {
 }
 
 export interface InstalledAddonsResponse {
-  defaultFolder: 'mods' | 'plugins';
-  availableFolders: Array<'mods' | 'plugins'>;
+  defaultFolder: AddonFolder;
+  availableFolders: AddonFolder[];
   detectedLoader: string | null;
   detectedMcVersion: string | null;
+  worldName?: string;
+  datapacksRelDir?: string;
   addons: InstalledAddonEntry[];
 }
 
 export interface AddonUpdateCandidate {
   filename: string;
-  folder: 'mods' | 'plugins';
+  folder: AddonFolder;
   projectId: string;
   title: string;
   currentVersionId: string;

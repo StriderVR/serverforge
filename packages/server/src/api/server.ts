@@ -48,7 +48,7 @@ import {
   isMinecraftInstance,
   MinecraftPropertiesService,
 } from '../services/minecraft-properties-service.js';
-import { ModrinthService } from '../services/modrinth-service.js';
+import { ModrinthService, resolveWorldDatapacksDir } from '../services/modrinth-service.js';
 import { NetworkAddressService, normalizeDuckDnsDomain } from '../services/network-service.js';
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
 import {
@@ -1700,17 +1700,18 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     return { analysis };
   });
 
-  // --- Modrinth & Minecraft Mods / Plugins Manager Routes (Issue #14) ---
+  // --- Modrinth & Minecraft Mods / Plugins / Datapacks Manager Routes (Issues #14, #128) ---
 
   app.get('/api/modrinth/search', { preHandler: requireAuth }, async (req, reply) => {
     const q = req.query as {
       q?: string;
-      type?: 'modpack' | 'mod' | 'plugin';
+      type?: 'modpack' | 'mod' | 'plugin' | 'datapack';
       loader?: string;
       version?: string;
       limit?: string;
     };
-    const projectType = q.type === 'modpack' || q.type === 'plugin' ? q.type : 'mod';
+    const projectType =
+      q.type === 'modpack' || q.type === 'plugin' || q.type === 'datapack' ? q.type : 'mod';
     try {
       const results = await modrinth.searchProjects({
         query: q.q ?? '',
@@ -1754,12 +1755,15 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const body = (req.body ?? {}) as {
       projectId?: string;
       versionId?: string;
-      folder?: 'mods' | 'plugins';
+      folder?: 'mods' | 'plugins' | 'datapacks';
       loader?: string;
       gameVersion?: string;
     };
     if (!body.projectId?.trim()) {
       return reply.status(400).send({ error: 'projectId is required.' });
+    }
+    if (body.folder && body.folder !== 'mods' && body.folder !== 'plugins' && body.folder !== 'datapacks') {
+      return reply.status(400).send({ error: 'folder must be "mods", "plugins", or "datapacks".' });
     }
     try {
       const serverDir = orchestrator.getServerContentDir(inst);
@@ -1787,9 +1791,12 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const { id } = req.params as { id: string };
     const inst = orchestrator.getInstance(id);
     if (!inst) return reply.status(404).send({ error: 'Instance not found' });
-    const body = (req.body ?? {}) as { filename?: string; folder?: 'mods' | 'plugins' };
-    if (!body.filename || (body.folder !== 'mods' && body.folder !== 'plugins')) {
-      return reply.status(400).send({ error: 'filename and folder ("mods" | "plugins") are required.' });
+    const body = (req.body ?? {}) as { filename?: string; folder?: 'mods' | 'plugins' | 'datapacks' };
+    if (
+      !body.filename ||
+      (body.folder !== 'mods' && body.folder !== 'plugins' && body.folder !== 'datapacks')
+    ) {
+      return reply.status(400).send({ error: 'filename and folder ("mods" | "plugins" | "datapacks") are required.' });
     }
     try {
       const serverDir = orchestrator.getServerContentDir(inst);
@@ -1811,8 +1818,11 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const { id } = req.params as { id: string };
     const inst = orchestrator.getInstance(id);
     if (!inst) return reply.status(404).send({ error: 'Instance not found' });
-    const q = req.query as { filename?: string; folder?: 'mods' | 'plugins' };
-    if (!q.filename || (q.folder !== 'mods' && q.folder !== 'plugins')) {
+    const q = req.query as { filename?: string; folder?: 'mods' | 'plugins' | 'datapacks' };
+    if (
+      !q.filename ||
+      (q.folder !== 'mods' && q.folder !== 'plugins' && q.folder !== 'datapacks')
+    ) {
       return reply.status(400).send({ error: 'filename and folder query params are required.' });
     }
     try {
@@ -1828,6 +1838,64 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       return { ok: true };
     } catch (err) {
       return reply.status(400).send({ error: err instanceof Error ? err.message : 'Remove failed' });
+    }
+  });
+
+  app.post('/api/instances/:id/addons/datapacks/upload', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { filename = '' } = req.query as { filename?: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    if (!isMinecraftInstance(inst)) {
+      return reply.status(400).send({ error: 'Datapack upload is only available for Minecraft instances.' });
+    }
+    const cleanFilename = filename.trim();
+    if (!cleanFilename) {
+      return reply.status(400).send({ error: 'filename query parameter is required.' });
+    }
+    const settings = db.getSettings(config.publicHost);
+    if (settings.blockExecutableUploads && !cleanFilename.toLowerCase().endsWith('.zip')) {
+      // Let fileService enforce Host Lockdown executable blocking (403) before extension check if executable
+      const rawBody = req.body;
+      const buffer = Buffer.isBuffer(rawBody) ? rawBody : typeof rawBody === 'string' ? Buffer.from(rawBody, 'utf8') : null;
+      if (buffer) {
+        try {
+          const serverDir = orchestrator.getServerContentDir(inst);
+          const { datapacksRelDir } = resolveWorldDatapacksDir(serverDir);
+          fileService.uploadFile(serverDir, datapacksRelDir, cleanFilename, buffer, { blockExecutables: true });
+        } catch (err) {
+          return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Upload blocked' });
+        }
+      }
+    }
+    if (!cleanFilename.toLowerCase().endsWith('.zip')) {
+      return reply.status(400).send({ error: 'Datapacks must be uploaded as .zip archives.' });
+    }
+    const rawBody = req.body;
+    const buffer = Buffer.isBuffer(rawBody)
+      ? rawBody
+      : typeof rawBody === 'string'
+        ? Buffer.from(rawBody, 'utf8')
+        : null;
+    if (!buffer) {
+      return reply.status(400).send({ error: 'Binary upload body (application/octet-stream) is required.' });
+    }
+    try {
+      const serverDir = orchestrator.getServerContentDir(inst);
+      const { datapacksRelDir } = resolveWorldDatapacksDir(serverDir);
+      const entry = fileService.uploadFile(serverDir, datapacksRelDir, cleanFilename, buffer, {
+        blockExecutables: settings.blockExecutableUploads,
+      });
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'instance.datapack_upload',
+        instanceId: inst.id,
+        details: `Uploaded datapack ${entry.path} (${entry.sizeBytes} bytes)`,
+      });
+      return reply.status(201).send(entry);
+    } catch (err) {
+      return reply.status(mapFileErrorStatus(err)).send({ error: err instanceof Error ? err.message : 'Datapack upload failed' });
     }
   });
 
