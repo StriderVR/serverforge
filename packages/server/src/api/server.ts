@@ -45,6 +45,10 @@ import { SmartImportService } from '../services/import-service.js';
 import { LeaseReaper } from '../services/lease-reaper.js';
 import { MaintenanceService, type OsRebootExecutor } from '../services/maintenance-service.js';
 import {
+  MinecraftLoaderService,
+  parseMinecraftLoaderKind,
+} from '../services/minecraft-loader-service.js';
+import {
   isMinecraftInstance,
   MinecraftPropertiesService,
 } from '../services/minecraft-properties-service.js';
@@ -222,6 +226,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       message: `Secret Vault could not decrypt ${vaultStatus.undecryptableFields.length} stored secret(s) (${vaultStatus.undecryptableFields.join(', ')}). Re-enter them in Settings if this database was moved from another PC.`,
     });
   }
+  const minecraftLoader = new MinecraftLoaderService(fetchImpl, config.appVersion);
   const orchestrator = new ServerOrchestrator(
     config,
     db,
@@ -232,7 +237,8 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     diagnostics,
     undefined,
     curseforge,
-    modrinth
+    modrinth,
+    minecraftLoader
   );
   orchestrator.attachFirewallService(firewall);
   orchestrator.attachUpnpService(upnp);
@@ -1698,6 +1704,73 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     }
     const analysis = orchestrator.analyzeMinecraftCrash(inst.id);
     return { analysis };
+  });
+
+  // --- Minecraft Server Loader Discovery & Safe Switcher Routes (Issue #127) ---
+
+  app.get('/api/minecraft/loaders/versions', { preHandler: requireAuth }, async (req, reply) => {
+    const q = req.query as { loader?: string; mcVersion?: string };
+    const loader = parseMinecraftLoaderKind(q.loader);
+    if (!loader) {
+      return reply.status(400).send({
+        error: 'Invalid loader parameter. Must be one of: VANILLA, PAPER, FABRIC, FORGE, NEOFORGE.',
+      });
+    }
+    try {
+      return await minecraftLoader.getLoaderVersions(loader, q.mcVersion);
+    } catch (err) {
+      return reply.status(502).send({
+        error: err instanceof Error ? err.message : 'Failed to fetch Minecraft loader versions.',
+      });
+    }
+  });
+
+  app.post('/api/instances/:id/minecraft/loader/switch', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const inst = orchestrator.getInstance(id);
+    if (!inst) return reply.status(404).send({ error: 'Instance not found' });
+    if (!isMinecraftInstance(inst)) {
+      return reply.status(400).send({ error: 'Loader switching is only available for Minecraft instances.' });
+    }
+    const body = (req.body ?? {}) as {
+      loader?: string;
+      mcVersion?: string;
+      loaderVersion?: string;
+      createBackup?: boolean;
+    };
+    const loader = parseMinecraftLoaderKind(body.loader);
+    if (!loader) {
+      return reply.status(400).send({
+        error: 'Invalid loader. Must be one of: VANILLA, PAPER, FABRIC, FORGE, NEOFORGE.',
+      });
+    }
+    const mcVersion = (body.mcVersion ?? '').trim();
+    if (!mcVersion) {
+      return reply.status(400).send({ error: 'mcVersion is required.' });
+    }
+    try {
+      const result = await orchestrator.switchMinecraftLoader(
+        inst.id,
+        {
+          loader,
+          mcVersion,
+          loaderVersion: body.loaderVersion?.trim() || undefined,
+          createBackup: body.createBackup,
+        },
+        req.authUser?.username || 'admin'
+      );
+      return {
+        ...result,
+        instance: {
+          ...result.instance,
+          config: secretVault.sanitizeInstanceConfigForApi(result.instance.config),
+        },
+      };
+    } catch (err) {
+      return reply.status(400).send({
+        error: err instanceof Error ? err.message : 'Failed to switch Minecraft loader.',
+      });
+    }
   });
 
   // --- Modrinth & Minecraft Mods / Plugins / Datapacks Manager Routes (Issues #14, #128) ---

@@ -776,6 +776,36 @@ export interface AddonUpdateCandidate {
   latestVersionName: string;
 }
 
+export const MinecraftLoaderKindSchema = z.enum(['VANILLA', 'PAPER', 'FABRIC', 'FORGE', 'NEOFORGE']);
+export type MinecraftLoaderKind = z.infer<typeof MinecraftLoaderKindSchema>;
+
+export interface MinecraftLoaderVersionsResponse {
+  loader: MinecraftLoaderKind;
+  mcVersion: string | null;
+  mcVersions: string[];
+  loaderVersions: string[];
+  recommendedJavaMajor: number;
+}
+
+export interface SwitchMinecraftLoaderInput {
+  loader: MinecraftLoaderKind;
+  mcVersion: string;
+  loaderVersion?: string;
+  createBackup?: boolean;
+}
+
+export interface SwitchMinecraftLoaderResult {
+  ok: boolean;
+  instance: ServerInstance;
+  loader: MinecraftLoaderKind;
+  mcVersion: string;
+  loaderVersion: string | null;
+  requiredJavaMajor: number;
+  backupFilename: string | null;
+  removedArtifacts: string[];
+  summary: string;
+}
+
 export interface InstanceUpdateOption {
   id: string;
   label: string;
@@ -786,7 +816,7 @@ export interface InstanceUpdateOption {
 
 export interface InstanceUpdateCheckResult {
   supported: boolean;
-  kind: 'steamcmd' | 'curseforge' | 'modrinth' | 'unsupported';
+  kind: 'steamcmd' | 'curseforge' | 'modrinth' | 'minecraft_loader' | 'unsupported';
   message: string;
   updateAvailable: boolean;
   currentVersionId: string | null;
@@ -799,7 +829,7 @@ export interface InstanceUpdateCheckResult {
 
 export interface InstanceUpdateResult {
   ok: boolean;
-  kind: 'steamcmd' | 'curseforge' | 'modrinth';
+  kind: 'steamcmd' | 'curseforge' | 'modrinth' | 'minecraft_loader';
   summary: string;
   backupCreated: string | null;
   restarted: boolean;

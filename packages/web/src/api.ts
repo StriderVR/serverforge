@@ -36,6 +36,8 @@ import type {
   InstanceUpdateResult,
   MaintenanceStatus,
   MinecraftCrashAnalysis,
+  MinecraftLoaderKind,
+  MinecraftLoaderVersionsResponse,
   MinecraftPropertiesResponse,
   ModrinthProjectSummary,
   ModrinthVersionSummary,
@@ -45,6 +47,8 @@ import type {
   ServerInstance,
   ServerLease,
   StartInstanceInput,
+  SwitchMinecraftLoaderInput,
+  SwitchMinecraftLoaderResult,
   SystemDiagnosticsReport,
   SystemSettings,
   SystemSettingsResponse,
@@ -638,6 +642,18 @@ export const api = {
     request<{ analysis: MinecraftCrashAnalysis | null }>(
       `/api/instances/${encodeURIComponent(id)}/minecraft/crash-analysis`
     ),
+
+  getMinecraftLoaderVersions: (loader: MinecraftLoaderKind, mcVersion?: string) => {
+    const params = new URLSearchParams({ loader });
+    if (mcVersion) params.set('mcVersion', mcVersion);
+    return request<MinecraftLoaderVersionsResponse>(`/api/minecraft/loaders/versions?${params.toString()}`);
+  },
+
+  switchMinecraftLoader: (id: string, payload: SwitchMinecraftLoaderInput) =>
+    request<SwitchMinecraftLoaderResult>(`/api/instances/${encodeURIComponent(id)}/minecraft/loader/switch`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   deleteInstance: (id: string) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),
