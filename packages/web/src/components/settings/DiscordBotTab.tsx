@@ -17,21 +17,21 @@ import {
   Sparkles,
   Unplug,
 } from 'lucide-react';
-import type { DiscordDiscoveryStatus, HostMetrics, SystemSettings } from '@serverforge/shared';
+import type { DiscordDiscoveryStatus, HostMetrics, SystemSettings, SystemSettingsResponse } from '@serverforge/shared';
 import { api } from '../../api';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import type { PushToastFn } from '../ToastStack';
 
 interface DiscordBotTabProps {
   metrics: HostMetrics | null;
-  settings: SystemSettings;
+  settings: SystemSettingsResponse;
   discordStatus: DiscordDiscoveryStatus | null;
   allowedRolesText: string;
   adminRolesText: string;
   onAllowedRolesChange: (value: string) => void;
   onAdminRolesChange: (value: string) => void;
   onChange: (patch: Partial<SystemSettings>) => void;
-  onSyncSavedSetting: (patch: Partial<SystemSettings>) => void;
+  onSyncSavedSetting: (patch: Partial<SystemSettingsResponse>) => void;
   onDiscordStatusUpdated: (status: DiscordDiscoveryStatus) => void;
   onToast: PushToastFn;
 }
@@ -143,8 +143,12 @@ export function DiscordBotTab({
       const trimmed = tokenInput.trim();
       const st = await api.connectDiscord(trimmed ? trimmed : undefined);
       onDiscordStatusUpdated(st);
-      const patch: Partial<SystemSettings> = {};
-      if (trimmed) patch.discordBotToken = trimmed;
+      const patch: Partial<SystemSettingsResponse> = {};
+      if (trimmed) {
+        setTokenInput('');
+        patch.discordBotToken = '';
+        patch.hasDiscordBotToken = true;
+      }
       if (st.selectedGuildId && !settings.discordGuildId) {
         patch.discordGuildId = st.selectedGuildId;
       }
@@ -169,7 +173,11 @@ export function DiscordBotTab({
       onDiscordStatusUpdated(st);
       if (clearToken) {
         setTokenInput('');
-        onSyncSavedSetting({ discordBotToken: '' });
+        onSyncSavedSetting({
+          discordBotToken: '',
+          hasDiscordBotToken: false,
+          discordBotTokenPreview: '',
+        });
       }
       onToast('info', clearToken ? 'Disconnected Discord bot and cleared saved token.' : 'Disconnected Discord bot.');
     } catch (err) {
@@ -412,9 +420,13 @@ export function DiscordBotTab({
           <div className="field full" style={{ marginBottom: 0 }}>
             <label htmlFor="set-discord-token">
               Discord Bot Token{' '}
-              {discordStatus?.tokenSource === 'env' && (
+              {discordStatus?.tokenSource === 'env' ? (
                 <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(currently loaded from .env)</span>
-              )}
+              ) : settings.hasDiscordBotToken ? (
+                <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>
+                  (encrypted &amp; saved {settings.discordBotTokenPreview || '••••••••'})
+                </span>
+              ) : null}
             </label>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <input
@@ -431,7 +443,9 @@ export function DiscordBotTab({
                 placeholder={
                   discordStatus?.tokenSource === 'env'
                     ? 'Using DISCORD_TOKEN from .env (paste here to override)'
-                    : 'Paste your Discord Bot Token from Discord Developer Portal'
+                    : settings.hasDiscordBotToken
+                      ? `Saved (${settings.discordBotTokenPreview || '••••••••'}) — paste a new token to replace`
+                      : 'Paste your Discord Bot Token from Discord Developer Portal'
                 }
               />
               <button

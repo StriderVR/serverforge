@@ -58,6 +58,7 @@ import {
   isOriginAllowedForHost,
   normalizeRemoteIp,
 } from '../security/http-security.js';
+import { SecretVault, maskSecretPreview } from '../services/secret-vault.js';
 import { TelemetryService } from '../services/telemetry-service.js';
 import { UpdaterService } from '../services/updater-service.js';
 import { UpnpService } from '../services/upnp-service.js';
@@ -89,12 +90,15 @@ export interface CreateAppOptions extends Partial<AppConfig> {
   probePollDelayMs?: number;
   ssdpDiscoverImpl?: () => Promise<string[]>;
   natPmpRequestImpl?: (gatewayIp: string, packet: Buffer) => Promise<Buffer | null>;
+  dpapiProtectImpl?: (plainKeyBase64: string) => string;
+  dpapiUnprotectImpl?: (protectedBase64: string) => string;
 }
 
 export interface ServerForgeApp {
   app: FastifyInstance;
   config: AppConfig;
   db: AppDatabase;
+  secretVault: SecretVault;
   auth: AuthService;
   catalog: CatalogService;
   runtimeManager: RuntimeManager;
@@ -129,10 +133,19 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     probePollDelayMs,
     ssdpDiscoverImpl,
     natPmpRequestImpl,
+    dpapiProtectImpl,
+    dpapiUnprotectImpl,
     ...configOverrides
   } = overrides;
   const config = loadConfig(configOverrides);
-  const db = new AppDatabase(config.dbPath);
+  const secretVault = new SecretVault({
+    dataDir: config.dataDir,
+    platform: platformOverride,
+    disableOsExec: config.runtimeMode === 'mock' && !dpapiProtectImpl && !dpapiUnprotectImpl,
+    dpapiProtectImpl,
+    dpapiUnprotectImpl,
+  });
+  const db = new AppDatabase(config.dbPath, secretVault);
   const auth = new AuthService(db, config.jwtSecret);
   const catalog = new CatalogService(config.catalogDir, config.customCatalogDir);
   const queryService = new QueryService();
@@ -184,6 +197,14 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     probePollDelayMs,
   });
   const diagnostics = new DiagnosticsService(config, db, telemetry);
+  const vaultStatus = secretVault.getStatus();
+  if (vaultStatus.undecryptableFields.length > 0) {
+    diagnostics.record({
+      level: 'warn',
+      source: 'system',
+      message: `Secret Vault could not decrypt ${vaultStatus.undecryptableFields.length} stored secret(s) (${vaultStatus.undecryptableFields.join(', ')}). Re-enter them in Settings if this database was moved from another PC.`,
+    });
+  }
   const orchestrator = new ServerOrchestrator(
     config,
     db,
@@ -652,25 +673,60 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   });
 
   app.get('/api/settings', { preHandler: requireAuth }, async () => {
-    return db.getSettings(config.publicHost);
+    return secretVault.sanitizeSettingsForApi(db.getSettings(config.publicHost));
   });
 
   app.put('/api/settings', { preHandler: requireAuth }, async (req, reply) => {
+    const rawBody = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const clearDiscordBotToken = Boolean(rawBody.clearDiscordBotToken);
+    const clearDuckdnsToken = Boolean(rawBody.clearDuckdnsToken);
+    const clearCurseforgeApiKey = Boolean(rawBody.clearCurseforgeApiKey);
+
     const parsed = SystemSettingsSchema.partial().safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: formatZodIssues('Invalid settings payload', parsed.error.issues), issues: parsed.error.issues });
     }
     const previous = db.getSettings(config.publicHost);
     const patch = { ...parsed.data };
-    if (typeof patch.curseforgeApiKey === 'string') {
-      patch.curseforgeApiKey = normalizeCurseForgeApiKey(patch.curseforgeApiKey);
+
+    // Write-only secret handling: preserve stored encrypted secrets unless explicitly replaced or cleared
+    if (clearCurseforgeApiKey) {
+      patch.curseforgeApiKey = '';
+    } else if (typeof patch.curseforgeApiKey === 'string') {
+      const normalized = normalizeCurseForgeApiKey(patch.curseforgeApiKey);
+      if (normalized && !normalized.startsWith('••••')) {
+        patch.curseforgeApiKey = normalized;
+      } else {
+        delete patch.curseforgeApiKey;
+      }
     }
+
     if (typeof patch.duckdnsDomain === 'string' && patch.duckdnsDomain.trim()) {
       patch.duckdnsDomain = normalizeDuckDnsDomain(patch.duckdnsDomain) || patch.duckdnsDomain.trim();
     }
-    if (typeof patch.discordBotToken === 'string') {
-      patch.discordBotToken = patch.discordBotToken.trim();
+
+    if (clearDuckdnsToken) {
+      patch.duckdnsToken = '';
+    } else if (typeof patch.duckdnsToken === 'string') {
+      const trimmed = patch.duckdnsToken.trim();
+      if (trimmed && !trimmed.startsWith('••••')) {
+        patch.duckdnsToken = trimmed;
+      } else {
+        delete patch.duckdnsToken;
+      }
     }
+
+    if (clearDiscordBotToken) {
+      patch.discordBotToken = '';
+    } else if (typeof patch.discordBotToken === 'string') {
+      const trimmed = patch.discordBotToken.trim();
+      if (trimmed && !trimmed.startsWith('••••')) {
+        patch.discordBotToken = trimmed;
+      } else {
+        delete patch.discordBotToken;
+      }
+    }
+
     const updated = db.saveSettings(patch, config.publicHost);
     db.addAuditLog({
       actor: req.authUser?.username || 'admin',
@@ -688,7 +744,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       discord.scheduleStatusPanelUpdate();
     }
 
-    return updated;
+    return secretVault.sanitizeSettingsForApi(updated);
   });
 
   // --- Discord Bot Setup, Discovery & Live Status Panel ---
@@ -1034,6 +1090,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
 
   const withJoinInfo = <T extends import('@serverforge/shared').ServerInstance>(inst: T) => ({
     ...inst,
+    config: secretVault.sanitizeInstanceConfigForApi(inst.config),
     ...orchestrator.getJoinAddressInfo(inst),
   });
 
@@ -1085,7 +1142,15 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
         .send({ error: formatZodIssues('Invalid config update', parsed.error.issues), issues: parsed.error.issues });
     }
     try {
-      const updated = orchestrator.updateInstanceConfig(id, parsed.data, req.authUser?.username || 'admin');
+      const existing = orchestrator.getInstance(id);
+      const updatePayload =
+        existing && parsed.data.config
+          ? {
+              ...parsed.data,
+              config: secretVault.mergeIncomingInstanceConfig(existing.config, parsed.data.config),
+            }
+          : parsed.data;
+      const updated = orchestrator.updateInstanceConfig(id, updatePayload, req.authUser?.username || 'admin');
       return withJoinInfo(updated);
     } catch (err) {
       return reply.status(400).send({ error: err instanceof Error ? err.message : 'Update failed' });
@@ -1826,7 +1891,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
 
   app.post('/api/curseforge/test', { preHandler: requireAuth }, async (req) => {
     const body = req.body as { apiKey?: string; saveOnSuccess?: boolean } | undefined;
-    const keyToTest = body?.apiKey !== undefined ? body.apiKey : getEffectiveCurseForgeKey();
+    const keyToTest = body?.apiKey?.trim() ? body.apiKey : getEffectiveCurseForgeKey();
     const result = await curseforge.testApiKey(keyToTest);
     let saved = false;
     if (result.ok && body?.saveOnSuccess !== false && result.normalizedKey) {
@@ -1840,7 +1905,13 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       });
       saved = true;
     }
-    return { ...result, saved };
+    return {
+      ok: result.ok,
+      message: result.message,
+      normalizedKey: '',
+      keyPreview: result.normalizedKey ? maskSecretPreview(result.normalizedKey) : '',
+      saved,
+    };
   });
 
   app.get('/api/curseforge/search', { preHandler: requireAuth }, async (req, reply) => {
@@ -1934,7 +2005,13 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     broadcast({ type: 'console:line', ...data });
   });
   orchestrator.on('instance:update', (instance) => {
-    broadcast({ type: 'instance:update', instance });
+    broadcast({
+      type: 'instance:update',
+      instance: {
+        ...instance,
+        config: secretVault.sanitizeInstanceConfigForApi(instance.config),
+      },
+    });
   });
   orchestrator.on('instance:deleted', (instanceId) => {
     broadcast({ type: 'instance:deleted', instanceId });
@@ -2054,6 +2131,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     app,
     config,
     db,
+    secretVault,
     auth,
     catalog,
     runtimeManager,

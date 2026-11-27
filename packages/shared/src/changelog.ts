@@ -14,6 +14,19 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.4.4',
+    title: 'Encrypted Secret Vault & Masked API Responses',
+    summary: 'Encrypts stored tokens and server passwords at rest with AES-256-GCM + Windows DPAPI and stops sending raw secrets back to the browser.',
+    added: [
+      'Authenticated AES-256-GCM Secret Vault encrypting Discord bot tokens, DuckDNS tokens, CurseForge API keys, and sensitive instance passwords in SQLite.',
+      'Windows DPAPI (CurrentUser) master-key protection on Windows 11 with automatic 0600 local keyfile fallback on Linux and transparent plaintext migration.',
+      'Graceful recovery banner in Settings if a database is moved to another PC and stored secrets need to be re-entered.',
+    ],
+    changed: [
+      'GET /api/settings and instance endpoints now return write-only masked previews instead of raw tokens or passwords.',
+    ],
+  },
+  {
     version: '1.4.3',
     title: 'Auth Hardening, Active Sessions & Opt-In 2FA',
     summary: 'Adds brute-force login protection, revocable device sessions, in-app password changes, Discord security alerts, and optional TOTP two-factor authentication.',

@@ -6,6 +6,7 @@ import type {
   NetworkStatus,
   PublicHostMode,
   SystemSettings,
+  SystemSettingsResponse,
   UpnpMappingRecord,
   UpnpRouterInfo,
 } from '@serverforge/shared';
@@ -13,11 +14,11 @@ import { api, formatHostSourceLabel } from '../../api';
 import type { PushToastFn } from '../ToastStack';
 
 interface NetworkingIntegrationsTabProps {
-  settings: SystemSettings;
+  settings: SystemSettingsResponse;
   networkStatus: NetworkStatus | null;
   onChange: (patch: Partial<SystemSettings>) => void;
   onNetworkUpdated: (status: NetworkStatus) => void;
-  onSyncSavedSetting: (patch: Partial<SystemSettings>) => void;
+  onSyncSavedSetting: (patch: Partial<SystemSettingsResponse>) => void;
   onToast: PushToastFn;
 }
 
@@ -200,7 +201,14 @@ export function NetworkingIntegrationsTab({
             </div>
 
             <div className="field full">
-              <label htmlFor="set-duckdns-token">DuckDNS Account Token (optional — for built-in DDNS updates)</label>
+              <label htmlFor="set-duckdns-token">
+                DuckDNS Account Token (optional — for built-in DDNS updates)
+                {settings.hasDuckdnsToken && (
+                  <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
+                    Encrypted &amp; saved ({settings.duckdnsTokenPreview || '••••••••'})
+                  </span>
+                )}
+              </label>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <input
                   id="set-duckdns-token"
@@ -212,7 +220,11 @@ export function NetworkingIntegrationsTab({
                     setDuckResult(null);
                     onChange({ duckdnsToken: e.target.value });
                   }}
-                  placeholder="Paste your DuckDNS token from duckdns.org"
+                  placeholder={
+                    settings.hasDuckdnsToken
+                      ? `Saved (${settings.duckdnsTokenPreview || '••••••••'}) — paste a new token to replace`
+                      : 'Paste your DuckDNS token from duckdns.org'
+                  }
                 />
                 <button
                   type="button"
@@ -242,7 +254,8 @@ export function NetworkingIntegrationsTab({
                         onSyncSavedSetting({
                           duckdnsDomain: res.domain,
                           publicHostMode: 'duckdns',
-                          duckdnsToken: settings.duckdnsToken,
+                          duckdnsToken: '',
+                          hasDuckdnsToken: true,
                           duckdnsAutoUpdate: settings.duckdnsAutoUpdate,
                         });
                         onToast('success', `DuckDNS verified & saved (${res.domain}).`);
@@ -259,6 +272,27 @@ export function NetworkingIntegrationsTab({
                 >
                   <CheckCircle2 size={14} /> {updatingDuckDns ? 'Updating...' : 'Update & Save DuckDNS'}
                 </button>
+                {settings.hasDuckdnsToken && (
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm"
+                    onClick={async () => {
+                      try {
+                        const saved = await api.saveSettings({ clearDuckdnsToken: true });
+                        onSyncSavedSetting({
+                          duckdnsToken: '',
+                          hasDuckdnsToken: saved.hasDuckdnsToken ?? false,
+                          duckdnsTokenPreview: saved.duckdnsTokenPreview ?? '',
+                        });
+                        onToast('info', 'Saved DuckDNS token cleared.');
+                      } catch (err) {
+                        onToast('error', err instanceof Error ? err.message : 'Failed to clear token');
+                      }
+                    }}
+                  >
+                    Clear Token
+                  </button>
+                )}
               </div>
               <label className="checkbox-row" style={{ paddingTop: 6 }}>
                 <input
@@ -302,14 +336,21 @@ export function NetworkingIntegrationsTab({
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Package size={16} /> CurseForge Integration (Modded Minecraft)
           </h2>
-          <span className={`badge ${settings.curseforgeApiKey.trim() ? 'badge-running' : 'badge-stopped'}`}>
+          <span className={`badge ${settings.hasCurseforgeApiKey || settings.curseforgeApiKey.trim() ? 'badge-running' : 'badge-stopped'}`}>
             <span className="badge-dot" />
-            {settings.curseforgeApiKey.trim() ? 'KEY CONFIGURED' : 'NOT SET'}
+            {settings.hasCurseforgeApiKey || settings.curseforgeApiKey.trim() ? 'KEY CONFIGURED' : 'NOT SET'}
           </span>
         </div>
         <div className="panel-body">
           <div className="field">
-            <label htmlFor="set-cf-key">CurseForge Core API Key</label>
+            <label htmlFor="set-cf-key">
+              CurseForge Core API Key
+              {settings.hasCurseforgeApiKey && (
+                <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
+                  Encrypted &amp; saved ({settings.curseforgeApiKeyPreview || '••••••••'})
+                </span>
+              )}
+            </label>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <input
                 id="set-cf-key"
@@ -321,7 +362,11 @@ export function NetworkingIntegrationsTab({
                   setCfTestResult(null);
                   onChange({ curseforgeApiKey: e.target.value });
                 }}
-                placeholder="$2a$10$... (60-char Core API key from console.curseforge.com)"
+                placeholder={
+                  settings.hasCurseforgeApiKey
+                    ? `Saved (${settings.curseforgeApiKeyPreview || '••••••••'}) — paste a new key to replace`
+                    : '$2a$10$... (60-char Core API key from console.curseforge.com)'
+                }
               />
               <button
                 type="button"
@@ -340,13 +385,14 @@ export function NetworkingIntegrationsTab({
                   setCfTestResult(null);
                   try {
                     const res = await api.testCurseForgeKey(settings.curseforgeApiKey);
-                    const finalKey = res.normalizedKey || settings.curseforgeApiKey;
                     setCfTestResult({ ok: res.ok, message: res.message });
                     if (res.ok && res.saved) {
-                      onSyncSavedSetting({ curseforgeApiKey: finalKey });
+                      onSyncSavedSetting({
+                        curseforgeApiKey: '',
+                        hasCurseforgeApiKey: true,
+                        curseforgeApiKeyPreview: res.keyPreview || settings.curseforgeApiKeyPreview || '••••••••',
+                      });
                       onToast('success', 'CurseForge API key verified & saved.');
-                    } else if (res.normalizedKey && res.normalizedKey !== settings.curseforgeApiKey) {
-                      onChange({ curseforgeApiKey: res.normalizedKey });
                     }
                   } catch (err) {
                     setCfTestResult({
@@ -360,6 +406,27 @@ export function NetworkingIntegrationsTab({
               >
                 <CheckCircle2 size={14} /> {testingCfKey ? 'Verifying...' : 'Verify & Save Key'}
               </button>
+              {settings.hasCurseforgeApiKey && (
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  onClick={async () => {
+                    try {
+                      const saved = await api.saveSettings({ clearCurseforgeApiKey: true });
+                      onSyncSavedSetting({
+                        curseforgeApiKey: '',
+                        hasCurseforgeApiKey: saved.hasCurseforgeApiKey ?? false,
+                        curseforgeApiKeyPreview: saved.curseforgeApiKeyPreview ?? '',
+                      });
+                      onToast('info', 'Saved CurseForge API key cleared.');
+                    } catch (err) {
+                      onToast('error', err instanceof Error ? err.message : 'Failed to clear API key');
+                    }
+                  }}
+                >
+                  Clear Key
+                </button>
+              )}
             </div>
             {cfTestResult && (
               <div

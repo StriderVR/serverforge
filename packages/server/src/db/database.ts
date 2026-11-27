@@ -15,6 +15,7 @@ import type {
   UpnpProtocolKind,
 } from '@serverforge/shared';
 import { BackupPolicySchema, SystemSettingsSchema } from '@serverforge/shared';
+import type { SecretVault } from '../services/secret-vault.js';
 
 export interface UserRecord {
   id: string;
@@ -40,12 +41,72 @@ export interface SessionRecord {
 
 export class AppDatabase {
   public readonly db: DatabaseSync;
+  private secretVault: SecretVault | null = null;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, secretVault?: SecretVault) {
     this.db = new DatabaseSync(dbPath);
+    this.secretVault = secretVault ?? null;
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.migrate();
+    if (this.secretVault) {
+      this.migratePlaintextSecrets();
+    }
+  }
+
+  attachSecretVault(vault: SecretVault): { migratedSettings: boolean; migratedInstances: number } {
+    this.secretVault = vault;
+    return this.migratePlaintextSecrets();
+  }
+
+  migratePlaintextSecrets(): { migratedSettings: boolean; migratedInstances: number } {
+    if (!this.secretVault) {
+      return { migratedSettings: false, migratedInstances: 0 };
+    }
+    let migratedSettings = false;
+    const settingsRow = this.db.prepare('SELECT value_json FROM settings WHERE key = ?').get('system') as
+      | { value_json: string }
+      | undefined;
+    if (settingsRow) {
+      try {
+        const rawObj = JSON.parse(settingsRow.value_json) as Record<string, unknown>;
+        const { decrypted, needsMigration } = this.secretVault.decryptSettingsObject(rawObj);
+        if (needsMigration) {
+          const parsed = SystemSettingsSchema.parse(decrypted);
+          const encrypted = this.secretVault.encryptSettingsObject(parsed);
+          this.db
+            .prepare('UPDATE settings SET value_json = ? WHERE key = ?')
+            .run(JSON.stringify(encrypted), 'system');
+          migratedSettings = true;
+        }
+      } catch {
+        // ignore malformed row; getSettings handles fallback
+      }
+    }
+
+    let migratedInstances = 0;
+    const instanceRows = this.db.prepare('SELECT id, slug, config_json FROM instances').all() as Array<{
+      id: string;
+      slug: string;
+      config_json: string;
+    }>;
+    for (const row of instanceRows) {
+      try {
+        const rawConfig = JSON.parse(row.config_json) as Record<string, string | number | boolean>;
+        const { decrypted, needsMigration } = this.secretVault.decryptInstanceConfig(rawConfig, row.slug);
+        if (needsMigration) {
+          const encrypted = this.secretVault.encryptInstanceConfig(decrypted, row.slug);
+          this.db
+            .prepare('UPDATE instances SET config_json = ? WHERE id = ?')
+            .run(JSON.stringify(encrypted), row.id);
+          migratedInstances += 1;
+        }
+      } catch {
+        // ignore malformed config_json
+      }
+    }
+
+    return { migratedSettings, migratedInstances };
   }
 
   private migrate(): void {
@@ -387,7 +448,11 @@ export class AppDatabase {
       return SystemSettingsSchema.parse({ publicHost: defaultPublicHost });
     }
     try {
-      const parsed = SystemSettingsSchema.parse(JSON.parse(row.value_json));
+      const rawObj = JSON.parse(row.value_json) as Record<string, unknown>;
+      const decryptedObj = this.secretVault
+        ? this.secretVault.decryptSettingsObject(rawObj).decrypted
+        : rawObj;
+      const parsed = SystemSettingsSchema.parse(decryptedObj);
       const trimmedDefault = defaultPublicHost.trim();
       if (
         (!parsed.publicHost.trim() || parsed.publicHost.trim().toLowerCase() === 'localhost') &&
@@ -405,11 +470,12 @@ export class AppDatabase {
   saveSettings(patch: Partial<SystemSettings>, defaultPublicHost = 'localhost'): SystemSettings {
     const current = this.getSettings(defaultPublicHost);
     const merged = SystemSettingsSchema.parse({ ...current, ...patch });
+    const toStore = this.secretVault ? this.secretVault.encryptSettingsObject(merged) : merged;
     this.db
       .prepare(
         'INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json'
       )
-      .run('system', JSON.stringify(merged));
+      .run('system', JSON.stringify(toStore));
     return merged;
   }
 
@@ -433,6 +499,11 @@ export class AppDatabase {
       }
     }
 
+    const rawConfig = JSON.parse(String(row.config_json)) as Record<string, string | number | boolean>;
+    const config = this.secretVault
+      ? this.secretVault.decryptInstanceConfig(rawConfig, String(row.slug)).decrypted
+      : rawConfig;
+
     return {
       id: String(row.id),
       slug: String(row.slug),
@@ -441,7 +512,7 @@ export class AppDatabase {
       runtime: String(row.runtime) as RuntimeKind,
       status: String(row.status) as InstanceStatus,
       ports: JSON.parse(String(row.ports_json)),
-      config: JSON.parse(String(row.config_json)),
+      config,
       memoryLimitMb: Number(row.memory_limit_mb),
       autoStart: Boolean(row.auto_start),
       autoRestartOnCrash: row.auto_restart_on_crash === undefined ? true : Boolean(row.auto_restart_on_crash),
@@ -483,6 +554,9 @@ export class AppDatabase {
   createInstance(instance: ServerInstance): ServerInstance {
     const policy = BackupPolicySchema.parse(instance.backupPolicy ?? {});
     const upnpMode: UpnpMode = instance.upnpMode ?? 'inherit';
+    const storedConfig = this.secretVault
+      ? this.secretVault.encryptInstanceConfig(instance.config, instance.slug)
+      : instance.config;
     this.db
       .prepare(
         `INSERT INTO instances (
@@ -500,7 +574,7 @@ export class AppDatabase {
         instance.runtime,
         instance.status,
         JSON.stringify(instance.ports),
-        JSON.stringify(instance.config),
+        JSON.stringify(storedConfig),
         instance.memoryLimitMb,
         instance.autoStart ? 1 : 0,
         instance.autoRestartOnCrash === false ? 0 : 1,
@@ -560,6 +634,10 @@ export class AppDatabase {
     updated.backupPolicy = policy;
     updated.upnpMode = updated.upnpMode ?? 'inherit';
 
+    const storedConfig = this.secretVault
+      ? this.secretVault.encryptInstanceConfig(updated.config, updated.slug)
+      : updated.config;
+
     this.db
       .prepare(
         `UPDATE instances SET
@@ -575,7 +653,7 @@ export class AppDatabase {
         updated.runtime,
         updated.status,
         JSON.stringify(updated.ports),
-        JSON.stringify(updated.config),
+        JSON.stringify(storedConfig),
         updated.memoryLimitMb,
         updated.autoStart ? 1 : 0,
         updated.autoRestartOnCrash === false ? 0 : 1,
