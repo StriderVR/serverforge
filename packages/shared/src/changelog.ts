@@ -14,6 +14,19 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.4.7',
+    title: 'Version Selector & Rollback, Hybrid Bug Reporter & QA Gate',
+    summary: 'Adds an in-app version selector with Experimental channel & rollback, prevents updates before ServerForge.exe is uploaded, adds a hybrid in-built GitHub bug reporter, and introduces the Manual QA & Pre-Release Gate.',
+    added: [
+      'In-App Version Selector & Rollback in Settings -> Updates & Maintenance with Stable vs Experimental (Pre-Release) channel toggle and full release picker.',
+      'Hybrid In-Built Bug Reporter accessible from the sidebar and server crash cards — auto-attaches secret-redacted diagnostics for 1-click pre-filled GitHub issues or optional direct submission via encrypted GitHub PAT.',
+      'Versioned Manual QA Matrix & Per-Game Verification Checklist (docs/QA_CHECKLIST.md) and automatic Pre-Release CI tagging for hyphenated RC/beta tags.',
+    ],
+    changed: [
+      'Self-updater now checks that ServerForge.exe is actually attached to a GitHub release before advertising an update as ready (fixes #69).',
+    ],
+  },
+  {
     version: '1.4.6',
     title: 'Opt-In Built-In HTTPS / TLS for Encrypted LAN Access',
     summary: 'Adds optional built-in HTTPS with zero-dependency local TLS certificate generation, custom PEM cert support, automatic Secure auth cookies, wss:// WebSockets, and safe HTTP fallback.',

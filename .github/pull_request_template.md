@@ -13,7 +13,9 @@ Closes #
 
 ## Verification
 
+- [ ] `pnpm build` passes
 - [ ] `pnpm typecheck` passes
 - [ ] `pnpm test` passes
-- [ ] `pnpm build` passes
 - [ ] Verified in Web UI / mock mode (`pnpm dev:mock`) or Windows `ServerForge.exe`
+- [ ] Affected rows in [`docs/QA_CHECKLIST.md`](../docs/QA_CHECKLIST.md) reviewed (and signed off on a Pre-Release tag before promoting to Stable)
+- [ ] If cutting a release: all issues in the target milestone are completed and verified

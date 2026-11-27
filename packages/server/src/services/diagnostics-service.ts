@@ -4,6 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type {
   AppDiagnosticEvent,
+  BugReportCategory,
+  BugReportInput,
+  BugReportPreviewResult,
+  BugReportSubmitResult,
   DiagnosticLevel,
   DiagnosticSource,
   InstanceDebugReport,
@@ -110,6 +114,7 @@ export class DiagnosticsService {
       if (settings.curseforgeApiKey) secrets.push(settings.curseforgeApiKey);
       if (settings.duckdnsToken) secrets.push(settings.duckdnsToken);
       if (settings.discordBotToken) secrets.push(settings.discordBotToken);
+      if (settings.githubIssueToken) secrets.push(settings.githubIssueToken);
     } catch {
       // Ignore if DB closed
     }
@@ -373,6 +378,178 @@ export class DiagnosticsService {
       generatedAt,
       filename: `serverforge-debug-${safeSlug}.md`,
       markdown: redactSecrets(lines.join('\n'), secrets),
+    };
+  }
+
+  private mapBugCategoryLabels(category: BugReportCategory): string[] {
+    const labels = ['bug'];
+    switch (category) {
+      case 'networking':
+        labels.push('area:networking');
+        break;
+      case 'game_template':
+        labels.push('area:catalog');
+        break;
+      case 'updater':
+        labels.push('area:updater');
+        break;
+      case 'web_ui':
+        labels.push('area:web-ui');
+        break;
+      case 'discord':
+        labels.push('area:discord');
+        break;
+      case 'security':
+        labels.push('area:security');
+        break;
+      default:
+        labels.push('area:backend');
+        break;
+    }
+    return labels;
+  }
+
+  async buildBugReport(input: BugReportInput): Promise<BugReportPreviewResult> {
+    const settings = this.db.getSettings(this.config.publicHost);
+    const githubRepo = (settings.githubRepo || 'StriderVR/serverforge').trim();
+    const secrets = this.collectKnownSecrets();
+
+    const cleanTitle = input.title.trim().startsWith('[Bug]:')
+      ? input.title.trim()
+      : `[Bug]: ${input.title.trim()}`;
+    const labels = this.mapBugCategoryLabels(input.category);
+    const includeDiagnostics = input.includeDiagnostics !== false;
+
+    const sections: string[] = [
+      `## What Happened`,
+      redactSecrets(input.description.trim() || '_No description provided._', secrets),
+    ];
+
+    if (input.stepsToReproduce?.trim()) {
+      sections.push('', `## Steps to Reproduce`, redactSecrets(input.stepsToReproduce.trim(), secrets));
+    }
+
+    sections.push(
+      '',
+      `## Environment`,
+      `- **ServerForge Version:** v${this.config.appVersion} (channel: \`${settings.updateChannel ?? 'stable'}\`)`,
+      `- **OS / Arch:** ${os.type()} ${os.release()} (${os.platform()} ${os.arch()})`,
+      `- **Node.js:** ${process.version}`,
+      `- **Runtime Mode:** \`${this.config.runtimeMode}\``,
+      `- **Access Mode / HTTPS:** \`${settings.dashboardAccessMode}\` / HTTPS enabled=\`${settings.httpsEnabled}\``
+    );
+
+    if (includeDiagnostics) {
+      if (input.instanceId) {
+        const inst =
+          this.orchestrator?.getInstance(input.instanceId) ?? this.db.getInstanceById(input.instanceId);
+        if (inst) {
+          const instReport = await this.buildInstanceDebugReport(inst, 80);
+          sections.push(
+            '',
+            `<details>`,
+            `<summary>Selected Server Debug Report (${inst.name} — ${inst.gameId})</summary>`,
+            '',
+            instReport.markdown,
+            '',
+            `</details>`
+          );
+        }
+      }
+
+      const sysReport = await this.buildSystemReport();
+      sections.push(
+        '',
+        `<details>`,
+        `<summary>System Diagnostics & Recent Errors (${sysReport.errorCount} errors, ${sysReport.warnCount} warnings)</summary>`,
+        '',
+        sysReport.markdown,
+        '',
+        `</details>`
+      );
+    }
+
+    const markdown = redactSecrets(sections.join('\n'), secrets);
+
+    // Build pre-filled GitHub New Issue URL (stay comfortably under browser 8 KB URL cap)
+    const MAX_URL_BODY_CHARS = 5200;
+    let urlBody = markdown;
+    let truncatedForUrl = false;
+    if (urlBody.length > MAX_URL_BODY_CHARS) {
+      truncatedForUrl = true;
+      urlBody =
+        urlBody.slice(0, MAX_URL_BODY_CHARS) +
+        '\n\n---\n*(Diagnostic bundle truncated for URL length — paste the full copied report from ServerForge here.)*';
+    }
+
+    const qs = new URLSearchParams({
+      title: cleanTitle,
+      labels: labels.join(','),
+      body: urlBody,
+    });
+    const githubNewIssueUrl = `https://github.com/${githubRepo}/issues/new?${qs.toString()}`;
+
+    return {
+      title: cleanTitle,
+      labels,
+      markdown,
+      githubNewIssueUrl,
+      truncatedForUrl,
+      hasDirectToken: Boolean(settings.githubIssueToken?.trim()),
+      githubRepo,
+    };
+  }
+
+  async submitBugReportToGitHub(
+    input: BugReportInput,
+    fetchImpl: typeof fetch = fetch
+  ): Promise<BugReportSubmitResult> {
+    const settings = this.db.getSettings(this.config.publicHost);
+    const token = (settings.githubIssueToken || '').trim();
+    if (!token) {
+      throw new Error(
+        'No GitHub Personal Access Token is configured. Use "Open Pre-Filled GitHub Issue" or save a token in Settings -> Diagnostics & Activity.'
+      );
+    }
+
+    const preview = await this.buildBugReport(input);
+    const apiBase = (process.env.GITHUB_API_BASE_URL || 'https://api.github.com').replace(/\/+$/, '');
+    const res = await fetchImpl(`${apiBase}/repos/${preview.githubRepo}/issues`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'User-Agent': `ServerForge/${this.config.appVersion}`,
+      },
+      body: JSON.stringify({
+        title: preview.title,
+        body: preview.markdown,
+        labels: preview.labels,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    const data = (await res.json().catch(() => ({}))) as {
+      number?: number;
+      html_url?: string;
+      title?: string;
+      message?: string;
+    };
+
+    if (!res.ok) {
+      throw new Error(
+        data.message
+          ? `GitHub API rejected the issue (${res.status}): ${data.message}`
+          : `GitHub API returned HTTP ${res.status} while submitting bug report.`
+      );
+    }
+
+    return {
+      ok: true,
+      issueNumber: Number(data.number ?? 0),
+      issueUrl: String(data.html_url ?? ''),
+      title: String(data.title ?? preview.title),
     };
   }
 }

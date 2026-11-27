@@ -54,6 +54,7 @@ interface InstanceDetailPageProps {
   onBack: () => void;
   onDeleted: () => void;
   onGlobalRefresh: () => void;
+  onReportBug?: (ctx: { instanceId: string; title: string; description: string }) => void;
   onConfirm?: (opts: ConfirmDialogOptions) => Promise<boolean>;
   onToast?: PushToastFn;
 }
@@ -112,6 +113,7 @@ export function InstanceDetailPage({
   onBack,
   onDeleted,
   onGlobalRefresh,
+  onReportBug,
   onConfirm,
   onToast,
 }: InstanceDetailPageProps) {
@@ -790,6 +792,21 @@ export function InstanceDetailPage({
                 {copiedDebugReport ? <Check size={13} color="var(--status-online)" /> : <Bug size={13} />}
                 {copiedDebugReport ? 'Copied!' : 'Copy Debug Report'}
               </button>
+              {onReportBug && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={() =>
+                    onReportBug({
+                      instanceId: detail.id,
+                      title: `${detail.name} (${detail.gameId}) crashed unexpectedly`,
+                      description: `Crash reason: ${detail.lastCrash!.reason}`,
+                    })
+                  }
+                >
+                  <Bug size={13} /> Report Issue
+                </button>
+              )}
             </div>
           </div>
           {showCrashTail && detail.lastCrash.logTail.length > 0 && (
@@ -817,6 +834,21 @@ export function InstanceDetailPage({
                 {copiedDebugReport ? <Check size={12} color="var(--status-online)" /> : <Bug size={12} />}
                 Copy Debug Report
               </button>
+              {onReportBug && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={() =>
+                    onReportBug({
+                      instanceId: detail.id,
+                      title: `Error on ${detail.name} (${detail.gameId})`,
+                      description: message.text,
+                    })
+                  }
+                >
+                  <Bug size={12} /> Report Issue
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -842,6 +874,21 @@ export function InstanceDetailPage({
                 {copiedDebugReport ? <Check size={12} color="var(--status-online)" /> : <Bug size={12} />}
                 Copy Debug Report
               </button>
+              {onReportBug && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={() =>
+                    onReportBug({
+                      instanceId: detail.id,
+                      title: `Error on ${detail.name} (${detail.gameId})`,
+                      description: detail.lastError!,
+                    })
+                  }
+                >
+                  <Bug size={12} /> Report Issue
+                </button>
+              )}
             </div>
           </div>
         )}

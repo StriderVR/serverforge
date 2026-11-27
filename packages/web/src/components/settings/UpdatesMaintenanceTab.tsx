@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
-import { Download, Power, RefreshCw, Search, Slash } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Download, History, Power, RefreshCw, Search, Slash } from 'lucide-react';
 import type {
   MaintenanceStatus,
   SystemSettings,
+  SystemSettingsResponse,
+  UpdaterReleaseOption,
   UpdaterStatus,
   WindowsRebootInspection,
 } from '@serverforge/shared';
@@ -11,11 +13,12 @@ import type { ConfirmDialogOptions } from '../ConfirmModal';
 import type { PushToastFn } from '../ToastStack';
 
 interface UpdatesMaintenanceTabProps {
-  settings: SystemSettings;
+  settings: SystemSettingsResponse;
   maintenance: MaintenanceStatus | null;
   updaterStatus: UpdaterStatus | null;
   updaterProgress: { stage: string; percent: number; message: string } | null;
   onChange: (patch: Partial<SystemSettings>) => void;
+  onSyncSavedSetting: (patch: Partial<SystemSettingsResponse>) => void;
   onRefreshUpdater: (force?: boolean) => Promise<void>;
   onStartReconnecting: (label: string, expectedVersion?: string) => void;
   onConfirm: (opts: ConfirmDialogOptions) => Promise<boolean>;
@@ -28,6 +31,7 @@ export function UpdatesMaintenanceTab({
   updaterStatus,
   updaterProgress,
   onChange,
+  onSyncSavedSetting,
   onRefreshUpdater,
   onStartReconnecting,
   onConfirm,
@@ -38,43 +42,88 @@ export function UpdatesMaintenanceTab({
   const [resumeOnUpdate, setResumeOnUpdate] = useState(true);
   const [updateLog, setUpdateLog] = useState<string | null>(null);
   const [showUpdateLog, setShowUpdateLog] = useState(false);
+  const [releases, setReleases] = useState<UpdaterReleaseOption[]>([]);
+  const [loadingReleases, setLoadingReleases] = useState(false);
+  const [selectedTag, setSelectedTag] = useState('');
+  const [switchingChannel, setSwitchingChannel] = useState(false);
 
   const [rebootingPc, setRebootingPc] = useState(false);
   const [inspection, setInspection] = useState<WindowsRebootInspection | null>(null);
   const [scanningReboots, setScanningReboots] = useState(false);
   const [disablingTask, setDisablingTask] = useState<string | null>(null);
 
+  const loadReleases = async (refresh = false) => {
+    setLoadingReleases(true);
+    try {
+      const list = await api.getUpdaterReleases(refresh);
+      setReleases(list);
+    } catch {
+      // non-fatal
+    } finally {
+      setLoadingReleases(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadReleases(false);
+  }, []);
+
+  const handleChannelChange = async (nextChannel: 'stable' | 'experimental') => {
+    setSwitchingChannel(true);
+    try {
+      const saved = await api.saveSettings({ updateChannel: nextChannel });
+      onSyncSavedSetting({ updateChannel: saved.updateChannel });
+      await Promise.all([onRefreshUpdater(true), loadReleases(true)]);
+      onToast(
+        'info',
+        nextChannel === 'experimental'
+          ? 'Switched to Experimental channel (includes Pre-Releases).'
+          : 'Switched to Stable channel.'
+      );
+    } catch (err) {
+      onToast('error', err instanceof Error ? err.message : 'Failed to update channel');
+    } finally {
+      setSwitchingChannel(false);
+    }
+  };
+
   const handleCheckUpdate = async () => {
     setCheckingUpdate(true);
     try {
-      await onRefreshUpdater(true);
+      await Promise.all([onRefreshUpdater(true), loadReleases(true)]);
       onToast('info', 'Checked GitHub Releases for updates.');
     } finally {
       setCheckingUpdate(false);
     }
   };
 
-  const handleApplyUpdate = async () => {
-    if (!updaterStatus?.latestVersion) return;
-    const runningCount = updaterStatus.runningServers.length;
+  const handleApplyUpdate = async (explicitTag?: string) => {
+    const targetRelease = explicitTag
+      ? releases.find((r) => r.tag === explicitTag)
+      : null;
+    const targetVer = targetRelease?.version ?? updaterStatus?.latestVersion;
+    if (!targetVer) return;
+
+    const runningCount = updaterStatus?.runningServers.length ?? 0;
+    const actionLabel = targetRelease ? `Switch to ${targetRelease.tag}` : `Update to v${targetVer}`;
     const confirmMsg =
       runningCount > 0
-        ? `Update ServerForge to v${updaterStatus.latestVersion}? ${runningCount} running server(s) will be gracefully saved & stopped${resumeOnUpdate ? ' and automatically rebooted once the update completes.' : ' and left stopped.'}`
-        : `Download and apply ServerForge v${updaterStatus.latestVersion} and restart now?`;
+        ? `${actionLabel}? ${runningCount} running server(s) will be gracefully saved & stopped${resumeOnUpdate ? ' and automatically rebooted afterward.' : ' and left stopped.'}`
+        : `Download and switch ServerForge to v${targetVer} and restart now?`;
 
     const confirmed = await onConfirm({
-      title: `Update to v${updaterStatus.latestVersion}`,
+      title: actionLabel,
       message: confirmMsg,
-      confirmLabel: 'Update & Restart',
+      confirmLabel: targetRelease ? 'Switch Version & Restart' : 'Update & Restart',
       tone: 'primary',
     });
     if (!confirmed) return;
 
     setApplyingUpdate(true);
     try {
-      const res = await api.applyUpdate(resumeOnUpdate);
+      const res = await api.applyUpdate(resumeOnUpdate, explicitTag);
       onStartReconnecting(
-        `Updating to ServerForge v${res.targetVersion} and restarting...`,
+        `Switching to ServerForge v${res.targetVersion} and restarting...`,
         res.targetVersion
       );
     } catch (err) {
@@ -137,12 +186,20 @@ export function UpdatesMaintenanceTab({
     }
   };
 
+  const installMode = updaterStatus?.installMode ?? 'exe';
+  const installableReleases = releases.filter((r) => {
+    if (installMode === 'exe' && !r.hasExeAsset) return false;
+    if (settings.updateChannel === 'stable' && r.prerelease) return false;
+    return true;
+  });
+  const selectedRelease = installableReleases.find((r) => r.tag === selectedTag) ?? null;
+
   return (
     <div className="settings-grid-two">
       <section className="panel">
         <div className="panel-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Download size={16} /> App Updates (GitHub Releases)
+            <Download size={16} /> App Updates &amp; Version Selector
           </h2>
           <span className={`badge ${updaterStatus?.updateAvailable ? 'badge-starting' : 'badge-stopped'} mono`}>
             v{updaterStatus?.currentVersion ?? '...'}
@@ -150,6 +207,11 @@ export function UpdatesMaintenanceTab({
         </div>
         <div className="panel-body">
           {updaterStatus?.error && <div className="alert alert-error">{updaterStatus.error}</div>}
+          {updaterStatus?.pendingExeBuild && updaterStatus.pendingVersion && (
+            <div className="alert alert-info" style={{ marginBottom: 12 }}>
+              <strong>Release v{updaterStatus.pendingVersion} is still building:</strong> Windows CI has not finished attaching <code>ServerForge.exe</code> yet. Check again in ~2 minutes.
+            </div>
+          )}
 
           <div
             style={{
@@ -164,14 +226,14 @@ export function UpdatesMaintenanceTab({
             <div>
               <div style={{ fontWeight: 600 }}>
                 {updaterStatus?.updateAvailable
-                  ? `Update Ready: v${updaterStatus.latestVersion}`
+                  ? `Update Ready: v${updaterStatus.latestVersion}${updaterStatus.isPrerelease ? ' (Pre-Release)' : ''}`
                   : updaterStatus?.latestVersion
                     ? `Up to date (latest: v${updaterStatus.latestVersion})`
                     : 'Check GitHub for latest build'}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                 Repo: <span className="mono">{updaterStatus?.githubRepo ?? settings.githubRepo}</span> • Mode:{' '}
-                <span className="mono">{updaterStatus?.installMode ?? 'exe'}</span>
+                <span className="mono">{installMode}</span>
                 {updaterStatus?.exeSizeBytes ? ` • ${(updaterStatus.exeSizeBytes / (1024 * 1024)).toFixed(1)} MB` : ''}
               </div>
             </div>
@@ -184,6 +246,24 @@ export function UpdatesMaintenanceTab({
               <RefreshCw size={13} className={checkingUpdate ? 'spin' : ''} />{' '}
               {checkingUpdate ? 'Checking...' : 'Check Now'}
             </button>
+          </div>
+
+          {/* Update Channel Toggle */}
+          <div className="field" style={{ marginBottom: 14 }}>
+            <label htmlFor="set-update-channel">Release Channel</label>
+            <select
+              id="set-update-channel"
+              className="input"
+              disabled={switchingChannel || applyingUpdate}
+              value={settings.updateChannel}
+              onChange={(e) => void handleChannelChange(e.target.value as 'stable' | 'experimental')}
+            >
+              <option value="stable">Stable Releases Only (Recommended)</option>
+              <option value="experimental">Experimental / Pre-Releases (Early Testing)</option>
+            </select>
+            <span className="field-hint">
+              Switch to Experimental to test RC/beta pre-release builds on your server PC before they promote to Stable.
+            </span>
           </div>
 
           {updaterStatus?.updateAvailable && (
@@ -233,6 +313,59 @@ export function UpdatesMaintenanceTab({
               </button>
             </div>
           )}
+
+          {/* Version Selector & Rollback */}
+          <div
+            style={{
+              marginTop: 12,
+              paddingTop: 12,
+              borderTop: '1px solid var(--border-subtle)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 13 }}>
+              <History size={14} /> Version Selector &amp; Rollback
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <select
+                className="input mono"
+                style={{ flex: 1, minWidth: 220 }}
+                disabled={loadingReleases || applyingUpdate}
+                value={selectedTag}
+                onChange={(e) => setSelectedTag(e.target.value)}
+              >
+                <option value="">
+                  {loadingReleases
+                    ? 'Loading GitHub releases...'
+                    : `Select a release to install or roll back (${installableReleases.length} available)`}
+                </option>
+                {installableReleases.map((rel) => {
+                  const sizeMb = rel.exeSizeBytes ? ` · ${(rel.exeSizeBytes / (1024 * 1024)).toFixed(1)} MB` : '';
+                  const tagLabel = rel.prerelease ? 'Pre-Release' : 'Stable';
+                  const currentTag = rel.isCurrent ? ' (Installed)' : '';
+                  return (
+                    <option key={rel.tag} value={rel.tag}>
+                      {rel.tag} [{tagLabel}]{currentTag}{sizeMb}
+                    </option>
+                  );
+                })}
+              </select>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={!selectedRelease || selectedRelease.isCurrent || applyingUpdate}
+                onClick={() => selectedRelease && void handleApplyUpdate(selectedRelease.tag)}
+              >
+                <Download size={13} />{' '}
+                {selectedRelease?.isCurrent ? 'Already Installed' : 'Install Selected Version'}
+              </button>
+            </div>
+            <span className="field-hint">
+              Only releases with a compiled <code>ServerForge.exe</code> attached are listed. Make a manual backup of <code>data/</code> before rolling back across major versions.
+            </span>
+          </div>
 
           {updaterProgress && (
             <div style={{ marginTop: 10, marginBottom: 10 }}>

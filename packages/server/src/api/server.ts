@@ -99,6 +99,7 @@ export interface CreateAppOptions extends Partial<AppConfig> {
   dpapiProtectImpl?: (plainKeyBase64: string) => string;
   dpapiUnprotectImpl?: (protectedBase64: string) => string;
   elevatedAdminOverride?: boolean;
+  updaterInstallModeOverride?: 'exe' | 'source';
 }
 
 export interface ServerForgeApp {
@@ -145,6 +146,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     dpapiProtectImpl,
     dpapiUnprotectImpl,
     elevatedAdminOverride,
+    updaterInstallModeOverride,
     ...configOverrides
   } = overrides;
   const config = loadConfig(configOverrides);
@@ -240,7 +242,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
   const leaseReaper = new LeaseReaper(config, db, catalog, orchestrator);
   const discord = new DiscordBotService(config, db, catalog, orchestrator, fetchImpl);
   const smartImport = new SmartImportService();
-  const updater = new UpdaterService(config, db, orchestrator, fetchImpl);
+  const updater = new UpdaterService(config, db, orchestrator, fetchImpl, updaterInstallModeOverride);
   const maintenance = new MaintenanceService(config, db, orchestrator, updater, osRebootExecutor);
   discordStatusFn = () => discord.getStatus();
 
@@ -716,6 +718,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     const clearDiscordBotToken = Boolean(rawBody.clearDiscordBotToken);
     const clearDuckdnsToken = Boolean(rawBody.clearDuckdnsToken);
     const clearCurseforgeApiKey = Boolean(rawBody.clearCurseforgeApiKey);
+    const clearGithubIssueToken = Boolean(rawBody.clearGithubIssueToken);
 
     const parsed = SystemSettingsSchema.partial().safeParse(req.body);
     if (!parsed.success) {
@@ -772,6 +775,17 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
         patch.discordBotToken = trimmed;
       } else {
         delete patch.discordBotToken;
+      }
+    }
+
+    if (clearGithubIssueToken) {
+      patch.githubIssueToken = '';
+    } else if (typeof patch.githubIssueToken === 'string') {
+      const trimmed = patch.githubIssueToken.trim();
+      if (trimmed && !trimmed.startsWith('••••')) {
+        patch.githubIssueToken = trimmed;
+      } else {
+        delete patch.githubIssueToken;
       }
     }
 
@@ -1882,6 +1896,53 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     return diagnostics.buildSystemReport();
   });
 
+  app.post('/api/diagnostics/bug-report/preview', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as Partial<import('@serverforge/shared').BugReportInput> | undefined;
+    if (!body?.title?.trim()) {
+      return reply.status(400).send({ error: 'A short bug title is required.' });
+    }
+    return diagnostics.buildBugReport({
+      title: body.title.trim(),
+      category: body.category ?? 'other',
+      description: body.description ?? '',
+      stepsToReproduce: body.stepsToReproduce,
+      instanceId: body.instanceId ?? null,
+      includeDiagnostics: body.includeDiagnostics !== false,
+    });
+  });
+
+  app.post('/api/diagnostics/bug-report/submit', { preHandler: requireAuth }, async (req, reply) => {
+    const body = req.body as Partial<import('@serverforge/shared').BugReportInput> | undefined;
+    if (!body?.title?.trim()) {
+      return reply.status(400).send({ error: 'A short bug title is required.' });
+    }
+    try {
+      const result = await diagnostics.submitBugReportToGitHub(
+        {
+          title: body.title.trim(),
+          category: body.category ?? 'other',
+          description: body.description ?? '',
+          stepsToReproduce: body.stepsToReproduce,
+          instanceId: body.instanceId ?? null,
+          includeDiagnostics: body.includeDiagnostics !== false,
+        },
+        fetchImpl
+      );
+      db.addAuditLog({
+        actor: req.authUser?.username || 'admin',
+        source: 'web',
+        action: 'diagnostics.bug_report_submitted',
+        instanceId: body.instanceId ?? null,
+        details: `Created GitHub issue #${result.issueNumber}: ${result.title}`,
+      });
+      return result;
+    } catch (err) {
+      return reply.status(400).send({
+        error: err instanceof Error ? err.message : 'Failed to submit bug report to GitHub',
+      });
+    }
+  });
+
   app.delete('/api/instances/:id', { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
@@ -1912,13 +1973,27 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     return updater.checkForUpdates(q.refresh === '1' || q.refresh === 'true');
   });
 
+  app.get('/api/updater/releases', { preHandler: requireAuth }, async (req, reply) => {
+    const q = req.query as { refresh?: string };
+    try {
+      return await updater.listReleases(q.refresh === '1' || q.refresh === 'true');
+    } catch (err) {
+      return reply.status(400).send({
+        error: err instanceof Error ? err.message : 'Failed to fetch GitHub releases',
+      });
+    }
+  });
+
   app.get('/api/updater/log', { preHandler: requireAuth }, async () => ({
     log: updater.getLastUpdateLog(),
   }));
 
   app.post('/api/updater/apply', { preHandler: requireAuth }, async (req, reply) => {
-    const body = req.body as { resumeRunningServers?: boolean; dryRun?: boolean } | undefined;
+    const body = req.body as
+      | { resumeRunningServers?: boolean; targetTag?: string; dryRun?: boolean }
+      | undefined;
     const resumeRunningServers = body?.resumeRunningServers ?? true;
+    const targetTag = body?.targetTag?.trim() || undefined;
     const actor = req.authUser?.username || 'admin';
 
     const forceShutdown = async () => {
@@ -1936,6 +2011,7 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       try {
         const result = await updater.applyUpdate({
           resumeRunningServers,
+          targetTag,
           dryRun: true,
           actor,
           onProgress: (ev) => broadcast({ type: 'updater:progress', ...ev }),
@@ -1951,21 +2027,57 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       return reply.status(409).send({ error: 'An update is already in progress.' });
     }
 
-    const status = await updater.checkForUpdates(true);
-    if (status.error) {
-      return reply.status(400).send({ error: status.error });
-    }
-    if (!status.latestVersion) {
-      return reply.status(400).send({ error: 'No GitHub Release found to update to.' });
-    }
-    if (status.installMode === 'exe' && !status.exeDownloadUrl) {
-      return reply.status(400).send({ error: `Release v${status.latestVersion} has no ServerForge.exe asset.` });
+    let resolvedTargetVersion: string;
+    const runningCount = orchestrator.listRunningInstances().length;
+
+    if (targetTag) {
+      try {
+        const releases = await updater.listReleases(true);
+        const cleanWanted = targetTag.replace(/^v/i, '');
+        const match = releases.find(
+          (r) =>
+            r.tag.toLowerCase() === targetTag.toLowerCase() ||
+            r.version.toLowerCase() === cleanWanted.toLowerCase()
+        );
+        if (!match) {
+          return reply.status(404).send({ error: `Release "${targetTag}" was not found on GitHub.` });
+        }
+        const status = await updater.checkForUpdates(false);
+        if (status.installMode === 'exe' && !match.hasExeAsset) {
+          return reply.status(400).send({
+            error: `Release ${match.tag} does not have a ServerForge.exe asset attached yet.`,
+          });
+        }
+        resolvedTargetVersion = match.version;
+      } catch (err) {
+        return reply.status(400).send({
+          error: err instanceof Error ? err.message : 'Unable to resolve target release',
+        });
+      }
+    } else {
+      const status = await updater.checkForUpdates(true);
+      if (status.error) {
+        return reply.status(400).send({ error: status.error });
+      }
+      if (!status.latestVersion) {
+        if (status.pendingExeBuild && status.pendingVersion) {
+          return reply.status(400).send({
+            error: `Release v${status.pendingVersion} is still building ServerForge.exe on GitHub Actions. Try again shortly.`,
+          });
+        }
+        return reply.status(400).send({ error: 'No GitHub Release found to update to.' });
+      }
+      if (status.installMode === 'exe' && !status.exeDownloadUrl) {
+        return reply.status(400).send({ error: `Release v${status.latestVersion} has no ServerForge.exe asset.` });
+      }
+      resolvedTargetVersion = status.latestVersion;
     }
 
     // Run download, server save/stop, and Windows EXE swap asynchronously while streaming progress over WebSocket
     void updater
       .applyUpdate({
         resumeRunningServers,
+        targetTag,
         dryRun: false,
         actor,
         onProgress: (ev) => broadcast({ type: 'updater:progress', ...ev }),
@@ -1979,8 +2091,8 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
       ok: true,
       accepted: true,
       restarting: true,
-      targetVersion: status.latestVersion,
-      rememberedServers: resumeRunningServers ? status.runningServers.length : 0,
+      targetVersion: resolvedTargetVersion,
+      rememberedServers: resumeRunningServers ? runningCount : 0,
     });
   });
 

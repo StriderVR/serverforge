@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, FileCode2, FolderInput, LogOut, PlusCircle, Server, Settings, Sparkles, Wifi, WifiOff } from 'lucide-react';
+import { Bug, Download, FileCode2, FolderInput, LogOut, PlusCircle, Server, Settings, Sparkles, Wifi, WifiOff } from 'lucide-react';
 import {
   getReleaseNotesForVersion,
   normalizeReleaseVersion,
@@ -10,6 +10,7 @@ import {
 } from '@serverforge/shared';
 import { api, type AuthState, type InstanceWithJoin } from './api';
 import { AuthView } from './components/AuthView';
+import { BugReportModal } from './components/BugReportModal';
 import { ConfirmModal, type ConfirmDialogOptions } from './components/ConfirmModal';
 import { DeployPage } from './components/DeployPage';
 import { ImportPage } from './components/ImportPage';
@@ -91,6 +92,12 @@ export function App() {
     percent: number;
     message: string;
   } | null>(null);
+  const [bugReportState, setBugReportState] = useState<{
+    open: boolean;
+    instanceId?: string | null;
+    title?: string;
+    description?: string;
+  }>({ open: false });
   const [reconnectingState, setReconnectingState] = useState<{
     label: string;
     expectedVersion?: string;
@@ -420,6 +427,20 @@ export function App() {
             </span>
             <span className="mono">{auth.user?.username}</span>
           </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            style={{ justifyContent: 'flex-start' }}
+            onClick={() =>
+              setBugReportState({
+                open: true,
+                instanceId: view === 'detail' ? selectedInstanceId : null,
+              })
+            }
+          >
+            <Bug size={14} />
+            Report a Bug
+          </button>
           <button className="btn btn-ghost btn-sm" style={{ justifyContent: 'flex-start' }} onClick={handleLogout}>
             <LogOut size={14} />
             Sign Out
@@ -496,6 +517,14 @@ export function App() {
               pushToast('info', 'Server removed from ServerForge.');
             }}
             onGlobalRefresh={() => void refreshData()}
+            onReportBug={(ctx) =>
+              setBugReportState({
+                open: true,
+                instanceId: ctx.instanceId,
+                title: ctx.title,
+                description: ctx.description,
+              })
+            }
             onConfirm={requestConfirm}
             onToast={pushToast}
           />
@@ -522,11 +551,22 @@ export function App() {
             onStartReconnecting={(label, expectedVersion) =>
               setReconnectingState({ label, expectedVersion })
             }
+            onOpenBugReporter={() => setBugReportState({ open: true, instanceId: null })}
             onConfirm={requestConfirm}
             onToast={pushToast}
           />
         )}
       </main>
+
+      <BugReportModal
+        open={bugReportState.open}
+        instances={instances}
+        initialInstanceId={bugReportState.instanceId ?? null}
+        initialTitle={bugReportState.title ?? ''}
+        initialDescription={bugReportState.description ?? ''}
+        onClose={() => setBugReportState({ open: false })}
+        onToast={pushToast}
+      />
 
       <ConfirmModal
         open={Boolean(confirmState)}
@@ -537,7 +577,7 @@ export function App() {
 
       <WhatsNewModal
         open={whatsNewOpen}
-        currentVersion={updaterStatus?.currentVersion ?? '1.3.3'}
+        currentVersion={updaterStatus?.currentVersion ?? '1.4.7'}
         onClose={dismissWhatsNew}
       />
 
