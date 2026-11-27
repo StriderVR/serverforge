@@ -299,6 +299,53 @@ export function DeployPage({ catalog, metrics, onDeployed, onGoToSettings }: Dep
               </div>
             )}
 
+            {selected.id === 'minecraft' && (
+              <div
+                style={{
+                  marginBottom: 16,
+                  padding: 12,
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                  <strong style={{ fontSize: 13 }}>Quick Loader Picker (Vanilla / Paper / Fabric / Forge / NeoForge)</strong>
+                  <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                    Auto-selects Java 8 / 17 / 21 / 25 • Switchable anytime after deploy
+                  </span>
+                </div>
+                <div className="btn-row">
+                  {(['PAPER', 'VANILLA', 'FABRIC', 'FORGE', 'NEOFORGE'] as const).map((loaderId) => {
+                    const active = String(config.SERVER_TYPE ?? 'PAPER').toUpperCase() === loaderId;
+                    return (
+                      <button
+                        key={loaderId}
+                        type="button"
+                        className={`btn btn-sm ${active ? 'btn-primary' : ''}`}
+                        onClick={() =>
+                          setConfig((prev) => ({
+                            ...prev,
+                            SERVER_TYPE: loaderId,
+                          }))
+                        }
+                      >
+                        {loaderId === 'PAPER'
+                          ? 'Paper (Plugins)'
+                          : loaderId === 'VANILLA'
+                            ? 'Vanilla'
+                            : loaderId === 'FABRIC'
+                              ? 'Fabric'
+                              : loaderId === 'FORGE'
+                                ? 'Forge'
+                                : 'NeoForge'}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <div className="form-grid">
               <div className="field">
                 <label htmlFor="deploy-name">Instance Display Name</label>

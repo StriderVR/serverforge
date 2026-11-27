@@ -8,6 +8,10 @@ import { buildTemplateVariables, renderTemplateString } from '../catalog/catalog
 import type { QueryService } from '../query/query-service.js';
 import type { CurseForgeService } from '../services/curseforge-service.js';
 import { parsePropertiesFile } from '../services/import-service.js';
+import {
+  MinecraftLoaderService,
+  parseMinecraftLoaderKind,
+} from '../services/minecraft-loader-service.js';
 import type { ModrinthService } from '../services/modrinth-service.js';
 import {
   buildFactorioWin64DownloadUrl,
@@ -1272,6 +1276,18 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
+  public async runMinecraftLoaderInstaller(
+    installerFilename: string,
+    serverDir: string,
+    requiredJavaMajor: number,
+    onLog: (line: string) => void
+  ): Promise<void> {
+    const java = await ensureJavaRuntime(requiredJavaMajor, this.toolsDir, onLog, {
+      fetchImpl: this.fetchImpl,
+    });
+    await this.runModloaderInstaller(installerFilename, serverDir, java, onLog);
+  }
+
   public async prepareJavaMinecraftServer(
     instance: ServerInstance,
     serverDir: string,
@@ -1281,10 +1297,14 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
   ): Promise<NativeLaunchPlan> {
     const flavor = String(instance.config.SERVER_TYPE ?? 'PAPER').trim().toUpperCase();
     const mcVersion = String(instance.config.MC_VERSION ?? 'LATEST').trim();
+    const loaderVersion = String(instance.config.LOADER_VERSION ?? '').trim() || undefined;
+    const explicitJavaTag = String(instance.config.JAVA_IMAGE_TAG ?? '').trim();
 
-    let requiredMajor = recommendJavaMajorForMcVersion(mcVersion);
+    let requiredMajor = explicitJavaTag
+      ? javaTagToMajor(explicitJavaTag)
+      : recommendJavaMajorForMcVersion(mcVersion);
     const detectedFromDir = detectRequiredJavaMajorFromServerDir(serverDir);
-    if (detectedFromDir !== null && detectedFromDir > requiredMajor) {
+    if (detectedFromDir !== null && !explicitJavaTag && detectedFromDir > requiredMajor) {
       requiredMajor = detectedFromDir;
     }
     const detectedFromCrash = parseRequiredJavaFromCrashLogs(instance.lastCrash?.logTail ?? []);
@@ -1302,110 +1322,40 @@ export class NativeProcessRuntimeAdapter implements RuntimeAdapter {
 
     if (!launcher) {
       onStatus?.('installing');
-      const jarPath = path.join(serverDir, 'server.jar');
-      let resolvedMcVersion: string | null = null;
-
-      if (flavor === 'PAPER') {
-        onLog(`[Minecraft] Resolving PaperMC build for version ${mcVersion}...`);
-        const projRes = await this.fetchImpl('https://api.papermc.io/v2/projects/paper', {
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (!projRes.ok) throw new Error(`PaperMC API error (HTTP ${projRes.status})`);
-        const projData = (await projRes.json()) as { versions?: string[] };
-        const versions = projData.versions ?? [];
-        const targetVer =
-          mcVersion.toUpperCase() === 'LATEST' ? versions[versions.length - 1] : mcVersion;
-        if (!targetVer || !versions.includes(targetVer)) {
-          throw new Error(`PaperMC version "${mcVersion}" was not found.`);
-        }
-        resolvedMcVersion = targetVer;
-
-        const buildsRes = await this.fetchImpl(
-          `https://api.papermc.io/v2/projects/paper/versions/${encodeURIComponent(targetVer)}/builds`,
-          { signal: AbortSignal.timeout(15_000) }
-        );
-        if (!buildsRes.ok) throw new Error(`PaperMC builds API error (HTTP ${buildsRes.status})`);
-        const buildsData = (await buildsRes.json()) as {
-          builds?: Array<{ build: number; downloads?: { application?: { name?: string } } }>;
-        };
-        const latestBuild = buildsData.builds?.[buildsData.builds.length - 1];
-        const jarName = latestBuild?.downloads?.application?.name;
-        if (!latestBuild || !jarName) {
-          throw new Error(`No downloadable PaperMC JAR found for Minecraft ${targetVer}.`);
-        }
-
-        const downloadUrl = `https://api.papermc.io/v2/projects/paper/versions/${encodeURIComponent(targetVer)}/builds/${latestBuild.build}/downloads/${encodeURIComponent(jarName)}`;
-        onLog(`[Minecraft] Downloading Paper ${targetVer} build #${latestBuild.build}...`);
-        await this.streamDownloadToFile(downloadUrl, jarPath, onLog, `Paper ${targetVer}`);
-      } else if (flavor === 'VANILLA') {
-        onLog(`[Minecraft] Resolving Mojang Vanilla server for version ${mcVersion}...`);
-        const manifestRes = await this.fetchImpl('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json', {
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (!manifestRes.ok) throw new Error(`Mojang version manifest error (HTTP ${manifestRes.status})`);
-        const manifest = (await manifestRes.json()) as {
-          latest?: { release?: string };
-          versions?: Array<{ id: string; url: string }>;
-        };
-        const targetId =
-          mcVersion.toUpperCase() === 'LATEST' ? manifest.latest?.release : mcVersion;
-        const entry = (manifest.versions ?? []).find((v) => v.id === targetId);
-        if (!entry) throw new Error(`Vanilla Minecraft version "${mcVersion}" was not found.`);
-        resolvedMcVersion = entry.id;
-
-        const verRes = await this.fetchImpl(entry.url, { signal: AbortSignal.timeout(15_000) });
-        if (!verRes.ok) throw new Error(`Mojang version metadata error (HTTP ${verRes.status})`);
-        const verMeta = (await verRes.json()) as { downloads?: { server?: { url?: string } } };
-        const serverUrl = verMeta.downloads?.server?.url;
-        if (!serverUrl) throw new Error(`No server JAR download available for Vanilla ${entry.id}.`);
-
-        onLog(`[Minecraft] Downloading Vanilla Minecraft ${entry.id} server.jar...`);
-        await this.streamDownloadToFile(serverUrl, jarPath, onLog, `Vanilla ${entry.id}`);
-      } else if (flavor === 'FABRIC') {
-        onLog(`[Minecraft] Resolving Fabric server launcher for version ${mcVersion}...`);
-        const [gamesRes, loadersRes, installersRes] = await Promise.all([
-          this.fetchImpl('https://meta.fabricmc.net/v2/versions/game', { signal: AbortSignal.timeout(15_000) }),
-          this.fetchImpl('https://meta.fabricmc.net/v2/versions/loader', { signal: AbortSignal.timeout(15_000) }),
-          this.fetchImpl('https://meta.fabricmc.net/v2/versions/installer', { signal: AbortSignal.timeout(15_000) }),
-        ]);
-        if (!gamesRes.ok || !loadersRes.ok || !installersRes.ok) {
-          throw new Error('Fabric Meta API request failed.');
-        }
-        const games = (await gamesRes.json()) as Array<{ version: string; stable: boolean }>;
-        const loaders = (await loadersRes.json()) as Array<{ version: string; stable: boolean }>;
-        const installers = (await installersRes.json()) as Array<{ version: string; stable: boolean }>;
-
-        const targetMc =
-          mcVersion.toUpperCase() === 'LATEST'
-            ? (games.find((g) => g.stable)?.version ?? games[0]?.version)
-            : mcVersion;
-        const targetLoader = loaders.find((l) => l.stable)?.version ?? loaders[0]?.version;
-        const targetInstaller = installers.find((i) => i.stable)?.version ?? installers[0]?.version;
-
-        if (!targetMc || !targetLoader || !targetInstaller) {
-          throw new Error(`Could not resolve Fabric loader/installer versions for Minecraft ${mcVersion}.`);
-        }
-        resolvedMcVersion = targetMc;
-
-        const fabricUrl = `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(targetMc)}/${encodeURIComponent(targetLoader)}/${encodeURIComponent(targetInstaller)}/server/jar`;
-        onLog(`[Minecraft] Downloading Fabric ${targetMc} (loader ${targetLoader}) server.jar...`);
-        await this.streamDownloadToFile(fabricUrl, jarPath, onLog, `Fabric ${targetMc}`);
-      } else {
+      const loaderKind = parseMinecraftLoaderKind(flavor);
+      if (!loaderKind) {
         throw new Error(
-          `Native auto-install for "${flavor}" is not yet built into the vanilla Minecraft template. Use the "Minecraft (CurseForge Modpack)" template for native modded servers, or deploy with the Docker runtime.`
+          `Native auto-install for "${flavor}" is not yet built into the vanilla Minecraft template. Use one of VANILLA, PAPER, FABRIC, FORGE, or NEOFORGE, or deploy with the Docker runtime.`
         );
       }
 
-      if (resolvedMcVersion && !javaOverride) {
-        const resolvedMajor = recommendJavaMajorForMcVersion(resolvedMcVersion);
-        if (resolvedMajor > java.major) {
-          onLog(
-            `[Java] Resolved Minecraft ${resolvedMcVersion} requires Java ${resolvedMajor} — upgrading runtime automatically.`
-          );
-          java = await ensureJavaRuntime(resolvedMajor, this.toolsDir, onLog, {
-            fetchImpl: this.fetchImpl,
-          });
-        }
+      const loaderService = new MinecraftLoaderService(this.fetchImpl);
+      onLog(`[Minecraft] Resolving ${loaderKind} server for Minecraft ${mcVersion}${loaderVersion ? ` (build ${loaderVersion})` : ''}...`);
+      const resolved = await loaderService.resolveLoaderDownload(loaderKind, mcVersion, loaderVersion);
+
+      // Re-select exact compatible JRE if resolved MC version requires a different major (upgrade OR downgrade!)
+      if (!javaOverride && resolved.requiredJavaMajor !== java.major) {
+        onLog(
+          `[Java] Resolved ${resolved.loader} ${resolved.mcVersion} requires Java ${resolved.requiredJavaMajor} (current: Java ${java.major}) — selecting matching JRE automatically.`
+        );
+        java = await ensureJavaRuntime(resolved.requiredJavaMajor, this.toolsDir, onLog, {
+          fetchImpl: this.fetchImpl,
+        });
+      }
+
+      const destPath = path.join(serverDir, resolved.filename);
+      onLog(
+        `[Minecraft] Downloading ${resolved.loader} ${resolved.mcVersion}${resolved.loaderVersion ? ` (${resolved.loaderVersion})` : ''} -> ${resolved.filename}...`
+      );
+      await this.streamDownloadToFile(
+        resolved.downloadUrl,
+        destPath,
+        onLog,
+        `${resolved.loader} ${resolved.mcVersion}`
+      );
+
+      if (resolved.installerKind === 'modloader_installer') {
+        await this.runModloaderInstaller(resolved.filename, serverDir, java, onLog);
       }
 
       launcher = findNativeMinecraftLauncher(serverDir, java.javaBin, instance.memoryLimitMb, process.platform, java.major);

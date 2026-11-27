@@ -19,13 +19,19 @@ import type {
   ServerInstance,
   ServerLease,
   StartInstanceInput,
+  SwitchMinecraftLoaderInput,
+  SwitchMinecraftLoaderResult,
   UpdateInstanceConfigInput,
 } from '@serverforge/shared';
 import { BackupPolicySchema } from '@serverforge/shared';
 import type { CatalogService } from '../catalog/catalog-service.js';
 import type { AppConfig } from '../config.js';
 import type { AppDatabase } from '../db/database.js';
-import { javaTagToMajor, parseRequiredJavaFromCrashLogs } from '../runtimes/java-helper.js';
+import {
+  javaTagToMajor,
+  parseRequiredJavaFromCrashLogs,
+  recommendJavaMajorForMcVersion,
+} from '../runtimes/java-helper.js';
 import { ConsoleLogBuffer } from '../runtimes/runtime-adapter.js';
 import type { RuntimeManager } from '../runtimes/runtime-manager.js';
 import { extractZipSafely } from './backup-scheduler.js';
@@ -34,6 +40,11 @@ import type { DiagnosticsService } from './diagnostics-service.js';
 import type { FirewallService } from './firewall-service.js';
 import { enableRconInServerProperties } from './import-service.js';
 import { analyzeMinecraftCrashDir, redactCrashAnalysis } from './minecraft-crash-analyzer.js';
+import {
+  cleanStaleLoaderArtifacts,
+  MinecraftLoaderService,
+  parseMinecraftLoaderKind,
+} from './minecraft-loader-service.js';
 import { isMinecraftInstance } from './minecraft-properties-service.js';
 import type { ModrinthService } from './modrinth-service.js';
 import type { NetworkAddressService } from './network-service.js';
@@ -118,7 +129,8 @@ export class ServerOrchestrator extends EventEmitter {
     private readonly diagnostics?: DiagnosticsService,
     watchdogOptions?: WatchdogOptions,
     private readonly curseforge?: CurseForgeService,
-    private readonly modrinth?: ModrinthService
+    private readonly modrinth?: ModrinthService,
+    private readonly minecraftLoader: MinecraftLoaderService = new MinecraftLoaderService()
   ) {
     super();
     this.logs = new ConsoleLogBuffer(600, {
@@ -1672,16 +1684,217 @@ export class ServerOrchestrator extends EventEmitter {
       };
     }
 
+    // 4. Standard Minecraft Java server (Vanilla / Paper / Fabric / Forge / NeoForge)
+    if (instance.gameId === 'minecraft') {
+      const currentLoader = parseMinecraftLoaderKind(String(instance.config.SERVER_TYPE ?? 'PAPER')) ?? 'PAPER';
+      const currentMc = String(instance.config.MC_VERSION ?? 'LATEST').trim() || 'LATEST';
+      try {
+        const info = await this.minecraftLoader.getLoaderVersions(
+          currentLoader,
+          currentMc.toUpperCase() === 'LATEST' ? undefined : currentMc
+        );
+        const latestMc = info.mcVersions[0] ?? null;
+        const latestBuild = info.loaderVersions[0] ?? null;
+        const currentBuild = String(instance.config.LOADER_VERSION ?? '').trim() || null;
+        const mcUpdateAvailable = Boolean(
+          latestMc && currentMc.toUpperCase() !== 'LATEST' && latestMc !== currentMc
+        );
+        const buildUpdateAvailable = Boolean(latestBuild && currentBuild && latestBuild !== currentBuild);
+        const updateAvailable = mcUpdateAvailable || buildUpdateAvailable;
+
+        return {
+          supported: true,
+          kind: 'minecraft_loader',
+          message: updateAvailable
+            ? `New ${currentLoader} release available: Minecraft ${latestMc ?? currentMc}${latestBuild ? ` (build ${latestBuild})` : ''}.`
+            : `${currentLoader} (${currentMc}${currentBuild ? ` • build ${currentBuild}` : ''}) is ready — switch loader or Minecraft version anytime in the Version & Updates tab.`,
+          updateAvailable,
+          currentVersionId: currentMc,
+          latestVersionId: latestMc,
+          latestVersionLabel: latestMc
+            ? `${currentLoader} ${latestMc}${latestBuild ? ` (build ${latestBuild})` : ''}`
+            : null,
+          availableVersions: info.mcVersions.slice(0, 15).map((ver) => ({
+            id: ver,
+            label: `${currentLoader} ${ver}`,
+            date: '',
+            gameVersions: [ver],
+            recommendedJavaTag: `java${recommendJavaMajorForMcVersion(ver)}`,
+          })),
+        };
+      } catch (err) {
+        return {
+          supported: true,
+          kind: 'minecraft_loader',
+          message: err instanceof Error ? err.message : 'Unable to reach Minecraft loader version API.',
+          updateAvailable: false,
+          currentVersionId: currentMc,
+          latestVersionId: null,
+          latestVersionLabel: null,
+          availableVersions: [],
+        };
+      }
+    }
+
     return {
       supported: false,
       kind: 'unsupported',
-      message: `Automated updates are supported for SteamCMD games, CurseForge modpacks, and Modrinth modpacks.`,
+      message: `Automated updates are supported for SteamCMD games, Minecraft Java loaders, CurseForge modpacks, and Modrinth modpacks.`,
       updateAvailable: false,
       currentVersionId: null,
       latestVersionId: null,
       latestVersionLabel: null,
       availableVersions: [],
     };
+  }
+
+  /**
+   * Safely switches a Minecraft server's loader (Vanilla / Paper / Fabric / Forge / NeoForge)
+   * and/or Minecraft version with automatic pre-switch backup, exact JRE upgrade/downgrade,
+   * and targeted cleanup of stale loader artifacts (preserving worlds, configs, mods, plugins).
+   */
+  async switchMinecraftLoader(
+    instanceId: string,
+    input: SwitchMinecraftLoaderInput,
+    actor = 'admin'
+  ): Promise<SwitchMinecraftLoaderResult> {
+    const instance = this.db.getInstanceById(instanceId);
+    if (!instance) {
+      throw new Error('Server instance not found.');
+    }
+    if (!isMinecraftInstance(instance)) {
+      throw new Error('Loader switching is only available for Minecraft instances.');
+    }
+
+    const loader = parseMinecraftLoaderKind(input.loader);
+    if (!loader) {
+      throw new Error('Unsupported Minecraft loader. Expected one of: VANILLA, PAPER, FABRIC, FORGE, NEOFORGE.');
+    }
+
+    const rawMcVersion = (input.mcVersion ?? '').trim();
+    if (!rawMcVersion) {
+      throw new Error('mcVersion is required.');
+    }
+
+    const prevLoader = String(instance.config.SERVER_TYPE ?? 'PAPER').trim().toUpperCase();
+    const prevMc = String(instance.config.MC_VERSION ?? 'LATEST').trim();
+
+    // 1. Stop gracefully if currently running or starting
+    if (instance.status === 'running' || instance.status === 'starting') {
+      this.appendLog(instance.id, `[Loader] Stopping ${instance.name} gracefully before switching to ${loader} ${rawMcVersion}...`);
+      await this.stopInstance(instance.id, actor, 'web', 'Pre-loader-switch stop');
+    }
+
+    // 2. Resolve download metadata & required Java major (validates upstream availability before modifying files)
+    const resolved = await this.minecraftLoader.resolveLoaderDownload(
+      loader,
+      rawMcVersion,
+      input.loaderVersion?.trim() || undefined
+    );
+    const requiredJavaMajor = resolved.requiredJavaMajor;
+    const javaTag = `java${requiredJavaMajor}`;
+
+    // 3. Create automatic pre-switch safety backup unless explicitly opted out
+    let backupFilename: string | null = null;
+    if (input.createBackup !== false) {
+      this.appendLog(
+        instance.id,
+        `[Loader] Creating pre-switch safety backup (${prevLoader} ${prevMc} -> ${loader} ${resolved.mcVersion})...`
+      );
+      const backup = await this.createBackup(
+        instance.id,
+        `Pre-switch backup (${prevLoader} ${prevMc} -> ${loader} ${resolved.mcVersion})`,
+        actor,
+        { source: 'system', applyRetention: false }
+      );
+      backupFilename = backup.filename;
+      this.appendLog(instance.id, `[Loader] Safety backup created: ${backup.filename}`);
+    }
+
+    const serverDir = this.getServerContentDir(instance);
+    const onLog = (line: string) => this.appendLog(instance.id, line);
+    let removedArtifacts: string[] = [];
+
+    const switching = this.db.updateInstance(instance.id, { status: 'installing', lastError: null })!;
+    this.emit('instance:update', this.enrichInstance(switching));
+
+    try {
+      // 4. Clean stale loader artifacts (native or existing serverDir) while preserving worlds, configs, mods, plugins
+      if (instance.runtime === 'native') {
+        removedArtifacts = cleanStaleLoaderArtifacts(serverDir);
+        if (removedArtifacts.length > 0) {
+          onLog(`[Loader] Cleaned stale loader files: ${removedArtifacts.join(', ')}`);
+        }
+
+        // Download the resolved server JAR or modloader installer JAR
+        onLog(
+          `[Loader] Downloading ${resolved.loader} ${resolved.mcVersion}${resolved.loaderVersion ? ` (${resolved.loaderVersion})` : ''} -> ${resolved.filename}...`
+        );
+        await this.minecraftLoader.downloadResolvedLoader(resolved, serverDir);
+
+        // Execute Forge / NeoForge installer JAR on real native hosts (skip dummy JAR exec in mock mode)
+        if (resolved.installerKind === 'modloader_installer' && this.runtimeManager.mode !== 'mock') {
+          await this.runtimeManager.native.runMinecraftLoaderInstaller(
+            resolved.filename,
+            serverDir,
+            requiredJavaMajor,
+            onLog
+          );
+        }
+      }
+
+      // 5. Persist updated loader, MC version, optional loader build, and exact JAVA_IMAGE_TAG (upgrade OR downgrade)
+      const nextConfig: Record<string, string | number | boolean> = {
+        ...switching.config,
+        SERVER_TYPE: resolved.loader,
+        MC_VERSION: resolved.mcVersion,
+        JAVA_IMAGE_TAG: javaTag,
+      };
+      if (resolved.loaderVersion) {
+        nextConfig.LOADER_VERSION = resolved.loaderVersion;
+      } else {
+        delete nextConfig.LOADER_VERSION;
+      }
+
+      const updated = this.db.updateInstance(instance.id, {
+        status: 'stopped',
+        lastError: null,
+        config: nextConfig,
+      })!;
+      const enriched = this.enrichInstance(updated);
+      this.emit('instance:update', enriched);
+
+      const summary = `Switched ${instance.name} to ${resolved.loader} ${resolved.mcVersion}${resolved.loaderVersion ? ` (${resolved.loaderVersion})` : ''} with Java ${requiredJavaMajor}${backupFilename ? ` (backup: ${backupFilename})` : ''}.`;
+      onLog(`[Loader] ${summary}`);
+      this.db.addAuditLog({
+        actor,
+        source: 'web',
+        action: 'instance.minecraft_loader_switch',
+        instanceId: instance.id,
+        details: `${prevLoader} ${prevMc} -> ${resolved.loader} ${resolved.mcVersion}${resolved.loaderVersion ? ` (${resolved.loaderVersion})` : ''} [Java ${requiredJavaMajor}]${backupFilename ? ` (backup: ${backupFilename})` : ''}`,
+      });
+
+      return {
+        ok: true,
+        instance: enriched,
+        loader: resolved.loader,
+        mcVersion: resolved.mcVersion,
+        loaderVersion: resolved.loaderVersion,
+        requiredJavaMajor,
+        backupFilename,
+        removedArtifacts,
+        summary,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const errored = this.db.updateInstance(instance.id, {
+        status: 'error',
+        lastError: `Loader switch failed: ${msg}`,
+      })!;
+      this.emit('instance:update', this.enrichInstance(errored));
+      onLog(`[Loader] Switch failed: ${msg}`);
+      throw err;
+    }
   }
 
   async updateInstance(
@@ -1701,9 +1914,51 @@ export class ServerOrchestrator extends EventEmitter {
     const isSteamCmd = Boolean(template.runtimes.native?.installer === 'steamcmd' && template.runtimes.native.steamAppId);
     const isCurseForge = instance.gameId === 'minecraft-curseforge';
     const isModrinth = instance.gameId === 'minecraft-modrinth';
+    const isStandardMinecraft = instance.gameId === 'minecraft';
 
-    if (!isSteamCmd && !isCurseForge && !isModrinth) {
+    if (!isSteamCmd && !isCurseForge && !isModrinth && !isStandardMinecraft) {
       throw new Error(`One-click update is not supported for "${template.name}".`);
+    }
+
+    if (isStandardMinecraft) {
+      const activeLease = this.db.getActiveLeaseForInstance(instance.id);
+      const wasRunning = instance.status === 'running' || instance.status === 'starting';
+      const shouldRestart = options.restartIfRunning !== false && wasRunning;
+      const currentLoader = parseMinecraftLoaderKind(String(instance.config.SERVER_TYPE ?? 'PAPER')) ?? 'PAPER';
+      const targetMc = options.targetVersionId?.trim() || String(instance.config.MC_VERSION ?? 'LATEST').trim() || 'LATEST';
+      const result = await this.switchMinecraftLoader(
+        instance.id,
+        {
+          loader: currentLoader,
+          mcVersion: targetMc,
+          createBackup: options.createBackup !== false,
+        },
+        actor
+      );
+      let restarted = false;
+      if (shouldRestart) {
+        const remainingMin = activeLease
+          ? Math.max(15, Math.round((new Date(activeLease.expiresAt).getTime() - Date.now()) / 60_000))
+          : undefined;
+        await this.startInstance(instance.id, {
+          temporary: Boolean(activeLease),
+          durationMinutes: remainingMin,
+          idleTimeoutMinutes: activeLease?.idleTimeoutMinutes,
+          requestedBy: activeLease?.requestedBy ?? actor,
+          requestedById: activeLease?.requestedById ?? undefined,
+          source: activeLease?.source === 'discord' ? 'discord' : 'web',
+          channelId: activeLease?.channelId ?? undefined,
+        });
+        restarted = true;
+      }
+      return {
+        ok: true,
+        kind: 'minecraft_loader',
+        summary: result.summary,
+        backupCreated: result.backupFilename,
+        restarted,
+        newVersionId: result.mcVersion,
+      };
     }
 
     const activeLease = this.db.getActiveLeaseForInstance(instance.id);

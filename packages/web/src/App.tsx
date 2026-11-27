@@ -24,7 +24,7 @@ import { WhatsNewModal } from './components/WhatsNewModal';
 type NavView = 'overview' | 'deploy' | 'import' | 'templates' | 'settings' | 'detail';
 
 const VALID_SETTINGS_TABS = new Set<SettingsTabId>(['general', 'security', 'networking', 'discord', 'updates', 'diagnostics']);
-const VALID_INSTANCE_TABS = new Set<InstanceTabId>(['console', 'network', 'config', 'files', 'properties', 'mods', 'backups']);
+const VALID_INSTANCE_TABS = new Set<InstanceTabId>(['console', 'network', 'config', 'files', 'properties', 'mods', 'version', 'backups']);
 const WHATS_NEW_STORAGE_KEY = 'sf_last_seen_release';
 
 interface ParsedRoute {

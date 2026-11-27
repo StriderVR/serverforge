@@ -35,11 +35,12 @@ import { copyTextToClipboard } from '../utils/clipboard';
 import type { ConfirmDialogOptions } from './ConfirmModal';
 import { FilesTab } from './instance/FilesTab';
 import { MinecraftPropertiesTab } from './instance/MinecraftPropertiesTab';
+import { MinecraftVersionTab } from './instance/MinecraftVersionTab';
 import { ModsPluginsTab } from './instance/ModsPluginsTab';
 import { NetworkTab } from './instance/NetworkTab';
 import type { PushToastFn } from './ToastStack';
 
-export type InstanceTabId = 'console' | 'network' | 'config' | 'files' | 'properties' | 'mods' | 'backups';
+export type InstanceTabId = 'console' | 'network' | 'config' | 'files' | 'properties' | 'mods' | 'version' | 'backups';
 
 interface InstanceDetailPageProps {
   instanceId: string;
@@ -522,7 +523,9 @@ export function InstanceDetailPage({
                 ? 'Update Game Server via SteamCMD'
                 : updateCheck.kind === 'curseforge'
                   ? 'Upgrade CurseForge Modpack'
-                  : 'Upgrade Modrinth Modpack'}
+                  : updateCheck.kind === 'minecraft_loader'
+                    ? 'Update Minecraft Loader / Version'
+                    : 'Upgrade Modrinth Modpack'}
             </h2>
             <button type="button" className="btn btn-sm" onClick={() => setShowUpdatePanel(false)}>
               Close
@@ -987,6 +990,9 @@ export function InstanceDetailPage({
             </button>
             <button className={`tab-btn ${tab === 'mods' ? 'active' : ''}`} onClick={() => setTab('mods')}>
               Mods / Plugins / Datapacks
+            </button>
+            <button className={`tab-btn ${tab === 'version' ? 'active' : ''}`} onClick={() => setTab('version')}>
+              {'Version & Updates'}
             </button>
           </>
         )}
@@ -1574,6 +1580,18 @@ export function InstanceDetailPage({
 
       {tab === 'mods' && (
         <ModsPluginsTab instanceId={detail.id} onConfirm={onConfirm} onToast={onToast} />
+      )}
+
+      {tab === 'version' && (
+        <MinecraftVersionTab
+          instance={detail}
+          onSwitched={async () => {
+            await loadDetail(true);
+            onGlobalRefresh();
+          }}
+          onConfirm={onConfirm}
+          onToast={onToast}
+        />
       )}
     </div>
   );
