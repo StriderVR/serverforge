@@ -14,6 +14,17 @@ export interface ReleaseNoteEntry {
  */
 export const RELEASE_NOTES: ReleaseNoteEntry[] = [
   {
+    version: '1.4.2',
+    title: 'Strict CORS, CSRF Protection, Security Headers & IP Allowlisting',
+    summary: 'Locks down the ServerForge dashboard against cross-origin browser attacks and accidental public internet exposure.',
+    added: [
+      'Default LAN + Tailscale IP allowlist on port 3000 — blocks any public internet IP from accessing the dashboard even if port 3000 were accidentally forwarded.',
+      'Dashboard Access Control setting in Settings -> Network supporting LAN & Tailscale (default), Localhost-Only lockdown, or Custom Trusted CIDRs.',
+      'Strict Same-Origin CORS & CSRF Origin/Referer protection rejecting cross-origin state-changing browser requests (403).',
+      'Standard HTTP security headers (Content-Security-Policy, X-Frame-Options: DENY, X-Content-Type-Options: nosniff, Referrer-Policy, Permissions-Policy) on all API and Web UI responses.',
+    ],
+  },
+  {
     version: '1.4.1',
     title: 'Opt-In Automatic Router Port Forwarding (UPnP / NAT-PMP)',
     summary: 'Automatically open and clean up required game ports on compatible routers — disabled by default for security, with per-server controls.',

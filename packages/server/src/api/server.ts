@@ -51,6 +51,13 @@ import {
 import { ModrinthService } from '../services/modrinth-service.js';
 import { NetworkAddressService, normalizeDuckDnsDomain } from '../services/network-service.js';
 import { GuardrailError, ServerOrchestrator } from '../services/orchestrator.js';
+import {
+  SECURITY_HEADERS,
+  isCsrfOriginValid,
+  isIpAllowedByPolicy,
+  isOriginAllowedForHost,
+  normalizeRemoteIp,
+} from '../security/http-security.js';
 import { TelemetryService } from '../services/telemetry-service.js';
 import { UpdaterService } from '../services/updater-service.js';
 import { UpnpService } from '../services/upnp-service.js';
@@ -272,9 +279,61 @@ export async function createServerForgeApp(overrides: CreateAppOptions = {}): Pr
     return payload;
   });
 
-  await app.register(cors, {
-    origin: true,
-    credentials: true,
+  const isDevEnv = process.env.NODE_ENV === 'development';
+
+  // Apply HTTP security headers on every API and Web UI response (Issue #61)
+  app.addHook('onSend', async (_req, reply, payload) => {
+    for (const [header, value] of Object.entries(SECURITY_HEADERS)) {
+      if (!reply.hasHeader(header)) {
+        reply.header(header, value);
+      }
+    }
+    return payload;
+  });
+
+  // Enforce LAN/Tailscale IP allowlist + CSRF Origin/Referer guard on every request (Issue #61)
+  app.addHook('onRequest', async (req, reply) => {
+    const settings = db.getSettings(config.publicHost);
+    const remoteIp = normalizeRemoteIp(req.ip);
+    if (!isIpAllowedByPolicy(remoteIp, settings.dashboardAccessMode, settings.trustedCidrs)) {
+      diagnostics.record({
+        level: 'warn',
+        source: 'api',
+        statusCode: 403,
+        method: req.method,
+        path: req.url,
+        message: `Blocked dashboard access from non-allowlisted IP ${remoteIp} (mode=${settings.dashboardAccessMode})`,
+      });
+      return reply.status(403).send({
+        error: 'Access denied: your IP address is not in the ServerForge dashboard allowlist.',
+      });
+    }
+
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+    const refererHeader = typeof req.headers.referer === 'string' ? req.headers.referer : undefined;
+    const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : undefined;
+    if (!isCsrfOriginValid(req.method, originHeader, refererHeader, hostHeader, isDevEnv)) {
+      diagnostics.record({
+        level: 'warn',
+        source: 'api',
+        statusCode: 403,
+        method: req.method,
+        path: req.url,
+        message: `Blocked cross-origin ${req.method} request (Origin=${originHeader ?? 'none'}, Host=${hostHeader ?? 'none'})`,
+      });
+      return reply.status(403).send({
+        error: 'Cross-origin request blocked by ServerForge CSRF protection.',
+      });
+    }
+  });
+
+  await app.register(cors, () => {
+    return (req: FastifyRequest, cb: (err: Error | null, options: { origin: boolean; credentials: boolean }) => void) => {
+      const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+      const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : undefined;
+      const allowed = Boolean(originHeader) && isOriginAllowedForHost(originHeader, hostHeader, isDevEnv);
+      cb(null, { origin: allowed, credentials: allowed });
+    };
   });
   await app.register(cookie);
   await app.register(websocket);

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Eye, EyeOff, Globe, Lock, Network, Package, RefreshCw, Router } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Eye, EyeOff, Globe, Lock, Network, Package, RefreshCw, Router, Shield } from 'lucide-react';
 import type {
   ConsolidatedPortMapEntry,
+  DashboardAccessMode,
   NetworkStatus,
   PublicHostMode,
   SystemSettings,
@@ -541,6 +542,66 @@ export function NetworkingIntegrationsTab({
               </span>
             </div>
           )}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header" style={{ flexWrap: 'wrap', gap: 10 }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Shield size={16} /> Dashboard Access Control (IP Allowlist)
+          </h2>
+          <span className="badge badge-running">
+            <span className="badge-dot" />
+            {settings.dashboardAccessMode === 'localhost_only'
+              ? 'LOCALHOST ONLY'
+              : settings.dashboardAccessMode === 'custom'
+                ? 'CUSTOM ALLOWLIST'
+                : 'LAN + TAILSCALE'}
+          </span>
+        </div>
+        <div className="panel-body">
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-secondary)' }}>
+            Controls which IP addresses may reach the ServerForge dashboard (port <code className="mono">3000</code>). Public internet IPs are blocked by default even if port 3000 is ever accidentally exposed. Localhost (<code className="mono">127.0.0.1</code>) is always permitted so you can never lock yourself out.
+          </p>
+          <div className="form-grid">
+            <div className="field">
+              <label htmlFor="set-dashboard-access-mode">Allowed Client Networks</label>
+              <select
+                id="set-dashboard-access-mode"
+                className="select"
+                value={settings.dashboardAccessMode ?? 'lan_and_tailscale'}
+                onChange={(e) =>
+                  onChange({
+                    dashboardAccessMode: e.target.value as DashboardAccessMode,
+                  })
+                }
+              >
+                <option value="lan_and_tailscale">LAN &amp; Tailscale Only (Default — blocks public internet)</option>
+                <option value="localhost_only">Localhost Only (This PC Only — maximum lockdown)</option>
+                <option value="custom">Localhost + Custom Trusted CIDRs Only</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="set-trusted-cidrs">Extra Trusted IPs / CIDRs (comma-separated, optional)</label>
+              <input
+                id="set-trusted-cidrs"
+                className="input mono"
+                value={(settings.trustedCidrs ?? []).join(', ')}
+                onChange={(e) =>
+                  onChange({
+                    trustedCidrs: e.target.value
+                      .split(/[,\s]+/)
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  })
+                }
+                placeholder="e.g., 192.168.50.0/24, 100.64.0.12"
+              />
+              <span className="field-hint">
+                Remember to click <strong>Save Settings</strong> to apply changes.
+              </span>
+            </div>
+          </div>
         </div>
       </section>
     </div>
