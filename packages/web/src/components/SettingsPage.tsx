@@ -9,6 +9,7 @@ import type {
   MaintenanceStatus,
   NetworkStatus,
   SystemSettings,
+  SystemSettingsResponse,
   UpdaterStatus,
 } from '@serverforge/shared';
 import { api } from '../api';
@@ -55,8 +56,8 @@ export function SettingsPage({
   onConfirm,
   onToast,
 }: SettingsPageProps) {
-  const [settings, setSettings] = useState<SystemSettings | null>(null);
-  const [savedSnapshot, setSavedSnapshot] = useState<SystemSettings | null>(null);
+  const [settings, setSettings] = useState<SystemSettingsResponse | null>(null);
+  const [savedSnapshot, setSavedSnapshot] = useState<SystemSettingsResponse | null>(null);
   const [maintenance, setMaintenance] = useState<MaintenanceStatus | null>(null);
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(null);
   const [discordStatus, setDiscordStatus] = useState<DiscordDiscoveryStatus | null>(null);
@@ -108,7 +109,7 @@ export function SettingsPage({
 
   const hasUnsavedChanges = useMemo(() => {
     if (!settings || !savedSnapshot) return false;
-    const currentNormalized: SystemSettings = {
+    const currentNormalized: SystemSettingsResponse = {
       ...settings,
       discordAllowedRoleIds: parseRoleIds(allowedRolesText),
       discordAdminRoleIds: parseRoleIds(adminRolesText),
@@ -125,7 +126,7 @@ export function SettingsPage({
     setSettings((prev) => (prev ? { ...prev, ...patch } : prev));
   };
 
-  const syncSavedSetting = (patch: Partial<SystemSettings>) => {
+  const syncSavedSetting = (patch: Partial<SystemSettingsResponse>) => {
     setSettings((prev) => (prev ? { ...prev, ...patch } : prev));
     setSavedSnapshot((prev) => (prev ? { ...prev, ...patch } : prev));
     onSaved();
@@ -173,6 +174,8 @@ export function SettingsPage({
     return <div className="panel panel-body">Loading settings...</div>;
   }
 
+  const undecryptableFields = settings.secretVaultStatus?.undecryptableFields ?? [];
+
   return (
     <div style={{ paddingBottom: hasUnsavedChanges ? 78 : 12 }}>
       <header className="page-header">
@@ -192,6 +195,12 @@ export function SettingsPage({
           <Save size={14} /> {saving ? 'Saving...' : hasUnsavedChanges ? 'Save Changes' : 'All Saved'}
         </button>
       </header>
+
+      {undecryptableFields.length > 0 && (
+        <div className="alert alert-error" style={{ marginBottom: 14 }}>
+          <strong>Secret Vault Recovery Needed:</strong> Some encrypted credentials could not be decrypted with this machine&apos;s key ({undecryptableFields.join(', ')}). If you moved <code>serverforge.sqlite</code> from another PC, please re-enter those tokens or passwords and save.
+        </div>
+      )}
 
       <div className="tabs settings-tabs" role="tablist" aria-label="Settings sections">
         <button

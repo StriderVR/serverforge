@@ -505,8 +505,8 @@ export class NetworkAddressService {
     ip: string | null;
   }> {
     const settings = this.db.getSettings(this.config.publicHost);
-    const rawDomain = (options.domain !== undefined ? options.domain : settings.duckdnsDomain).trim();
-    const rawToken = (options.token !== undefined ? options.token : settings.duckdnsToken).trim();
+    const rawDomain = (options.domain?.trim() ? options.domain : settings.duckdnsDomain).trim();
+    const rawToken = (options.token?.trim() ? options.token : settings.duckdnsToken).trim();
 
     const subdomains = extractDuckDnsSubdomains(rawDomain);
     const normalizedDomain = normalizeDuckDnsDomain(rawDomain);

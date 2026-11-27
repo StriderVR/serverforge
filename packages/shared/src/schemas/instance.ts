@@ -204,6 +204,30 @@ export const SystemSettingsSchema = z.object({
 });
 export type SystemSettings = z.infer<typeof SystemSettingsSchema>;
 
+export const SECRET_MASK_SENTINEL = '••••••••';
+
+export interface SecretVaultStatus {
+  encrypted: boolean;
+  keyProtection: 'dpapi' | 'keyfile';
+  undecryptableFields: string[];
+}
+
+export interface SystemSettingsResponse extends SystemSettings {
+  hasDiscordBotToken?: boolean;
+  discordBotTokenPreview?: string;
+  hasDuckdnsToken?: boolean;
+  duckdnsTokenPreview?: string;
+  hasCurseforgeApiKey?: boolean;
+  curseforgeApiKeyPreview?: string;
+  secretVaultStatus?: SecretVaultStatus;
+}
+
+export type SystemSettingsUpdatePayload = Partial<SystemSettings> & {
+  clearDiscordBotToken?: boolean;
+  clearDuckdnsToken?: boolean;
+  clearCurseforgeApiKey?: boolean;
+};
+
 export interface AuthSessionSummary {
   id: string;
   ip: string;

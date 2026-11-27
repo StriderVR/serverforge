@@ -41,6 +41,8 @@ import type {
   StartInstanceInput,
   SystemDiagnosticsReport,
   SystemSettings,
+  SystemSettingsResponse,
+  SystemSettingsUpdatePayload,
   TotpEnrollmentPayload,
   TotpStatus,
   UpdateInstanceConfigInput,
@@ -151,9 +153,9 @@ export const api = {
     }),
 
   getHostMetrics: () => request<HostMetrics>('/api/host/metrics'),
-  getSettings: () => request<SystemSettings>('/api/settings'),
-  saveSettings: (patch: Partial<SystemSettings>) =>
-    request<SystemSettings>('/api/settings', {
+  getSettings: () => request<SystemSettingsResponse>('/api/settings'),
+  saveSettings: (patch: SystemSettingsUpdatePayload) =>
+    request<SystemSettingsResponse>('/api/settings', {
       method: 'PUT',
       body: JSON.stringify(patch),
     }),
@@ -216,7 +218,7 @@ export const api = {
   // CurseForge
   getCurseForgeStatus: () => request<{ configured: boolean }>('/api/curseforge/status'),
   testCurseForgeKey: (apiKey?: string) =>
-    request<{ ok: boolean; saved?: boolean; message: string; normalizedKey: string }>('/api/curseforge/test', {
+    request<{ ok: boolean; saved?: boolean; message: string; normalizedKey: string; keyPreview?: string }>('/api/curseforge/test', {
       method: 'POST',
       body: JSON.stringify(apiKey !== undefined ? { apiKey, saveOnSuccess: true } : { saveOnSuccess: true }),
     }),
