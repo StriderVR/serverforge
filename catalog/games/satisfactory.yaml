@@ -5,6 +5,10 @@ category: factory
 description: "First-person open-world factory building dedicated server (Satisfactory 1.0+)."
 accentColor: "#f59e0b"
 joinHint: "Server Manager -> Add Server -> {{HOST}}:{{PORT_GAME}}"
+connectSteps:
+  - "Launch Satisfactory and open Server Manager from the main menu."
+  - "Click Add Server, enter {host} as the Address and {port} as the Port, then confirm."
+  - "Accept the server certificate prompt if shown, select the server, and click Join Game."
 resources:
   minRamGb: 6
   recommendedRamGb: 12

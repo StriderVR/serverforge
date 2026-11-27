@@ -194,6 +194,150 @@ export function buildCrashAlertEmbedData(
   };
 }
 
+export function buildServerSlashCommands() {
+  return [
+    new SlashCommandBuilder()
+      .setName('server')
+      .setDescription('Manage and temporarily boot game servers on ServerForge')
+      .addSubcommand((sub) => sub.setName('list').setDescription('List available game servers and status'))
+      .addSubcommand((sub) =>
+        sub
+          .setName('start')
+          .setDescription('Temporarily boot a game server')
+          .addStringOption((opt) =>
+            opt.setName('name').setDescription('Server to boot').setRequired(true).setAutocomplete(true)
+          )
+          .addNumberOption((opt) =>
+            opt
+              .setName('hours')
+              .setDescription('Temporary lease duration in hours (e.g. 2, 3, 4)')
+              .setMinValue(0.5)
+              .setMaxValue(12)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('extend')
+          .setDescription('Extend an active temporary server lease')
+          .addStringOption((opt) =>
+            opt.setName('name').setDescription('Running server').setRequired(true).setAutocomplete(true)
+          )
+          .addIntegerOption((opt) =>
+            opt
+              .setName('minutes')
+              .setDescription('Minutes to add (default: 60)')
+              .setMinValue(15)
+              .setMaxValue(240)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('stop')
+          .setDescription('Gracefully save and stop a running game server')
+          .addStringOption((opt) =>
+            opt.setName('name').setDescription('Running server').setRequired(true).setAutocomplete(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('status')
+          .setDescription('Check live status, players, and lease countdown for a server')
+          .addStringOption((opt) =>
+            opt.setName('name').setDescription('Server name').setRequired(true).setAutocomplete(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('guide')
+          .setDescription('Show how to connect, live status, join address, and game-specific setup steps')
+          .addStringOption((opt) =>
+            opt.setName('name').setDescription('Server name').setRequired(true).setAutocomplete(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('panel')
+          .setDescription('Post or refresh the live auto-updating ServerForge status panel in this channel (Admin)')
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('backup')
+          .setDescription('Create a world backup snapshot for a server (Admin)')
+          .addStringOption((opt) =>
+            opt.setName('name').setDescription('Server to back up').setRequired(true).setAutocomplete(true)
+          )
+          .addStringOption((opt) =>
+            opt.setName('note').setDescription('Optional backup label/note').setMaxLength(120)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('say')
+          .setDescription('Broadcast an in-game announcement to a running server (Admin)')
+          .addStringOption((opt) =>
+            opt.setName('name').setDescription('Running server').setRequired(true).setAutocomplete(true)
+          )
+          .addStringOption((opt) =>
+            opt.setName('message').setDescription('Announcement text').setRequired(true).setMaxLength(200)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('whitelist')
+          .setDescription('Manage a Minecraft server whitelist via RCON (Admin)')
+          .addStringOption((opt) =>
+            opt.setName('name').setDescription('Running Minecraft server').setRequired(true).setAutocomplete(true)
+          )
+          .addStringOption((opt) =>
+            opt
+              .setName('action')
+              .setDescription('Whitelist action')
+              .setRequired(true)
+              .addChoices(
+                { name: 'Add player', value: 'add' },
+                { name: 'Remove player', value: 'remove' },
+                { name: 'List whitelisted players', value: 'list' }
+              )
+          )
+          .addStringOption((opt) =>
+            opt.setName('player').setDescription('Minecraft username (required for add/remove)').setMaxLength(32)
+          )
+      )
+      .toJSON(),
+  ];
+}
+
+export function buildGuideActionRow(instanceId: string): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`sf:guide:${instanceId}`)
+      .setLabel('How to Connect')
+      .setStyle(ButtonStyle.Secondary)
+  );
+}
+
+export function buildServerActionRow(instanceId: string, includeGuide = true): ActionRowBuilder<ButtonBuilder> {
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`sf:extend:${instanceId}`)
+      .setLabel('Extend +1h')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`sf:stop:${instanceId}`)
+      .setLabel('Save & Stop')
+      .setStyle(ButtonStyle.Danger)
+  );
+  if (includeGuide) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`sf:guide:${instanceId}`)
+        .setLabel('How to Connect')
+        .setStyle(ButtonStyle.Secondary)
+    );
+  }
+  return row;
+}
+
 export class DiscordBotService {
   private client: Client | null = null;
   private connected = false;
@@ -391,7 +535,7 @@ export class DiscordBotService {
       .setColor(0x10b981)
       .addFields(
         { name: 'Bot Account', value: this.botTag ?? 'Connected', inline: true },
-        { name: 'Slash Commands', value: '`/server list`, `/server start`, `/server panel`', inline: true }
+        { name: 'Slash Commands', value: '`/server list`, `/server guide`, `/server start`, `/server panel`', inline: true }
       )
       .setTimestamp();
 
@@ -412,17 +556,18 @@ export class DiscordBotService {
     return embed;
   }
 
-  private buildActionRow(instanceId: string): ActionRowBuilder<ButtonBuilder> {
-    return new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`sf:extend:${instanceId}`)
-        .setLabel('Extend +1h')
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(`sf:stop:${instanceId}`)
-        .setLabel('Save & Stop')
-        .setStyle(ButtonStyle.Danger)
-    );
+  private buildActionRow(instanceId: string, includeGuide = true): ActionRowBuilder<ButtonBuilder> {
+    return buildServerActionRow(instanceId, includeGuide);
+  }
+
+  private buildOutcomeComponents(outcome: CommandOutcome): ActionRowBuilder<ButtonBuilder>[] {
+    if (outcome.instanceIdForButtons) {
+      return [this.buildActionRow(outcome.instanceIdForButtons, true)];
+    }
+    if (outcome.guideInstanceId) {
+      return [buildGuideActionRow(outcome.guideInstanceId)];
+    }
+    return [];
   }
 
   private buildStatusPanelComponents(rows: StatusPanelButtonSpec[][]): ActionRowBuilder<ButtonBuilder>[] {
@@ -665,7 +810,7 @@ export class DiscordBotService {
 
         await ch.send({
           embeds: [embed],
-          components: [this.buildActionRow(instance.id)],
+          components: [this.buildActionRow(instance.id, false)],
         });
       } catch (err) {
         console.error('[DiscordBot] Failed to send lease warning:', err);
@@ -724,108 +869,7 @@ export class DiscordBotService {
   }
 
   private buildCommandDefinitions() {
-    return [
-      new SlashCommandBuilder()
-        .setName('server')
-        .setDescription('Manage and temporarily boot game servers on ServerForge')
-        .addSubcommand((sub) => sub.setName('list').setDescription('List available game servers and status'))
-        .addSubcommand((sub) =>
-          sub
-            .setName('start')
-            .setDescription('Temporarily boot a game server')
-            .addStringOption((opt) =>
-              opt.setName('name').setDescription('Server to boot').setRequired(true).setAutocomplete(true)
-            )
-            .addNumberOption((opt) =>
-              opt
-                .setName('hours')
-                .setDescription('Temporary lease duration in hours (e.g. 2, 3, 4)')
-                .setMinValue(0.5)
-                .setMaxValue(12)
-            )
-        )
-        .addSubcommand((sub) =>
-          sub
-            .setName('extend')
-            .setDescription('Extend an active temporary server lease')
-            .addStringOption((opt) =>
-              opt.setName('name').setDescription('Running server').setRequired(true).setAutocomplete(true)
-            )
-            .addIntegerOption((opt) =>
-              opt
-                .setName('minutes')
-                .setDescription('Minutes to add (default: 60)')
-                .setMinValue(15)
-                .setMaxValue(240)
-            )
-        )
-        .addSubcommand((sub) =>
-          sub
-            .setName('stop')
-            .setDescription('Gracefully save and stop a running game server')
-            .addStringOption((opt) =>
-              opt.setName('name').setDescription('Running server').setRequired(true).setAutocomplete(true)
-            )
-        )
-        .addSubcommand((sub) =>
-          sub
-            .setName('status')
-            .setDescription('Check live status, players, and lease countdown for a server')
-            .addStringOption((opt) =>
-              opt.setName('name').setDescription('Server name').setRequired(true).setAutocomplete(true)
-            )
-        )
-        .addSubcommand((sub) =>
-          sub
-            .setName('panel')
-            .setDescription('Post or refresh the live auto-updating ServerForge status panel in this channel (Admin)')
-        )
-        .addSubcommand((sub) =>
-          sub
-            .setName('backup')
-            .setDescription('Create a world backup snapshot for a server (Admin)')
-            .addStringOption((opt) =>
-              opt.setName('name').setDescription('Server to back up').setRequired(true).setAutocomplete(true)
-            )
-            .addStringOption((opt) =>
-              opt.setName('note').setDescription('Optional backup label/note').setMaxLength(120)
-            )
-        )
-        .addSubcommand((sub) =>
-          sub
-            .setName('say')
-            .setDescription('Broadcast an in-game announcement to a running server (Admin)')
-            .addStringOption((opt) =>
-              opt.setName('name').setDescription('Running server').setRequired(true).setAutocomplete(true)
-            )
-            .addStringOption((opt) =>
-              opt.setName('message').setDescription('Announcement text').setRequired(true).setMaxLength(200)
-            )
-        )
-        .addSubcommand((sub) =>
-          sub
-            .setName('whitelist')
-            .setDescription('Manage a Minecraft server whitelist via RCON (Admin)')
-            .addStringOption((opt) =>
-              opt.setName('name').setDescription('Running Minecraft server').setRequired(true).setAutocomplete(true)
-            )
-            .addStringOption((opt) =>
-              opt
-                .setName('action')
-                .setDescription('Whitelist action')
-                .setRequired(true)
-                .addChoices(
-                  { name: 'Add player', value: 'add' },
-                  { name: 'Remove player', value: 'remove' },
-                  { name: 'List whitelisted players', value: 'list' }
-                )
-            )
-            .addStringOption((opt) =>
-              opt.setName('player').setDescription('Minecraft username (required for add/remove)').setMaxLength(32)
-            )
-        )
-        .toJSON(),
-    ];
+    return buildServerSlashCommands();
   }
 
   private async loginClient(token: string, waitForReady = false): Promise<void> {
@@ -914,7 +958,7 @@ export class DiscordBotService {
     }
   }
 
-  private async handleButtonInteraction(interaction: ButtonInteraction): Promise<void> {
+  async handleButtonInteraction(interaction: ButtonInteraction): Promise<void> {
     const [, action, instanceId] = interaction.customId.split(':');
     const actor = this.extractActor(interaction);
 
@@ -924,12 +968,21 @@ export class DiscordBotService {
       return;
     }
 
+    if (action === 'guide' && instanceId) {
+      await interaction.deferReply({ ephemeral: true });
+      const outcome = await this.handler.handleGuide(instanceId);
+      await interaction.editReply({
+        embeds: [this.buildEmbed(outcome)],
+      });
+      return;
+    }
+
     if (action === 'panel_start' && instanceId) {
       await interaction.deferReply({ ephemeral: true });
       const outcome = await this.handler.handleStart(actor, instanceId);
       await interaction.editReply({
         embeds: [this.buildEmbed(outcome)],
-        components: outcome.instanceIdForButtons ? [this.buildActionRow(outcome.instanceIdForButtons)] : [],
+        components: this.buildOutcomeComponents(outcome),
       });
       this.scheduleStatusPanelUpdate();
       return;
@@ -1010,7 +1063,7 @@ export class DiscordBotService {
     };
   }
 
-  private async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
     const sub = interaction.options.getSubcommand();
     const actor = this.extractActor(interaction);
 
@@ -1053,7 +1106,7 @@ export class DiscordBotService {
       const outcome = await this.handler.handleStart(actor, serverName, hours);
       await interaction.editReply({
         embeds: [this.buildEmbed(outcome)],
-        components: outcome.instanceIdForButtons ? [this.buildActionRow(outcome.instanceIdForButtons)] : [],
+        components: this.buildOutcomeComponents(outcome),
       });
       this.scheduleStatusPanelUpdate();
       return;
@@ -1083,7 +1136,16 @@ export class DiscordBotService {
       const outcome = await this.handler.handleStatus(serverName);
       await interaction.editReply({
         embeds: [this.buildEmbed(outcome)],
-        components: outcome.instanceIdForButtons ? [this.buildActionRow(outcome.instanceIdForButtons)] : [],
+        components: this.buildOutcomeComponents(outcome),
+      });
+      return;
+    }
+
+    if (sub === 'guide') {
+      await interaction.deferReply();
+      const outcome = await this.handler.handleGuide(serverName);
+      await interaction.editReply({
+        embeds: [this.buildEmbed(outcome)],
       });
       return;
     }

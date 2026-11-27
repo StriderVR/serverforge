@@ -32,4 +32,45 @@ describe('Shared Zod Schemas', () => {
     expect(settings.defaultIdleTimeoutMinutes).toBe(30);
     expect(settings.warningBeforeStopMinutes).toBe(10);
   });
+
+  it('accepts GameTemplateSchema with and without optional connectSteps', () => {
+    const baseTemplate = {
+      id: 'sample-game',
+      name: 'Sample Game',
+      shortName: 'Sample',
+      description: 'Test game template',
+      resources: { minRamGb: 2, recommendedRamGb: 4, minDiskGb: 5 },
+      ports: [{ key: 'game', label: 'Game', defaultPort: 7777, protocol: 'udp' as const }],
+      runtimes: { preferred: 'docker' as const, docker: { image: 'example/game:latest' } },
+    };
+
+    const withoutSteps = GameTemplateSchema.parse(baseTemplate);
+    expect(withoutSteps.connectSteps).toBeUndefined();
+
+    const withSteps = GameTemplateSchema.parse({
+      ...baseTemplate,
+      connectSteps: ['  Open game  ', 'Connect to {address} (host {host}, port {port})'],
+    });
+    expect(withSteps.connectSteps).toEqual([
+      'Open game',
+      'Connect to {address} (host {host}, port {port})',
+    ]);
+  });
+
+  it('rejects invalid connectSteps entries in GameTemplateSchema', () => {
+    const baseTemplate = {
+      id: 'sample-game',
+      name: 'Sample Game',
+      shortName: 'Sample',
+      description: 'Test game template',
+      resources: { minRamGb: 2, recommendedRamGb: 4, minDiskGb: 5 },
+      ports: [{ key: 'game', label: 'Game', defaultPort: 7777, protocol: 'udp' as const }],
+      runtimes: { preferred: 'docker' as const, docker: { image: 'example/game:latest' } },
+    };
+
+    expect(GameTemplateSchema.safeParse({ ...baseTemplate, connectSteps: ['Open game', ''] }).success).toBe(false);
+    expect(GameTemplateSchema.safeParse({ ...baseTemplate, connectSteps: ['   '] }).success).toBe(false);
+    expect(GameTemplateSchema.safeParse({ ...baseTemplate, connectSteps: 'Open game' }).success).toBe(false);
+    expect(GameTemplateSchema.safeParse({ ...baseTemplate, connectSteps: [123] }).success).toBe(false);
+  });
 });

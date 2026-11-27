@@ -57,6 +57,11 @@ const SLASH_COMMANDS: Array<{
 }> = [
   { cmd: '/server list', desc: 'List all Discord-enabled servers, join info & slots', role: 'Everyone' },
   { cmd: '/server status <name>', desc: 'Check live players, memory & lease timer', role: 'Everyone' },
+  {
+    cmd: '/server guide <name>',
+    desc: 'Show live status, copyable join address, modpack & game-specific connect steps',
+    role: 'Everyone',
+  },
   { cmd: '/server start <name> [hours]', desc: 'Temporarily boot a game server with idle auto-stop', role: 'Allowed Role' },
   { cmd: '/server extend <name> [minutes]', desc: 'Add extra time to an active temporary lease', role: 'Allowed Role' },
   { cmd: '/server stop <name>', desc: 'Gracefully save & stop (starter or Admin)', role: 'Allowed Role' },
@@ -659,8 +664,8 @@ export function DiscordBotTab({
                   )}
                 </div>
                 <span className="field-hint">
-                  Posts a persistent embed with live player counts, join addresses &amp; Start/Extend/Stop buttons that
-                  auto-updates whenever servers change or every 60s.
+                  Posts a persistent embed with live player counts, join addresses &amp; Start/Extend/Stop/How to Connect
+                  buttons that auto-updates whenever servers change or every 60s.
                 </span>
               </div>
 

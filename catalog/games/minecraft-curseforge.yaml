@@ -10,6 +10,10 @@ category: sandbox
 description: "Dedicated modded Minecraft server built directly from any CurseForge modpack (All the Mods, Better MC, RLCraft, Create, Prominence II, etc.) with automatic Java 8/17/21/25 runtime selection."
 accentColor: "#f97316"
 joinHint: "Launch matching CurseForge pack -> Multiplayer -> {{HOST}}:{{PORT_GAME}}"
+connectSteps:
+  - "Install the matching CurseForge modpack and version using the CurseForge App (or Prism Launcher)."
+  - "Launch Minecraft through that modpack profile."
+  - "Go to Multiplayer -> Add Server, enter {address}, and click Join Server."
 resources:
   minRamGb: 6
   recommendedRamGb: 8

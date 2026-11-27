@@ -5,6 +5,10 @@ category: automation
 description: "Headless Factorio 2.0 / Space Age multiplayer server with RCON control and automatic map saves."
 accentColor: "#ea580c"
 joinHint: "Multiplayer -> Connect to address -> {{HOST}}:{{PORT_GAME}}"
+connectSteps:
+  - "Launch Factorio (make sure your game version matches the server)."
+  - "Click Multiplayer -> Connect to address."
+  - "Enter {address} and click Connect (sync mods if prompted)."
 resources:
   minRamGb: 1
   recommendedRamGb: 4

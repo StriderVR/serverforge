@@ -5,6 +5,10 @@ category: survival
 description: "Dedicated Palworld multiplayer server with built-in REST API player queries and safe world saving."
 accentColor: "#0ea5e9"
 joinHint: "Join Multiplayer Game -> Bottom IP field -> {{HOST}}:{{PORT_GAME}}"
+connectSteps:
+  - "Launch Palworld and click Join Multiplayer Game."
+  - "At the bottom of the server browser, enter {address} into the direct-connect field."
+  - "If the server requires a join password, check Enter Password and click Connect."
 resources:
   minRamGb: 8
   recommendedRamGb: 16
