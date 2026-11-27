@@ -484,7 +484,8 @@ export function NetworkingIntegrationsTab({
               No servers deployed yet. Deploy a game server to see its exact port-forwarding table here.
             </p>
           ) : (
-            <table className="data-table">
+            <div className="table-scroll">
+              <table className="data-table">
               <thead>
                 <tr>
                   <th>Server</th>
@@ -523,7 +524,8 @@ export function NetworkingIntegrationsTab({
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
         </div>
       </section>

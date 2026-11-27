@@ -570,7 +570,7 @@ export function DiscordBotTab({
                     <select
                       id="set-channel"
                       className="select"
-                      style={{ flex: 1, minWidth: 200 }}
+                      style={{ flex: '1 1 160px', minWidth: 0 }}
                       value={settings.discordNotifyChannelId}
                       onChange={(e) => onChange({ discordNotifyChannelId: e.target.value })}
                     >
@@ -587,7 +587,7 @@ export function DiscordBotTab({
                     <input
                       id="set-channel"
                       className="input mono"
-                      style={{ flex: 1, minWidth: 200 }}
+                      style={{ flex: '1 1 160px', minWidth: 0 }}
                       value={settings.discordNotifyChannelId}
                       onChange={(e) => onChange({ discordNotifyChannelId: e.target.value })}
                       placeholder="Channel ID for crash, auto-stop & reboot alerts"
@@ -615,7 +615,7 @@ export function DiscordBotTab({
                     <select
                       id="set-panel-channel"
                       className="select"
-                      style={{ flex: 1, minWidth: 200 }}
+                      style={{ flex: '1 1 160px', minWidth: 0 }}
                       value={settings.discordStatusPanelChannelId}
                       onChange={(e) => onChange({ discordStatusPanelChannelId: e.target.value })}
                     >
@@ -632,7 +632,7 @@ export function DiscordBotTab({
                     <input
                       id="set-panel-channel"
                       className="input mono"
-                      style={{ flex: 1, minWidth: 200 }}
+                      style={{ flex: '1 1 160px', minWidth: 0 }}
                       value={settings.discordStatusPanelChannelId}
                       onChange={(e) => onChange({ discordStatusPanelChannelId: e.target.value })}
                       placeholder="Optional channel ID for persistent live status board"

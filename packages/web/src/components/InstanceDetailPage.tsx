@@ -1337,7 +1337,8 @@ export function InstanceDetailPage({
               No backups created yet. Backups are saved under <code className="mono">data/backups/{detail.id}</code>.
             </p>
           ) : (
-            <table className="data-table">
+            <div className="table-scroll">
+              <table className="data-table">
               <thead>
                 <tr>
                   <th>Archive</th>
@@ -1425,7 +1426,8 @@ export function InstanceDetailPage({
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
 
           {/* Scheduled Backups & Retention Policy (Issue #10) */}

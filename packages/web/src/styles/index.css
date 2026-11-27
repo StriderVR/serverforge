@@ -178,6 +178,7 @@ pre,
   padding: 28px 34px 48px;
   max-width: 1320px;
   width: 100%;
+  min-width: 0;
   margin: 0 auto;
 }
 
@@ -1491,6 +1492,38 @@ pre,
   line-height: 1.45;
 }
 
+/* Table Scroll Wrapper & Templates Grid */
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.templates-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 18px;
+}
+
+/* Mobile Header & Drawer Backdrop (hidden on desktop) */
+.mobile-header {
+  display: none;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+.sidebar-close-btn {
+  display: none;
+}
+
+.modal-card {
+  max-width: min(460px, calc(100vw - 24px));
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 /* Responsive */
 @media (max-width: 980px) {
   .app-shell {
@@ -1519,7 +1552,8 @@ pre,
   }
 
   .form-grid,
-  .settings-grid-two {
+  .settings-grid-two,
+  .templates-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1530,6 +1564,165 @@ pre,
   .sticky-save-bar {
     left: 16px;
     right: 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  html,
+  body,
+  .app-shell {
+    overflow-x: clip;
+    max-width: 100%;
+  }
+
+  .mobile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: calc(10px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 10px calc(14px + env(safe-area-inset-left, 0px));
+  }
+
+  .mobile-menu-btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    background: rgba(2, 6, 23, 0.72);
+    backdrop-filter: blur(2px);
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(290px, 84vw);
+    height: 100dvh;
+    z-index: 50;
+    border-right: 1px solid var(--border-subtle);
+    border-bottom: none;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px));
+    transform: translateX(-105%);
+    transition: transform 200ms ease;
+    overflow-y: auto;
+  }
+
+  .sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  .sidebar-close-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .nav-list {
+    flex-direction: column;
+    flex-wrap: nowrap;
+  }
+
+  .nav-item {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .main-content {
+    padding: 16px calc(12px + env(safe-area-inset-right, 0px)) calc(32px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px));
+    min-width: 0;
+  }
+
+  .tabs,
+  .settings-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 6px;
+    padding-bottom: 4px;
+  }
+
+  .tabs::-webkit-scrollbar,
+  .settings-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab-btn,
+  .settings-tab-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    min-height: 44px;
+  }
+
+  .btn,
+  .input,
+  .select {
+    min-height: 44px;
+  }
+
+  .btn-sm {
+    min-height: 38px;
+  }
+
+  .btn-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .console-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .sticky-save-bar {
+    left: calc(12px + env(safe-area-inset-left, 0px));
+    right: calc(12px + env(safe-area-inset-right, 0px));
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .instance-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .metrics-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .page-header {
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .page-header h1 {
+    font-size: 19px;
+  }
+
+  .modal-card {
+    max-width: calc(100vw - 20px);
+    max-height: calc(100dvh - 24px);
+    overflow-y: auto;
   }
 }
 
